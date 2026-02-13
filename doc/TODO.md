@@ -7,7 +7,7 @@ Based on [pipit-lang-spec-v0.1.0](spec/pipit-lang-spec-v0.1.0.md).
 ## Project Scaffold
 - [x] Decide implementation language for `pcc` compiler → Rust ([ADR-001](adr/001-rust-for-pcc.md))
 - [x] Set up build system and project structure → `compiler/` (Rust) + `runtime/` (C++)
-- [ ] CI pipeline: format → lint → typecheck → test
+- [x] CI pipeline: format → lint → typecheck → test → `.github/workflows/ci.yml`
 - [x] Create `doc/adr/` for architecture decisions
 
 ## Lexer (§2)
