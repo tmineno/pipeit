@@ -1,0 +1,29 @@
+# example.pdl — OFDM receiver (Pipit)
+# ======================================
+
+# Global settings
+set mem = 64MB
+set overrun = drop
+
+# Compile-time constants
+const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]
+const fft_size = 256
+
+# Runtime parameters
+param gain = 1.0
+
+# Sub-pipeline definition
+define frontend(n) {
+    adc(0) | mul($gain) | fft(n) | c2r()
+}
+
+# Main capture task: 10MHz target rate
+clock 10MHz capture {
+    frontend(fft_size) | :raw | fir(coeff) | ?filtered -> signal
+    :raw | mag() | stdout()
+}
+
+# Post-processing task: 1kHz target rate
+clock 1kHz drain {
+    @signal | decimate(10000) | csvwrite("output.csv")
+}

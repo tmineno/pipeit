@@ -1,0 +1,16 @@
+[package]
+name = "pcc"
+version = "0.1.0"
+edition = "2021"
+description = "Pipit Compiler Collection — compiles .pdl pipeline definitions to native executables"
+
+[[bin]]
+name = "pcc"
+path = "src/main.rs"
+
+[lib]
+name = "pcc"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }

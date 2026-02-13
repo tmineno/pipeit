@@ -1,0 +1,33 @@
+# receiver.pdl — Adaptive OFDM receiver with mode switching
+# ==========================================================
+
+set mem = 128MB
+set overrun = drop
+
+const sync_coeff = [1.0, -1.0, 1.0, -1.0]
+const data_coeff = [0.1, 0.2, 0.4, 0.2, 0.1]
+
+clock 10MHz receiver {
+    # control subgraph: runs continuously across all modes
+    # correlate -> detect supplies ctrl value
+    control {
+        adc(0) | correlate() | detect() -> ctrl
+    }
+
+    # mode 0: sync mode — acquire frame synchronization
+    mode sync {
+        adc(0) | fir(sync_coeff) | ?sync_out -> sync_result
+    }
+
+    # mode 1: data mode — OFDM demodulation
+    mode data {
+        adc(0) | fft(256) | c2r() | fir(data_coeff) | ?data_out -> payload
+    }
+
+    # ctrl=0 -> sync, ctrl=1 -> data
+    switch(ctrl, sync, data) default sync
+}
+
+clock 1kHz logger {
+    @payload | decimate(10000) | csvwrite("received.csv")
+}
