@@ -26,5 +26,6 @@ Implement `pcc` in Rust.
 ## Exit criteria
 
 Revisit if:
+
 - Rust build times become a bottleneck for development iteration
 - Actor registry reading requires deep C++ parsing (currently only `constexpr` metadata)

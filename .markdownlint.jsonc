@@ -1,0 +1,16 @@
+{
+  // Allow long lines (specs and diagrams need them)
+  "MD013": false,
+  // Allow duplicate headings across different sections
+  "MD024": { "siblings_only": true },
+  // Allow inline HTML
+  "MD033": false,
+  // Allow bare URLs
+  "MD034": false,
+  // Allow fenced code blocks without language (plain-text diagrams, DSL examples)
+  "MD040": false,
+  // Allow $ shell prompt in command examples
+  "MD014": false,
+  // Allow compact table style (no space padding required)
+  "MD060": false
+}

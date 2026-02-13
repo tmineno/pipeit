@@ -10,13 +10,13 @@ Pipit is a domain-specific language for describing clock-driven, real-time data 
 - Describe pipelines in `.pdl` files with a concise pipe-based syntax
 - Compile to native executables via C++ code generation
 
-```
+```text
 source.pdl → pcc → source_gen.cpp → g++/clang++ → executable
 ```
 
 ## Example
 
-```
+```text
 const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]
 
 clock 10MHz capture {

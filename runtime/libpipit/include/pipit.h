@@ -5,9 +5,9 @@
 // This header provides the ACTOR macro and runtime API for Pipit pipelines.
 // Placeholder for v0.1.0 development.
 
+#include <complex>
 #include <cstdint>
 #include <span>
-#include <complex>
 
 // Actor return codes
 constexpr int ACTOR_OK = 0;

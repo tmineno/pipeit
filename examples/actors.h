@@ -1,6 +1,6 @@
+#include <complex>
 #include <pipit.h>
 #include <span>
-#include <complex>
 
 // ── Source actors ──
 
@@ -26,11 +26,10 @@ ACTOR(mag, IN(cfloat, 1), OUT(float, 1)) {
     return ACTOR_OK;
 }
 
-ACTOR(fir, IN(float, N), OUT(float, 1),
-      PARAM(int, N),
-      PARAM(std::span<const float>, coeff)) {
+ACTOR(fir, IN(float, N), OUT(float, 1), PARAM(int, N), PARAM(std::span<const float>, coeff)) {
     float y = 0;
-    for (int i = 0; i < N; i++) y += coeff[i] * in[i];
+    for (int i = 0; i < N; i++)
+        y += coeff[i] * in[i];
     out[0] = y;
     return ACTOR_OK;
 }

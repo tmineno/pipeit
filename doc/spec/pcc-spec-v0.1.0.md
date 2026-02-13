@@ -378,6 +378,7 @@ When `--emit cpp` is used, the generated file contains:
 6. **`main()`**: CLI argument parser (`--duration`, `--threads`, `--param`, `--probe`, `--stats`), thread launch, signal handler, graceful shutdown
 
 The generated code depends only on:
+
 - `libpipit` (runtime library)
 - Actor headers provided via `-I`
 - C++17 standard library
