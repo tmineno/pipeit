@@ -20,5 +20,9 @@ Thumbs.db
 *.swo
 .claude/
 
+# Compiled binaries
+a.out
+*.out
+
 # Temp
 tmp/
