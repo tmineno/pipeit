@@ -61,7 +61,27 @@ fn main() {
         eprintln!("pcc: emit   = {:?}", cli.emit);
     }
 
-    // TODO: implement compiler pipeline
+    // ── Load actor registry ──
+    let mut registry = pcc::registry::Registry::new();
+    for path in &cli.include {
+        match registry.load_header(path) {
+            Ok(n) => {
+                if cli.verbose {
+                    eprintln!("pcc: loaded {} actors from {}", n, path.display());
+                }
+            }
+            Err(e) => {
+                eprintln!("pcc: error: {}", e);
+                std::process::exit(2);
+            }
+        }
+    }
+
+    if cli.verbose {
+        eprintln!("pcc: {} actors registered", registry.len());
+    }
+
+    // TODO: implement remaining compiler pipeline phases
     eprintln!("pcc: not yet implemented");
     std::process::exit(1);
 }
