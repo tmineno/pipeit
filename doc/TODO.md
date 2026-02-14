@@ -96,30 +96,32 @@ Based on [pipit-lang-spec-v0.1.0](spec/pipit-lang-spec-v0.1.0.md).
 - [x] Ring buffer static allocation code
 - [x] Per-task schedule loop (actor firing sequence)
 - [x] Runtime parameter double-buffering mechanism
-- [ ] Overrun detection and policy (`drop`, `slip`, `backlog`)
+- [x] Overrun detection and policy (`drop`, `slip`, `backlog`)
 - [x] Probe instrumentation (stripped in `--release`)
 - [x] CSDF mode transition logic (ctrl evaluation, mode swap at iteration boundary)
 - [x] `main()` with CLI argument parser
-- [ ] Statistics collection code (`--stats`)
+- [x] Statistics collection code (`--stats`)
+- [x] Actor error propagation (check `operator()` return, exit code 1)
+- [x] Functional probe output (`fprintf` when `--probe` enabled, `#ifndef NDEBUG`)
 
 ## Runtime Library — `libpipit`
 
 - [x] Ring buffer (shared memory, lock-free SPSC)
 - [ ] Scheduler: `static` and `round_robin` strategies
 - [x] Timer / tick generator (OS timer abstraction)
-- [ ] Overrun policies: drop, slip, backlog
+- [x] Overrun policies: drop, slip, backlog (Timer: `last_latency`, `missed_count`, `reset_phase`)
 - [x] Double-buffering for runtime parameters (atomic swap at iteration boundary)
 - [x] Thread management (task → thread mapping)
-- [ ] Statistics collection and reporting
+- [x] Statistics collection and reporting (`pipit::TaskStats`)
 - [x] Signal handling (SIGINT → graceful shutdown)
 
 ## CLI & Integration (§9)
 
-- [ ] CLI flags: `--duration`, `--threads`, `--param`, `--probe`, `--probe-output`, `--stats`
-- [ ] Exit codes: 0 (normal), 1 (runtime error), 2 (startup error)
-- [ ] End-to-end test: spec §11.2 `example.pdl` compiles and runs
-- [ ] End-to-end test: spec §11.3 `receiver.pdl` compiles and runs
-- [ ] Error message quality review (match spec §7 examples)
+- [x] CLI flags: `--duration`, `--threads`, `--param`, `--probe`, `--probe-output`, `--stats`
+- [x] Exit codes: 0 (normal), 1 (runtime error), 2 (startup error)
+- [x] End-to-end test: spec §11.2 `example.pdl` compiles and runs
+- [x] End-to-end test: spec §11.3 `receiver.pdl` compiles and runs
+- [x] Error message quality review (match spec §7 examples, hints in Diagnostic)
 
 ## Visualization
 
@@ -141,8 +143,8 @@ Based on [pipit-lang-spec-v0.1.0](spec/pipit-lang-spec-v0.1.0.md).
 
 ## Polish & Release Prep
 
-- [ ] Compiler error messages match spec format (§7.1)
-- [ ] Runtime error propagation matches spec (§7.2)
-- [ ] `--release` build strips probes to zero cost
-- [ ] Documentation: `pcc` usage guide
+- [x] Compiler error messages match spec format (§7.1, hints in Diagnostic)
+- [x] Runtime error propagation matches spec (§7.2, actor ACTOR_ERROR → exit code 1)
+- [x] `--release` build strips probes to zero cost (`#ifndef NDEBUG`)
+- [x] Documentation: `pcc` usage guide (`doc/pcc-usage-guide.md`)
 - [ ] Performance: compile-time benchmarks on non-trivial graphs

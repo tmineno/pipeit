@@ -295,6 +295,7 @@ impl<'a> GraphBuilder<'a> {
             level: DiagLevel::Error,
             span,
             message,
+            hint: None,
         });
     }
 

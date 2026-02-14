@@ -106,6 +106,7 @@ class Timer {
     Nanos period_;
     Clock::time_point next_;
     bool overrun_ = false;
+    Nanos last_latency_{0};
 
   public:
     explicit Timer(double freq_hz)
@@ -117,13 +118,54 @@ class Timer {
         if (now < next_) {
             std::this_thread::sleep_until(next_);
             overrun_ = false;
+            last_latency_ = Clock::now() - next_;
         } else {
             overrun_ = true;
+            last_latency_ = now - next_;
         }
         next_ += period_;
     }
 
     bool overrun() const { return overrun_; }
+
+    Nanos last_latency() const { return last_latency_; }
+
+    // For backlog policy: how many ticks we've fallen behind
+    int64_t missed_count() const {
+        auto now = Clock::now();
+        if (now < next_)
+            return 0;
+        return static_cast<int64_t>((now - next_).count() / period_.count()) + 1;
+    }
+
+    // For slip policy: re-anchor to current time
+    void reset_phase() {
+        next_ = Clock::now() + period_;
+        overrun_ = false;
+    }
+};
+
+// ── Statistics collection ────────────────────────────────────────────────────
+
+struct TaskStats {
+    uint64_t ticks = 0;
+    uint64_t missed = 0;
+    int64_t max_latency_ns = 0;
+    int64_t total_latency_ns = 0;
+
+    void record_tick(std::chrono::nanoseconds latency) {
+        ++ticks;
+        auto ns = latency.count();
+        if (ns > max_latency_ns)
+            max_latency_ns = ns;
+        total_latency_ns += ns;
+    }
+
+    void record_miss() { ++missed; }
+
+    int64_t avg_latency_ns() const {
+        return ticks > 0 ? total_latency_ns / static_cast<int64_t>(ticks) : 0;
+    }
 };
 
 } // namespace pipit

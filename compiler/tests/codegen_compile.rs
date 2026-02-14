@@ -496,3 +496,264 @@ fn define_with_probe_and_tap() {
         "define_probe_tap",
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 3. Overrun policy tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn overrun_policy_drop() {
+    assert_inline_compiles(
+        "set overrun = drop\nclock 1kHz t { adc(0) | stdout() }",
+        "overrun_drop",
+    );
+}
+
+#[test]
+fn overrun_policy_slip() {
+    assert_inline_compiles(
+        "set overrun = slip\nclock 1kHz t { adc(0) | stdout() }",
+        "overrun_slip",
+    );
+}
+
+#[test]
+fn overrun_policy_backlog() {
+    assert_inline_compiles(
+        "set overrun = backlog\nclock 1kHz t { adc(0) | stdout() }",
+        "overrun_backlog",
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 4. End-to-end run tests — compile + execute generated binaries
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Compile a PDL file to a binary and run it with given args.
+/// Returns (exit_code, stdout, stderr).
+fn compile_and_run_pdl(pdl_name: &str, run_args: &[&str]) -> Option<(i32, String, String)> {
+    let cxx = find_cxx_compiler()?;
+    let root = project_root();
+    let pdl_path = root.join("examples").join(pdl_name);
+    let actors_h = root.join("examples").join("actors.h");
+    let runtime_include = root.join("runtime").join("libpipit").join("include");
+
+    let pcc = pcc_binary();
+    let gen = Command::new(&pcc)
+        .arg(pdl_path.to_str().unwrap())
+        .arg("-I")
+        .arg(actors_h.to_str().unwrap())
+        .arg("--emit")
+        .arg("cpp")
+        .output()
+        .expect("failed to run pcc");
+
+    if !gen.status.success() {
+        panic!(
+            "pcc failed for {}:\n{}",
+            pdl_name,
+            String::from_utf8_lossy(&gen.stderr)
+        );
+    }
+
+    let cpp = String::from_utf8(gen.stdout).unwrap();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_dir = std::env::temp_dir();
+    let cpp_file = tmp_dir.join(format!("pipit_run_{}.cpp", n));
+    let bin_file = tmp_dir.join(format!("pipit_run_{}", n));
+
+    std::fs::write(&cpp_file, &cpp).expect("write cpp");
+
+    let compile = Command::new(&cxx)
+        .arg("-std=c++20")
+        .arg("-O0")
+        .arg("-I")
+        .arg(runtime_include.to_str().unwrap())
+        .arg("-I")
+        .arg(root.join("examples").to_str().unwrap())
+        .arg(&cpp_file)
+        .arg("-lpthread")
+        .arg("-o")
+        .arg(&bin_file)
+        .output()
+        .expect("failed to compile");
+
+    let _ = std::fs::remove_file(&cpp_file);
+
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&bin_file);
+        panic!(
+            "C++ compile failed for '{}':\n{}\n\nSource:\n{}",
+            pdl_name,
+            String::from_utf8_lossy(&compile.stderr),
+            cpp
+        );
+    }
+
+    let run = Command::new("timeout")
+        .arg("10")
+        .arg(&bin_file)
+        .args(run_args)
+        .output()
+        .expect("failed to run binary");
+
+    let _ = std::fs::remove_file(&bin_file);
+
+    Some((
+        run.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&run.stdout).to_string(),
+        String::from_utf8_lossy(&run.stderr).to_string(),
+    ))
+}
+
+/// Compile inline PDL to a binary and run it.
+fn compile_and_run_inline(
+    pdl_source: &str,
+    test_name: &str,
+    run_args: &[&str],
+) -> Option<(i32, String, String)> {
+    let cxx = find_cxx_compiler()?;
+    let root = project_root();
+    let actors_h = root.join("examples").join("actors.h");
+    let runtime_include = root.join("runtime").join("libpipit").join("include");
+
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_dir = std::env::temp_dir();
+    let pdl_file = tmp_dir.join(format!("pipit_runinl_{}.pdl", n));
+    std::fs::write(&pdl_file, pdl_source).expect("write pdl");
+
+    let pcc = pcc_binary();
+    let gen = Command::new(&pcc)
+        .arg(pdl_file.to_str().unwrap())
+        .arg("-I")
+        .arg(actors_h.to_str().unwrap())
+        .arg("--emit")
+        .arg("cpp")
+        .output()
+        .expect("failed to run pcc");
+
+    let _ = std::fs::remove_file(&pdl_file);
+
+    if !gen.status.success() {
+        panic!(
+            "pcc failed for '{}':\n{}",
+            test_name,
+            String::from_utf8_lossy(&gen.stderr)
+        );
+    }
+
+    let cpp = String::from_utf8(gen.stdout).unwrap();
+    let cpp_file = tmp_dir.join(format!("pipit_runinl_{}.cpp", n));
+    let bin_file = tmp_dir.join(format!("pipit_runinl_{}", n));
+
+    std::fs::write(&cpp_file, &cpp).expect("write cpp");
+
+    let compile = Command::new(&cxx)
+        .arg("-std=c++20")
+        .arg("-O0")
+        .arg("-I")
+        .arg(runtime_include.to_str().unwrap())
+        .arg("-I")
+        .arg(root.join("examples").to_str().unwrap())
+        .arg(&cpp_file)
+        .arg("-lpthread")
+        .arg("-o")
+        .arg(&bin_file)
+        .output()
+        .expect("failed to compile");
+
+    let _ = std::fs::remove_file(&cpp_file);
+
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&bin_file);
+        panic!(
+            "C++ compile failed for '{}':\n{}\n\nSource:\n{}",
+            test_name,
+            String::from_utf8_lossy(&compile.stderr),
+            cpp
+        );
+    }
+
+    let run = Command::new("timeout")
+        .arg("10")
+        .arg(&bin_file)
+        .args(run_args)
+        .output()
+        .expect("failed to run binary");
+
+    let _ = std::fs::remove_file(&bin_file);
+
+    Some((
+        run.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&run.stdout).to_string(),
+        String::from_utf8_lossy(&run.stderr).to_string(),
+    ))
+}
+
+#[test]
+fn gain_pdl_runs() {
+    if let Some((code, _stdout, stderr)) = compile_and_run_pdl("gain.pdl", &["--duration", "0.01"])
+    {
+        assert_eq!(code, 0, "gain.pdl exited with code {}: {}", code, stderr);
+    }
+}
+
+#[test]
+fn example_pdl_runs() {
+    if let Some((code, _stdout, stderr)) =
+        compile_and_run_pdl("example.pdl", &["--duration", "0.01"])
+    {
+        assert_eq!(code, 0, "example.pdl exited with code {}: {}", code, stderr);
+    }
+}
+
+#[test]
+fn feedback_pdl_runs() {
+    if let Some((code, _stdout, stderr)) =
+        compile_and_run_pdl("feedback.pdl", &["--duration", "0.01"])
+    {
+        assert_eq!(
+            code, 0,
+            "feedback.pdl exited with code {}: {}",
+            code, stderr
+        );
+    }
+}
+
+#[test]
+fn exit_code_2_on_unknown_flag() {
+    if let Some((code, _stdout, _stderr)) = compile_and_run_pdl("gain.pdl", &["--nonexistent-flag"])
+    {
+        assert_eq!(
+            code, 2,
+            "expected exit code 2 for unknown flag, got {}",
+            code
+        );
+    }
+}
+
+#[test]
+fn stats_flag_produces_output() {
+    if let Some((code, _stdout, stderr)) =
+        compile_and_run_pdl("gain.pdl", &["--duration", "0.01", "--stats"])
+    {
+        assert_eq!(code, 0, "gain.pdl --stats exited {}: {}", code, stderr);
+        assert!(
+            stderr.contains("[stats]"),
+            "expected [stats] in stderr, got: {}",
+            stderr
+        );
+    }
+}
+
+#[test]
+fn duration_with_suffix() {
+    // Test --duration with 's' suffix
+    if let Some((code, _stdout, stderr)) = compile_and_run_inline(
+        "clock 1kHz t { adc(0) | stdout() }",
+        "duration_suffix",
+        &["--duration", "0.01s"],
+    ) {
+        assert_eq!(code, 0, "duration suffix test failed: {}", stderr);
+    }
+}

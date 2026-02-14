@@ -112,6 +112,7 @@ impl<'a> CodegenCtx<'a> {
         self.emit_param_storage();
         self.emit_shared_buffers();
         self.emit_stop_flag();
+        self.emit_stats_storage();
         self.emit_task_functions();
         self.emit_main();
     }
@@ -256,7 +257,34 @@ impl<'a> CodegenCtx<'a> {
 
     fn emit_stop_flag(&mut self) {
         self.out
-            .push_str("static std::atomic<bool> _stop{false};\n\n");
+            .push_str("static std::atomic<bool> _stop{false};\n");
+        self.out
+            .push_str("static std::atomic<int> _exit_code{0};\n\n");
+    }
+
+    // ── Phase 5b: Statistics and probe storage ────────────────────────────
+
+    fn emit_stats_storage(&mut self) {
+        self.out.push_str("static bool _stats_enabled = false;\n");
+
+        let mut task_names: Vec<&String> = self.schedule.tasks.keys().collect();
+        task_names.sort();
+        for name in &task_names {
+            let _ = writeln!(self.out, "static pipit::TaskStats _stats_{};", name);
+        }
+
+        // Probe flags and output
+        if !self.resolved.probes.is_empty() && !self.options.release {
+            self.out.push_str("static FILE* _probe_output = stderr;\n");
+            for probe in &self.resolved.probes {
+                let _ = writeln!(
+                    self.out,
+                    "static bool _probe_{}_enabled = false;",
+                    probe.name
+                );
+            }
+        }
+        self.out.push('\n');
     }
 
     // ── Phase 6: Task functions ─────────────────────────────────────────
@@ -290,6 +318,34 @@ impl<'a> CodegenCtx<'a> {
             self.out
                 .push_str("    while (!_stop.load(std::memory_order_acquire)) {\n");
             self.out.push_str("        _timer.wait();\n");
+
+            // Overrun policy + stats
+            let policy = self.get_overrun_policy().to_string();
+            match policy.as_str() {
+                "drop" => {
+                    let _ = writeln!(
+                        self.out,
+                        "        if (_timer.overrun()) {{ if (_stats_enabled) _stats_{}.record_miss(); continue; }}",
+                        task_name
+                    );
+                }
+                "slip" => {
+                    self.out
+                        .push_str("        if (_timer.overrun()) _timer.reset_phase();\n");
+                }
+                "backlog" => {
+                    self.out
+                        .push_str("        int _backlog = _timer.overrun() ? static_cast<int>(_timer.missed_count()) : 0;\n");
+                    self.out
+                        .push_str("        for (int _bl = 0; _bl <= _backlog; ++_bl) {\n");
+                }
+                _ => {}
+            }
+            let _ = writeln!(
+                self.out,
+                "        if (_stats_enabled) _stats_{}.record_tick(_timer.last_latency());",
+                task_name
+            );
 
             // Read runtime params used by this task
             self.emit_param_reads(task_name, task_graph);
@@ -357,6 +413,11 @@ impl<'a> CodegenCtx<'a> {
             }
 
             if meta.k_factor > 1 {
+                self.out.push_str("        }\n");
+            }
+
+            // Close backlog loop if applicable
+            if policy == "backlog" {
                 self.out.push_str("        }\n");
             }
 
@@ -642,21 +703,34 @@ impl<'a> CodegenCtx<'a> {
                 }
             };
 
-        // Construct actor and fire
+        // Construct actor and fire, check return value
         let params = self.format_actor_params(task_name, meta, args);
-        if params.is_empty() {
-            let _ = writeln!(
-                self.out,
-                "{}Actor_{}{{}}({}, {});",
-                indent, actor_name, in_ptr, out_ptr
-            );
+        let call = if params.is_empty() {
+            format!("Actor_{}{{}}({}, {})", actor_name, in_ptr, out_ptr)
         } else {
-            let _ = writeln!(
-                self.out,
-                "{}Actor_{}{{{}}}.operator()({}, {});",
-                indent, actor_name, params, in_ptr, out_ptr
-            );
-        }
+            format!(
+                "Actor_{}{{{}}}.operator()({}, {})",
+                actor_name, params, in_ptr, out_ptr
+            )
+        };
+        let _ = writeln!(self.out, "{}if ({} != ACTOR_OK) {{", indent, call);
+        let _ = writeln!(
+            self.out,
+            "{}    fprintf(stderr, \"runtime error: actor '{}' in task '{}' returned ACTOR_ERROR\\n\");",
+            indent, actor_name, task_name
+        );
+        let _ = writeln!(
+            self.out,
+            "{}    _exit_code.store(1, std::memory_order_release);",
+            indent
+        );
+        let _ = writeln!(
+            self.out,
+            "{}    _stop.store(true, std::memory_order_release);",
+            indent
+        );
+        let _ = writeln!(self.out, "{}    return;", indent);
+        let _ = writeln!(self.out, "{}}}", indent);
     }
 
     fn emit_fork(
@@ -684,21 +758,32 @@ impl<'a> CodegenCtx<'a> {
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
     ) {
         // Probe is a no-op for data flow: downstream shares the upstream buffer.
-        // Only the observation hook is emitted (stripped in release).
+        // Observation hook emits actual data when probe is enabled (stripped in release).
         if !self.options.release {
-            // Resolve the aliased buffer name for the probe comment
             let incoming: Vec<&Edge> = sub.edges.iter().filter(|e| e.target == node.id).collect();
             if let Some(in_edge) = incoming.first() {
                 if let Some(src_buf) = edge_bufs.get(&(in_edge.source, in_edge.target)) {
                     let wire_type = self.infer_edge_wire_type(sub, in_edge.source);
                     let cpp_type = pipit_type_to_cpp(wire_type);
                     let count = self.edge_buffer_tokens(sched, in_edge.source, in_edge.target);
+                    let fmt_spec = match cpp_type {
+                        "float" | "double" => "%f",
+                        "int32_t" | "int16_t" | "int8_t" => "%d",
+                        _ => "%f", // cfloat/cdouble: print real part
+                    };
                     let _ = writeln!(self.out, "{}#ifndef NDEBUG", indent);
+                    let _ = writeln!(self.out, "{}if (_probe_{}_enabled) {{", indent, probe_name);
                     let _ = writeln!(
                         self.out,
-                        "{}// probe: {} -> {} ({} x {})",
-                        indent, probe_name, src_buf, count, cpp_type
+                        "{}    for (int _pi = 0; _pi < {}; ++_pi)",
+                        indent, count
                     );
+                    let _ = writeln!(
+                        self.out,
+                        "{}        fprintf(_probe_output, \"[probe:{}] {}\\n\", {}[_pi]);",
+                        indent, probe_name, fmt_spec, src_buf
+                    );
+                    let _ = writeln!(self.out, "{}}}", indent);
                     let _ = writeln!(self.out, "{}#endif", indent);
                 }
             }
@@ -882,8 +967,8 @@ impl<'a> CodegenCtx<'a> {
     fn emit_main(&mut self) {
         self.out.push_str("int main(int argc, char* argv[]) {\n");
 
-        // CLI argument parsing for runtime params
-        self.emit_cli_param_parsing();
+        // CLI argument parsing
+        self.emit_cli_parsing();
 
         // Signal handler
         self.out.push_str(
@@ -896,7 +981,15 @@ impl<'a> CodegenCtx<'a> {
         task_names.sort();
 
         if task_names.len() == 1 {
-            // Single task: run on main thread
+            // Single task: run on main thread, with optional duration timer
+            self.out.push_str("    if (_duration > 0) {\n");
+            self.out.push_str("        std::thread _dt([&]() {\n");
+            self.out.push_str("            std::this_thread::sleep_for(std::chrono::duration<double>(_duration));\n");
+            self.out
+                .push_str("            _stop.store(true, std::memory_order_release);\n");
+            self.out.push_str("        });\n");
+            self.out.push_str("        _dt.detach();\n");
+            self.out.push_str("    }\n");
             let _ = writeln!(self.out, "    task_{}();", task_names[0]);
         } else {
             // Multiple tasks: spawn threads
@@ -914,72 +1007,174 @@ impl<'a> CodegenCtx<'a> {
             }
         }
 
-        self.out.push_str("    return 0;\n");
+        // Stats output
+        self.emit_stats_output();
+
+        self.out
+            .push_str("    return _exit_code.load(std::memory_order_acquire);\n");
         self.out.push_str("}\n");
     }
 
-    fn emit_cli_param_parsing(&mut self) {
-        if self.resolved.params.is_empty() {
-            return;
-        }
+    fn emit_stats_output(&mut self) {
+        self.out.push_str("    if (_stats_enabled) {\n");
 
-        self.out
-            .push_str("    // Parse --param name=value arguments\n");
-        self.out.push_str("    for (int i = 1; i < argc; ++i) {\n");
-        self.out
-            .push_str("        if (std::string(argv[i]) == \"--param\" && i + 1 < argc) {\n");
-        self.out.push_str("            ++i;\n");
-        self.out.push_str("            std::string arg(argv[i]);\n");
-        self.out.push_str("            auto eq = arg.find('=');\n");
-        self.out
-            .push_str("            if (eq != std::string::npos) {\n");
-        self.out
-            .push_str("                auto name = arg.substr(0, eq);\n");
-        self.out
-            .push_str("                auto val = arg.substr(eq + 1);\n");
+        let mut task_names: Vec<&String> = self.schedule.tasks.keys().collect();
+        task_names.sort();
+        let policy = self.get_overrun_policy().to_string();
 
-        let mut first = true;
-        for (param_name, entry) in &self.resolved.params {
-            let keyword = if first { "if" } else { "else if" };
-            first = false;
-            let stmt = &self.program.statements[entry.stmt_index];
-            let converter = if let StatementKind::Param(p) = &stmt.kind {
-                match self.param_cpp_type(param_name, &p.value) {
-                    "int" => "std::stoi",
-                    "double" => "std::stod",
-                    _ => "std::stof",
-                }
-            } else {
-                "std::stof"
-            };
+        for name in &task_names {
             let _ = writeln!(
                 self.out,
-                "                {} (name == \"{}\") _param_{}.store({}(val), std::memory_order_release);",
-                keyword, param_name, param_name, converter
+                "        fprintf(stderr, \"[stats] task '{}': ticks=%lu, missed=%lu ({}), max_latency=%ldns, avg_latency=%ldns\\n\",\n\
+                             (unsigned long)_stats_{}.ticks, (unsigned long)_stats_{}.missed,\n\
+                             _stats_{}.max_latency_ns, _stats_{}.avg_latency_ns());",
+                name, policy, name, name, name, name
             );
         }
 
+        // Shared buffer stats
+        for buf_name in self.resolved.buffers.keys() {
+            let wire_type = self.infer_buffer_wire_type(buf_name);
+            let cpp_type = pipit_type_to_cpp(wire_type);
+            let _ = writeln!(
+                self.out,
+                "        fprintf(stderr, \"[stats] shared buffer '{}': %zu tokens (%zuB)\\n\",\n\
+                             (size_t)_ringbuf_{}.available(), _ringbuf_{}.available() * sizeof({}));",
+                buf_name, buf_name, buf_name, cpp_type
+            );
+        }
+
+        self.out.push_str("    }\n");
+    }
+
+    fn emit_cli_parsing(&mut self) {
+        // Declare local variables for CLI flags
+        self.out.push_str("    double _duration = 0;\n");
+        self.out.push('\n');
+
+        self.out.push_str("    for (int i = 1; i < argc; ++i) {\n");
+        self.out.push_str("        std::string _arg(argv[i]);\n");
+
+        // --param name=value
+        self.out
+            .push_str("        if (_arg == \"--param\" && i + 1 < argc) {\n");
+        self.out.push_str("            ++i;\n");
+        self.out
+            .push_str("            std::string parg(argv[i]);\n");
+        self.out.push_str("            auto eq = parg.find('=');\n");
+        self.out
+            .push_str("            if (eq != std::string::npos) {\n");
+        self.out
+            .push_str("                auto pname = parg.substr(0, eq);\n");
+        self.out
+            .push_str("                auto pval = parg.substr(eq + 1);\n");
+
+        if !self.resolved.params.is_empty() {
+            let mut first = true;
+            for (param_name, entry) in &self.resolved.params {
+                let keyword = if first { "if" } else { "else if" };
+                first = false;
+                let stmt = &self.program.statements[entry.stmt_index];
+                let converter = if let StatementKind::Param(p) = &stmt.kind {
+                    match self.param_cpp_type(param_name, &p.value) {
+                        "int" => "std::stoi",
+                        "double" => "std::stod",
+                        _ => "std::stof",
+                    }
+                } else {
+                    "std::stof"
+                };
+                let _ = writeln!(
+                    self.out,
+                    "                {} (pname == \"{}\") _param_{}.store({}(pval), std::memory_order_release);",
+                    keyword, param_name, param_name, converter
+                );
+            }
+            self.out.push_str(
+                "                else { fprintf(stderr, \"pipit: unknown param '%s'\\n\", parg.c_str()); return 2; }\n",
+            );
+        }
         self.out.push_str("            }\n");
         self.out.push_str("        }\n");
 
-        // Parse --duration
+        // --duration
         self.out
-            .push_str("        if (std::string(argv[i]) == \"--duration\" && i + 1 < argc) {\n");
-        self.out.push_str("            // Duration handled below\n");
+            .push_str("        else if (_arg == \"--duration\" && i + 1 < argc) {\n");
+        self.out
+            .push_str("            std::string dval(argv[++i]);\n");
+        self.out
+            .push_str("            if (dval == \"inf\") _duration = 0;\n");
+        self.out.push_str(
+            "            else if (dval.back() == 'm') _duration = std::stod(dval.substr(0, dval.size()-1)) * 60;\n",
+        );
+        self.out.push_str(
+            "            else if (dval.back() == 's') _duration = std::stod(dval.substr(0, dval.size()-1));\n",
+        );
+        self.out
+            .push_str("            else _duration = std::stod(dval);\n");
         self.out.push_str("        }\n");
+
+        // --stats
+        self.out
+            .push_str("        else if (_arg == \"--stats\") { _stats_enabled = true; }\n");
+
+        // --probe
+        if !self.resolved.probes.is_empty() && !self.options.release {
+            self.out
+                .push_str("        else if (_arg == \"--probe\" && i + 1 < argc) {\n");
+            self.out
+                .push_str("            std::string pname(argv[++i]);\n");
+            let mut first = true;
+            for probe in &self.resolved.probes {
+                let keyword = if first { "if" } else { "else if" };
+                first = false;
+                let _ = writeln!(
+                    self.out,
+                    "            {} (pname == \"{}\") _probe_{}_enabled = true;",
+                    keyword, probe.name, probe.name
+                );
+            }
+            self.out.push_str(
+                "            else { fprintf(stderr, \"pipit: unknown probe '%s'\\n\", pname.c_str()); return 2; }\n",
+            );
+            self.out.push_str("        }\n");
+
+            // --probe-output
+            self.out
+                .push_str("        else if (_arg == \"--probe-output\" && i + 1 < argc) {\n");
+            self.out
+                .push_str("            std::string ppath(argv[++i]);\n");
+            self.out
+                .push_str("            if (ppath != \"stderr\") {\n");
+            self.out
+                .push_str("                _probe_output = fopen(ppath.c_str(), \"w\");\n");
+            self.out.push_str(
+                "                if (!_probe_output) { fprintf(stderr, \"pipit: cannot open '%s'\\n\", ppath.c_str()); return 2; }\n",
+            );
+            self.out.push_str("            }\n");
+            self.out.push_str("        }\n");
+        } else {
+            self.out
+                .push_str("        else if (_arg == \"--probe\" && i + 1 < argc) { ++i; }\n");
+            self.out.push_str(
+                "        else if (_arg == \"--probe-output\" && i + 1 < argc) { ++i; }\n",
+            );
+        }
+
+        // --threads
+        self.out.push_str(
+            "        else if (_arg == \"--threads\" && i + 1 < argc) { ++i; /* thread count */ }\n",
+        );
+
+        // Unknown argument → exit code 2
+        self.out.push_str(
+            "        else { fprintf(stderr, \"pipit: unknown option '%s'\\n\", argv[i]); return 2; }\n",
+        );
 
         self.out.push_str("    }\n\n");
     }
 
     fn emit_duration_wait(&mut self) {
-        self.out.push_str("    // Check for --duration flag\n");
-        self.out.push_str("    double _duration = 0;\n");
-        self.out.push_str("    for (int i = 1; i < argc; ++i) {\n");
-        self.out
-            .push_str("        if (std::string(argv[i]) == \"--duration\" && i + 1 < argc)\n");
-        self.out
-            .push_str("            _duration = std::stod(argv[i + 1]);\n");
-        self.out.push_str("    }\n");
         self.out.push_str("    if (_duration > 0) {\n");
         self.out.push_str(
             "        std::this_thread::sleep_for(std::chrono::duration<double>(_duration));\n",
@@ -996,6 +1191,26 @@ impl<'a> CodegenCtx<'a> {
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────
+
+    fn get_set_ident<'b>(&'b self, name: &str) -> Option<&'b str> {
+        for stmt in &self.program.statements {
+            if let StatementKind::Set(set) = &stmt.kind {
+                if set.name.name == name {
+                    if let SetValue::Ident(ident) = &set.value {
+                        return Some(&ident.name);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn get_overrun_policy(&self) -> &str {
+        match self.get_set_ident("overrun") {
+            Some("drop") | Some("slip") | Some("backlog") => self.get_set_ident("overrun").unwrap(),
+            _ => "drop",
+        }
+    }
 
     fn find_ctrl_output(&self, ctrl_sub: &Subgraph) -> String {
         // Find the last BufferWrite in the control subgraph; the data feeding it
@@ -1051,27 +1266,16 @@ impl<'a> CodegenCtx<'a> {
         }
     }
 
-    fn infer_array_elem_type(&self, elems: &[Scalar]) -> &'static str {
-        if elems.is_empty() {
-            return "float";
-        }
-        // If all elements are integer-valued, use int; otherwise float
-        let all_int = elems.iter().all(|s| {
-            if let Scalar::Number(n, _) = s {
-                *n == (*n as i64) as f64
-            } else {
-                false
-            }
-        });
-        if all_int {
-            "int"
-        } else {
-            "float"
-        }
+    fn infer_array_elem_type(&self, _elems: &[Scalar]) -> &'static str {
+        // Const arrays in Pipit are coefficient arrays — always emit as float.
+        // Integer-valued elements like [1.0, -1.0] are still float coefficients.
+        "float"
     }
 
     fn format_actor_params(&self, _task_name: &str, meta: &ActorMeta, args: &[Arg]) -> String {
         let mut parts = Vec::new();
+        // Track const array args used for count params so they can auto-fill span params.
+        let mut last_array_const: Option<&Arg> = None;
         for (i, param) in meta.params.iter().enumerate() {
             if let Some(arg) = args.get(i) {
                 match param.kind {
@@ -1082,14 +1286,39 @@ impl<'a> CodegenCtx<'a> {
                         } else {
                             parts.push(self.arg_to_cpp_literal(arg));
                         }
+                        last_array_const = None;
                     }
                     ParamKind::Param => {
+                        // If arg is a const array ref and param is int, remember it
+                        if self.is_const_array_ref(arg) && param.param_type == ParamType::Int {
+                            last_array_const = Some(arg);
+                        } else {
+                            last_array_const = None;
+                        }
                         parts.push(self.arg_to_cpp_value(arg, &param.param_type));
                     }
+                }
+            } else if let Some(array_arg) = last_array_const {
+                // No arg at this index — auto-fill span param from prior array const
+                if matches!(param.param_type, ParamType::SpanFloat | ParamType::SpanChar) {
+                    parts.push(self.arg_to_cpp_value(array_arg, &param.param_type));
+                    last_array_const = None;
                 }
             }
         }
         parts.join(", ")
+    }
+
+    fn is_const_array_ref(&self, arg: &Arg) -> bool {
+        if let Arg::ConstRef(ident) = arg {
+            if let Some(entry) = self.resolved.consts.get(&ident.name) {
+                let stmt = &self.program.statements[entry.stmt_index];
+                if let StatementKind::Const(c) = &stmt.kind {
+                    return matches!(&c.value, Value::Array(_, _));
+                }
+            }
+        }
+        false
     }
 
     fn arg_to_cpp_literal(&self, arg: &Arg) -> String {

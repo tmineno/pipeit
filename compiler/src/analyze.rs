@@ -102,6 +102,16 @@ impl<'a> AnalyzeCtx<'a> {
             level: DiagLevel::Error,
             span,
             message,
+            hint: None,
+        });
+    }
+
+    fn error_with_hint(&mut self, span: Span, message: String, hint: String) {
+        self.diagnostics.push(Diagnostic {
+            level: DiagLevel::Error,
+            span,
+            message,
+            hint: Some(hint),
         });
     }
 
@@ -110,6 +120,7 @@ impl<'a> AnalyzeCtx<'a> {
             level: DiagLevel::Warning,
             span,
             message,
+            hint: None,
         });
     }
 
@@ -322,11 +333,15 @@ impl<'a> AnalyzeCtx<'a> {
                 if st != tt {
                     let src_name = node_display_name(src_node);
                     let tgt_name = node_display_name(tgt_node);
-                    self.error(
+                    self.error_with_hint(
                         edge.span,
                         format!(
                             "type mismatch at pipe '{} -> {}': {} outputs {}, but {} expects {}",
                             src_name, tgt_name, src_name, st, tgt_name, tt
+                        ),
+                        format!(
+                            "insert a conversion actor between {} and {} (e.g. c2r, mag)",
+                            src_name, tgt_name
                         ),
                     );
                 }
@@ -517,13 +532,10 @@ impl<'a> AnalyzeCtx<'a> {
                     .find_node_in_any_subgraph(cycle[0])
                     .map(|n| n.span)
                     .unwrap_or(Span::new((), 0..0));
-                self.error(
+                self.error_with_hint(
                     span,
-                    format!(
-                        "feedback loop detected at '{}' with no delay; \
-                         hint: insert delay(N, init) to break the cycle",
-                        cycle_desc
-                    ),
+                    format!("feedback loop detected at '{}' with no delay", cycle_desc),
+                    "insert delay(N, init) to break the cycle".to_string(),
                 );
             }
         }
@@ -751,13 +763,14 @@ impl<'a> AnalyzeCtx<'a> {
                     if buffer_name == ctrl_buffer_name {
                         if let Some(wire_type) = self.trace_type_backward(node.id, control_sub) {
                             if wire_type != PipitType::Int32 {
-                                self.error(
+                                self.error_with_hint(
                                     node.span,
                                     format!(
                                         "ctrl buffer '{}' in task '{}' has type {}, \
                                          but switch ctrl must be int32",
                                         buffer_name, task.name.name, wire_type
                                     ),
+                                    "use detect() or another actor that outputs int32 for the ctrl signal".to_string(),
                                 );
                             }
                         }

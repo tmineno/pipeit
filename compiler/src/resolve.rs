@@ -103,6 +103,7 @@ pub struct Diagnostic {
     pub level: DiagLevel,
     pub span: Span,
     pub message: String,
+    pub hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +118,11 @@ impl fmt::Display for Diagnostic {
             DiagLevel::Error => "error",
             DiagLevel::Warning => "warning",
         };
-        write!(f, "{}: {}", level, self.message)
+        write!(f, "{}: {}", level, self.message)?;
+        if let Some(hint) = &self.hint {
+            write!(f, "\n  hint: {}", hint)?;
+        }
+        Ok(())
     }
 }
 
@@ -187,6 +192,7 @@ impl<'a> ResolveCtx<'a> {
             level: DiagLevel::Error,
             span,
             message,
+            hint: None,
         });
     }
 
@@ -195,6 +201,7 @@ impl<'a> ResolveCtx<'a> {
             level: DiagLevel::Warning,
             span,
             message,
+            hint: None,
         });
     }
 
@@ -551,10 +558,12 @@ impl<'a> ResolveCtx<'a> {
                 .call_resolutions
                 .insert(call.span, CallResolution::Actor);
         } else {
-            self.error(
-                call.name.span,
-                format!("unknown actor or define '{}'", name),
-            );
+            self.diagnostics.push(Diagnostic {
+                level: DiagLevel::Error,
+                span: call.name.span,
+                message: format!("unknown actor or define '{}'", name),
+                hint: Some("check actor header includes (-I flag)".to_string()),
+            });
         }
 
         // Resolve arguments

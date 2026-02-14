@@ -126,6 +126,7 @@ impl<'a> ScheduleCtx<'a> {
             level: DiagLevel::Error,
             span,
             message,
+            hint: None,
         });
     }
 
