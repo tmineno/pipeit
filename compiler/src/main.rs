@@ -133,7 +133,32 @@ fn main() {
         );
     }
 
-    // TODO: implement remaining compiler pipeline phases (graph, analysis, codegen)
-    eprintln!("pcc: not yet implemented (past name resolution)");
+    // ── Graph construction ──
+    let graph_result = pcc::graph::build_graph(&program, &resolve_result.resolved, &registry);
+    if !graph_result.diagnostics.is_empty() {
+        for diag in &graph_result.diagnostics {
+            eprintln!("pcc: {}", diag);
+        }
+        if graph_result
+            .diagnostics
+            .iter()
+            .any(|d| d.level == pcc::resolve::DiagLevel::Error)
+        {
+            std::process::exit(1);
+        }
+    }
+
+    if cli.verbose {
+        eprintln!("pcc: built {} task graphs", graph_result.graph.tasks.len());
+    }
+
+    // ── Emit graph (if requested) ──
+    if matches!(cli.emit, EmitStage::Graph) {
+        println!("{}", graph_result.graph);
+        std::process::exit(0);
+    }
+
+    // TODO: implement remaining compiler pipeline phases (analysis, codegen)
+    eprintln!("pcc: not yet implemented (past graph construction)");
     std::process::exit(1);
 }

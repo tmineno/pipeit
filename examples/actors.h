@@ -39,6 +39,19 @@ ACTOR(mul, IN(float, 1), OUT(float, 1), RUNTIME_PARAM(float, gain)) {
     return ACTOR_OK;
 }
 
+ACTOR(add, IN(float, 2), OUT(float, 1)) {
+    out[0] = in[0] + in[1];
+    return ACTOR_OK;
+}
+
+// ── Feedback actors (§5.10) ──
+
+ACTOR(delay, IN(float, 1), OUT(float, 1), PARAM(int, N), PARAM(float, init)) {
+    // Built-in: delay(N, init) provides N initial tokens
+    out[0] = in[0];
+    return ACTOR_OK;
+}
+
 // ── Rate conversion actors ──
 
 ACTOR(decimate, IN(float, N), OUT(float, 1), PARAM(int, N)) {

@@ -133,9 +133,17 @@ where
             Token::StringLit(s) = e => Arg::Value(Value::Scalar(Scalar::StringLit(s, e.span()))),
         };
 
+        let tap_ref = just(Token::Colon)
+            .ignore_then(ident.clone())
+            .map(Arg::TapRef);
+
         let const_ref = ident.clone().map(Arg::ConstRef);
 
-        param_ref.or(array_arg).or(literal_arg).or(const_ref)
+        param_ref
+            .or(tap_ref)
+            .or(array_arg)
+            .or(literal_arg)
+            .or(const_ref)
     };
 
     // ── Actor call: IDENT '(' args? ')' ──
@@ -676,6 +684,42 @@ mod tests {
         );
         assert!(matches!(&a.args[1], Arg::ParamRef(id) if id.name == "p"));
         assert!(matches!(&a.args[2], Arg::ConstRef(id) if id.name == "c"));
+    }
+
+    #[test]
+    fn actor_call_with_tap_ref() {
+        let s = parse_one_stmt("clock 1kHz t {\n  add(:fb)\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        let TaskBody::Pipeline(p) = &t.body else {
+            panic!("expected Pipeline")
+        };
+        let PipeSource::ActorCall(a) = &p.lines[0].source else {
+            panic!("expected ActorCall")
+        };
+        assert_eq!(a.args.len(), 1);
+        assert!(matches!(&a.args[0], Arg::TapRef(id) if id.name == "fb"));
+    }
+
+    #[test]
+    fn actor_call_mixed_with_tap_ref() {
+        let s = parse_one_stmt("clock 1kHz t {\n  foo(42, :fb, $p)\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        let TaskBody::Pipeline(p) = &t.body else {
+            panic!("expected Pipeline")
+        };
+        let PipeSource::ActorCall(a) = &p.lines[0].source else {
+            panic!("expected ActorCall")
+        };
+        assert_eq!(a.args.len(), 3);
+        assert!(
+            matches!(&a.args[0], Arg::Value(Value::Scalar(Scalar::Number(n, _))) if *n == 42.0)
+        );
+        assert!(matches!(&a.args[1], Arg::TapRef(id) if id.name == "fb"));
+        assert!(matches!(&a.args[2], Arg::ParamRef(id) if id.name == "p"));
     }
 
     // ── switch_stmt ──

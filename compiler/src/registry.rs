@@ -703,8 +703,8 @@ ACTOR(real, IN(float, 1), OUT(float, 1)) { return ACTOR_OK; }
 
         let mut reg = Registry::new();
         let count = reg.load_header(&path).unwrap();
-        assert_eq!(count, 12, "expected 12 actors in examples/actors.h");
-        assert_eq!(reg.len(), 12);
+        assert_eq!(count, 14, "expected 14 actors in examples/actors.h");
+        assert_eq!(reg.len(), 14);
 
         // Spot-check a few actors
         let adc = reg.lookup("adc").expect("adc not found");

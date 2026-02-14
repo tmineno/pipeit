@@ -203,6 +203,8 @@ pub enum Arg {
     ParamRef(Ident),
     /// Bare identifier — const reference (resolved later).
     ConstRef(Ident),
+    /// `:name` — tap reference as additional actor input (for feedback loops).
+    TapRef(Ident),
 }
 
 // ── value, scalar, array ──

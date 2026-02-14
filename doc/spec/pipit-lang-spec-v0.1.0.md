@@ -425,7 +425,8 @@ adc(0) | :orphan | fir(coeff) -> signal
 # error: tap ':orphan' declared but never consumed
 ```
 
-- タップの宣言（パイプライン中に `:name` が最初に出現する位置）は消費（`:name` が行頭に出現する位置）より先に記述されなければならない
+- パイプライン行頭のタップ参照（`pipe_source` の `:name`）は、宣言より後に記述されなければならない
+- アクター引数内のタップ参照（`arg` の `:name`）は前方参照が許容される（フィードバックループ用途、§5.10 参照）
 
 ### 5.7 共有メモリバッファ
 
@@ -547,10 +548,24 @@ clock 10MHz rx { adc(0) | demod(256) -> bits }
 
 SDF グラフにフィードバックループが含まれる場合、`delay` アクターによって初期トークンを明示的に供給しなければならない。
 
+フィードバック接続はアクター引数にタップ参照 (`:name`) を記述することで表現する。
+
 ```
 clock 10MHz iir {
-    input() | add() | filter() | :fb -> output
-    :fb | delay(1, 0.0) | add()
+    input() | add(:fb) | filter() | :out -> output
+    :out | delay(1, 0.0) | :fb
+}
+```
+
+`add(:fb)` はアクター `add` の追加入力ポートにタップ `:fb` を接続することを意味する。上記の例では `:fb` は2行目の末尾で宣言され、1行目の `add(:fb)` で消費される（前方参照）。フィードバックループではタップの前方参照が許容される（§5.6 参照）。
+
+複数の追加入力を持つアクターには、複数のタップ参照を指定できる:
+
+```
+clock 10MHz example {
+    adc(0) | add(:fb, :fwd) | :out | stdout()
+    adc(1) | delay(1, 0.0) | :fwd
+    :out | delay(1, 0.0) | :fb
 }
 ```
 
@@ -570,7 +585,7 @@ delay(N, init)
 - フィードバックループ内に `delay` が存在しない場合、コンパイルエラーとなる
 
 ```
-error: feedback loop detected at ':fb -> add' with no delay
+error: feedback loop detected at ':out -> :fb -> add' with no delay
   hint: insert delay(N, init) to break the cycle
 ```
 
@@ -811,6 +826,7 @@ args            ::= arg (',' arg)*
 
 arg             ::= value
                   | '$' IDENT           # ランタイムパラメータ参照
+                  | ':' IDENT           # タップ参照（追加入力ポート）
                   | IDENT               # const 参照
 
 params          ::= IDENT (',' IDENT)*

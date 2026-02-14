@@ -145,12 +145,21 @@ pub fn resolve(program: &Program, registry: &Registry) -> ResolveResult {
 
 // ── Internal context ────────────────────────────────────────────────────────
 
+struct PendingTapRef {
+    tap_name: String,
+    scope: String,
+    span: Span,
+    context_name: String,
+}
+
 struct ResolveCtx<'a> {
     registry: &'a Registry,
     resolved: ResolvedProgram,
     diagnostics: Vec<Diagnostic>,
     /// Pending buffer reads to validate after all tasks processed.
     pending_buffer_reads: Vec<(String, String, Span)>, // (buffer_name, task_name, span)
+    /// Pending tap-ref consumptions (from Arg::TapRef) that may be forward references.
+    pending_tap_refs: Vec<PendingTapRef>,
 }
 
 impl<'a> ResolveCtx<'a> {
@@ -169,6 +178,7 @@ impl<'a> ResolveCtx<'a> {
             },
             diagnostics: Vec::new(),
             pending_buffer_reads: Vec::new(),
+            pending_tap_refs: Vec::new(),
         }
     }
 
@@ -327,6 +337,7 @@ impl<'a> ResolveCtx<'a> {
                     };
                     let mut taps = HashMap::new();
                     self.resolve_pipeline_body(&d.body, &scope, &mut taps);
+                    self.resolve_pending_tap_refs_for(&d.name.name, &mut taps);
                     // Check unused taps in define
                     for (tap_name, info) in &taps {
                         if !info.consumed {
@@ -350,6 +361,7 @@ impl<'a> ResolveCtx<'a> {
                         TaskBody::Pipeline(body) => {
                             let mut taps = HashMap::new();
                             self.resolve_pipeline_body(body, &scope, &mut taps);
+                            self.resolve_pending_tap_refs_for(&task_name, &mut taps);
                             self.resolved.task_resolutions.insert(
                                 task_name,
                                 TaskResolution {
@@ -399,6 +411,7 @@ impl<'a> ResolveCtx<'a> {
                                 &control_buffers,
                             );
 
+                            self.resolve_pending_tap_refs_for(&task_name, &mut taps);
                             self.resolved
                                 .task_resolutions
                                 .insert(task_name, TaskResolution { taps, modes });
@@ -422,7 +435,7 @@ impl<'a> ResolveCtx<'a> {
             // Source
             match &line.source {
                 PipeSource::ActorCall(call) => {
-                    self.resolve_actor_call(call, scope);
+                    self.resolve_actor_call(call, scope, taps);
                 }
                 PipeSource::BufferRead(ident) => {
                     self.pending_buffer_reads.push((
@@ -451,7 +464,7 @@ impl<'a> ResolveCtx<'a> {
             for elem in &line.elements {
                 match elem {
                     PipeElem::ActorCall(call) => {
-                        self.resolve_actor_call(call, scope);
+                        self.resolve_actor_call(call, scope, taps);
                     }
                     PipeElem::Tap(ident) => {
                         if taps.contains_key(&ident.name) {
@@ -511,7 +524,12 @@ impl<'a> ResolveCtx<'a> {
         }
     }
 
-    fn resolve_actor_call(&mut self, call: &ActorCall, scope: &Scope) {
+    fn resolve_actor_call(
+        &mut self,
+        call: &ActorCall,
+        scope: &Scope,
+        taps: &mut HashMap<String, TapInfo>,
+    ) {
         let name = &call.name.name;
 
         // Check defines first (define shadows actor)
@@ -558,6 +576,20 @@ impl<'a> ResolveCtx<'a> {
                     }
                 }
                 Arg::Value(_) => {}
+                Arg::TapRef(ident) => {
+                    // Try immediate resolution (tap already declared)
+                    if let Some(info) = taps.get_mut(&ident.name) {
+                        info.consumed = true;
+                    } else {
+                        // Forward reference — defer validation until all lines processed
+                        self.pending_tap_refs.push(PendingTapRef {
+                            tap_name: ident.name.clone(),
+                            scope: scope.description(),
+                            span: ident.span,
+                            context_name: scope.context_name(),
+                        });
+                    }
+                }
             }
         }
     }
@@ -617,6 +649,35 @@ impl<'a> ResolveCtx<'a> {
                 );
             }
         }
+    }
+
+    // ── Deferred tap-ref validation ────────────────────────────────────
+
+    fn resolve_pending_tap_refs_for(
+        &mut self,
+        context_name: &str,
+        taps: &mut HashMap<String, TapInfo>,
+    ) {
+        let mut remaining = Vec::new();
+        for ptr in std::mem::take(&mut self.pending_tap_refs) {
+            if ptr.context_name == context_name {
+                if let Some(info) = taps.get_mut(&ptr.tap_name) {
+                    info.consumed = true;
+                } else {
+                    self.error(
+                        ptr.span,
+                        format!(
+                            "undefined tap ':{name}' referenced as actor input in {scope}",
+                            name = ptr.tap_name,
+                            scope = ptr.scope,
+                        ),
+                    );
+                }
+            } else {
+                remaining.push(ptr);
+            }
+        }
+        self.pending_tap_refs = remaining;
     }
 
     // ── Post-pass ───────────────────────────────────────────────────────
@@ -994,6 +1055,60 @@ mod tests {
         let errs = errors(&result);
         assert_eq!(errs.len(), 1);
         assert!(errs[0].message.contains("declared but never consumed"));
+    }
+
+    // ── Tap-ref as actor arg ───────────────────────────────────────────
+
+    #[test]
+    fn tap_ref_forward_reference_ok() {
+        let reg = test_registry();
+        // :fb is consumed (in add arg) before declared (end of line 2) — forward ref
+        let _ = resolve_ok_with(
+            concat!(
+                "clock 1kHz t {\n",
+                "    adc(0) | add(:fb) | :out | stdout()\n",
+                "    :out | delay(1, 0.0) | :fb\n",
+                "}",
+            ),
+            &reg,
+        );
+    }
+
+    #[test]
+    fn tap_ref_undefined_error() {
+        let reg = test_registry();
+        let result = resolve_source("clock 1kHz t {\n    add(:nonexistent) | stdout()\n}", &reg);
+        let errs = errors(&result);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("undefined tap ':nonexistent'")),
+            "expected undefined tap error, got: {:#?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn tap_ref_marks_consumed() {
+        let reg = test_registry();
+        // :fb is declared on line 2 and consumed via Arg::TapRef on line 1
+        // Should NOT produce "declared but never consumed" error
+        let result = resolve_source(
+            concat!(
+                "clock 1kHz t {\n",
+                "    adc(0) | add(:fb) | stdout()\n",
+                "    adc(0) | delay(1, 0.0) | :fb\n",
+                "}",
+            ),
+            &reg,
+        );
+        let errs = errors(&result);
+        assert!(
+            !errs
+                .iter()
+                .any(|e| e.message.contains("declared but never consumed")),
+            "tap :fb should be marked consumed via Arg::TapRef, got: {:#?}",
+            errs
+        );
     }
 
     // ── Modal body ──────────────────────────────────────────────────────

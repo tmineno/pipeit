@@ -55,11 +55,11 @@ Based on [pipit-lang-spec-v0.1.0](spec/pipit-lang-spec-v0.1.0.md).
 
 ## SDF Graph Construction (§8 step 4)
 
-- [ ] Build directed graph from pipeline expressions
-- [ ] Expand taps to fork nodes (`IN(T,N) → OUT(T,N) × M`)
-- [ ] Inline-expand `define` sub-pipelines
-- [ ] Convert shared buffers to inter-task edges
-- [ ] Feedback loop detection
+- [x] Build directed graph from pipeline expressions
+- [x] Expand taps to fork nodes (`IN(T,N) → OUT(T,N) × M`)
+- [x] Inline-expand `define` sub-pipelines
+- [x] Convert shared buffers to inter-task edges
+- [x] Feedback loop detection
 
 ## Static Analysis (§8 step 5)
 
@@ -117,6 +117,11 @@ Based on [pipit-lang-spec-v0.1.0](spec/pipit-lang-spec-v0.1.0.md).
 - [ ] End-to-end test: spec §11.2 `example.pdl` compiles and runs
 - [ ] End-to-end test: spec §11.3 `receiver.pdl` compiles and runs
 - [ ] Error message quality review (match spec §7 examples)
+
+## Visualization
+
+- [ ] SDF graph visualization output (e.g. `--emit graph-dot` to produce Graphviz DOT format)
+- [ ] Timing diagram visualization (render actor firing order and timing from schedule results)
 
 ## Polish & Release Prep
 
