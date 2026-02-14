@@ -7,6 +7,7 @@ enum EmitStage {
     Cpp,
     Ast,
     Graph,
+    GraphDot,
 }
 
 #[derive(Parser, Debug)]
@@ -153,9 +154,16 @@ fn main() {
     }
 
     // ── Emit graph (if requested) ──
-    if matches!(cli.emit, EmitStage::Graph) {
-        println!("{}", graph_result.graph);
-        std::process::exit(0);
+    match cli.emit {
+        EmitStage::Graph => {
+            println!("{}", graph_result.graph);
+            std::process::exit(0);
+        }
+        EmitStage::GraphDot => {
+            print!("{}", pcc::dot::emit_dot(&graph_result.graph));
+            std::process::exit(0);
+        }
+        _ => {}
     }
 
     // TODO: implement remaining compiler pipeline phases (analysis, codegen)

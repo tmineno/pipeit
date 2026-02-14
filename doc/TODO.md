@@ -120,7 +120,13 @@ Based on [pipit-lang-spec-v0.1.0](spec/pipit-lang-spec-v0.1.0.md).
 
 ## Visualization
 
-- [ ] SDF graph visualization output (e.g. `--emit graph-dot` to produce Graphviz DOT format)
+- [x] SDF graph visualization output (`--emit graph-dot` produces Graphviz DOT format)
+  - [x] Task clusters with nested modal control/mode subgraphs
+  - [x] Node shapes per kind (box=actor, diamond=fork, circle=probe, cylinder=buffer)
+  - [x] Probe rendered as side-branch off main dataflow
+  - [x] Inter-task buffer edges (dashed red)
+  - [x] Feedback cycle edges (bold blue)
+  - [x] Deterministic output (sorted tasks, namespaced node IDs)
 - [ ] Timing diagram visualization (render actor firing order and timing from schedule results)
 
 ## Polish & Release Prep
