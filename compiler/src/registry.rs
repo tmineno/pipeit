@@ -347,6 +347,47 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
     parts
 }
 
+/// Split a string that may contain multiple space-separated PARAM()/RUNTIME_PARAM() specs.
+/// Returns references into the original string for each individual spec.
+/// Handles both single specs ("PARAM(int, N)") and multiple ("PARAM(int, N) PARAM(float, init)").
+fn split_param_specs(s: &str) -> Vec<&str> {
+    let mut specs = Vec::new();
+    let bytes = s.as_bytes();
+    let mut pos = 0;
+
+    while pos < bytes.len() {
+        // Skip whitespace
+        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        if pos >= bytes.len() {
+            break;
+        }
+
+        let start = pos;
+        // Find the opening paren
+        if let Some(rel_paren) = s[pos..].find('(') {
+            let paren_pos = pos + rel_paren;
+            if let Some(end) = extract_balanced(bytes, paren_pos, b'(', b')') {
+                specs.push(s[start..=end].trim());
+                pos = end + 1;
+            } else {
+                // Unbalanced — push remainder and let caller handle error
+                specs.push(s[start..].trim());
+                break;
+            }
+        } else {
+            let remaining = s[start..].trim();
+            if !remaining.is_empty() {
+                specs.push(remaining);
+            }
+            break;
+        }
+    }
+
+    specs
+}
+
 /// Parse the inner content of an ACTOR(...) invocation.
 fn parse_actor_macro(inner: &str, file: &Path, line: usize) -> Result<ActorMeta, RegistryError> {
     let fields = split_top_level_commas(inner);
@@ -374,14 +415,20 @@ fn parse_actor_macro(inner: &str, file: &Path, line: usize) -> Result<ActorMeta,
     let (in_type, in_count) = parse_port_spec(fields[1].trim(), "IN", file, line)?;
     let (out_type, out_count) = parse_port_spec(fields[2].trim(), "OUT", file, line)?;
 
+    // Collect remaining fields (params). Fields may be comma-separated (old style)
+    // or space-separated within a single field (new style). Handle both.
     let mut params = Vec::new();
     for field in &fields[3..] {
         let trimmed = field.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let param = parse_param_spec(trimmed, file, line)?;
-        params.push(param);
+        // A field may contain multiple space-separated PARAM/RUNTIME_PARAM specs
+        let specs = split_param_specs(trimmed);
+        for spec in specs {
+            let param = parse_param_spec(spec, file, line)?;
+            params.push(param);
+        }
     }
 
     Ok(ActorMeta {

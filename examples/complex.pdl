@@ -24,8 +24,8 @@ define frontend(ch, n) {
 
 # ── Fast capture: 10 MHz ─────────────────────────────────────────────
 #
-#   ch0: frontend → :raw0 → fir(lp) → AGC feedback → ?agc_out → →filtered
-#                     ├──→ mag → stdout  (spectrum monitor)
+#   ch0: adc → fft → :spec0 → c2r → fir(lp) → AGC feedback → ?agc_out → →filtered
+#                       ├──→ mag → stdout  (spectrum monitor via cfloat)
 #
 #   ch1: frontend → :raw1 → fir(bp) → ?bp_out → →narrow
 #                     ├──→ fir(lp) → →wideband
@@ -33,10 +33,12 @@ define frontend(ch, n) {
 #   AGC loop: add(:fb) receives delayed feedback from its own output
 
 clock 10MHz capture {
-    frontend(0, 256) | :raw0 | fir(lp_coeff) | add(:fb) | mul($agc_gain) | :agc | ?agc_out -> filtered
+    # ch0: fork after fft (cfloat) for spectrum monitor, then c2r for float path
+    adc(0) | fft(256) | :spec0 | c2r() | fir(lp_coeff) | add(:fb) | mul($agc_gain) | :agc | ?agc_out -> filtered
     :agc | delay(1, 0.0) | :fb
-    :raw0 | mag() | stdout()
+    :spec0 | mag() | stdout()
 
+    # ch1: frontend outputs float, both fork paths use float FIR
     frontend(1, 256) | :raw1 | fir(bp_coeff) | ?bp_out -> narrow
     :raw1 | fir(lp_coeff) -> wideband
 }

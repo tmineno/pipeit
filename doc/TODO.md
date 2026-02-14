@@ -93,25 +93,25 @@ Based on [pipit-lang-spec-v0.1.0](spec/pipit-lang-spec-v0.1.0.md).
 
 ## C++ Code Generation (§8 step 7)
 
-- [ ] Ring buffer static allocation code
-- [ ] Per-task schedule loop (actor firing sequence)
-- [ ] Runtime parameter double-buffering mechanism
+- [x] Ring buffer static allocation code
+- [x] Per-task schedule loop (actor firing sequence)
+- [x] Runtime parameter double-buffering mechanism
 - [ ] Overrun detection and policy (`drop`, `slip`, `backlog`)
-- [ ] Probe instrumentation (stripped in `--release`)
-- [ ] CSDF mode transition logic (ctrl evaluation, mode swap at iteration boundary)
-- [ ] `main()` with CLI argument parser
+- [x] Probe instrumentation (stripped in `--release`)
+- [x] CSDF mode transition logic (ctrl evaluation, mode swap at iteration boundary)
+- [x] `main()` with CLI argument parser
 - [ ] Statistics collection code (`--stats`)
 
 ## Runtime Library — `libpipit`
 
-- [ ] Ring buffer (shared memory, lock-free SPSC)
+- [x] Ring buffer (shared memory, lock-free SPSC)
 - [ ] Scheduler: `static` and `round_robin` strategies
-- [ ] Timer / tick generator (OS timer abstraction)
+- [x] Timer / tick generator (OS timer abstraction)
 - [ ] Overrun policies: drop, slip, backlog
-- [ ] Double-buffering for runtime parameters (atomic swap at iteration boundary)
-- [ ] Thread management (task → thread mapping)
+- [x] Double-buffering for runtime parameters (atomic swap at iteration boundary)
+- [x] Thread management (task → thread mapping)
 - [ ] Statistics collection and reporting
-- [ ] Signal handling (SIGINT → graceful shutdown)
+- [x] Signal handling (SIGINT → graceful shutdown)
 
 ## CLI & Integration (§9)
 
