@@ -38,20 +38,20 @@ Based on [pipit-lang-spec-v0.1.0](spec/pipit-lang-spec-v0.1.0.md).
 
 ## Actor Registry Interface (§4)
 
-- [ ] Define actor metadata schema (name, in/out type, token counts, params)
-- [ ] Parse `ACTOR` macro `constexpr` registration info from C++ headers
-- [ ] Support `PARAM` and `RUNTIME_PARAM` metadata extraction
-- [ ] Actor lookup by name
+- [x] Define actor metadata schema (name, in/out type, token counts, params)
+- [x] Parse `ACTOR` macro `constexpr` registration info from C++ headers
+- [x] Support `PARAM` and `RUNTIME_PARAM` metadata extraction
+- [x] Actor lookup by name
 
 ## Name Resolution (§8 step 3)
 
-- [ ] Resolve actor names against registry
-- [ ] Resolve `const` and `param` references
-- [ ] Resolve shared buffer names (`->` define, `@` reference)
-- [ ] Resolve tap names (`:name` declare vs consume, task scope)
-- [ ] Resolve `$name` runtime parameter references
-- [ ] Name collision detection within same namespace
-- [ ] Diagnostics: unknown name, unused tap, duplicate definition
+- [x] Resolve actor names against registry
+- [x] Resolve `const` and `param` references
+- [x] Resolve shared buffer names (`->` define, `@` reference)
+- [x] Resolve tap names (`:name` declare vs consume, task scope)
+- [x] Resolve `$name` runtime parameter references
+- [x] Name collision detection within same namespace
+- [x] Diagnostics: unknown name, unused tap, duplicate definition
 
 ## SDF Graph Construction (§8 step 4)
 

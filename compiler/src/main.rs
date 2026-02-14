@@ -81,7 +81,59 @@ fn main() {
         eprintln!("pcc: {} actors registered", registry.len());
     }
 
-    // TODO: implement remaining compiler pipeline phases
-    eprintln!("pcc: not yet implemented");
+    // ── Read and parse source ──
+    let source = match std::fs::read_to_string(&cli.source) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("pcc: error: {}: {}", cli.source.display(), e);
+            std::process::exit(2);
+        }
+    };
+
+    let parse_result = pcc::parser::parse(&source);
+    if !parse_result.errors.is_empty() {
+        for err in &parse_result.errors {
+            eprintln!("pcc: parse error: {}", err);
+        }
+        std::process::exit(1);
+    }
+    let program = match parse_result.program {
+        Some(p) => p,
+        None => {
+            eprintln!("pcc: parse failed with no output");
+            std::process::exit(1);
+        }
+    };
+
+    if cli.verbose {
+        eprintln!("pcc: parsed {} statements", program.statements.len());
+    }
+
+    // ── Name resolution ──
+    let resolve_result = pcc::resolve::resolve(&program, &registry);
+    if !resolve_result.diagnostics.is_empty() {
+        for diag in &resolve_result.diagnostics {
+            eprintln!("pcc: {}", diag);
+        }
+        if resolve_result
+            .diagnostics
+            .iter()
+            .any(|d| d.level == pcc::resolve::DiagLevel::Error)
+        {
+            std::process::exit(1);
+        }
+    }
+
+    if cli.verbose {
+        eprintln!(
+            "pcc: resolved {} consts, {} params, {} buffers",
+            resolve_result.resolved.consts.len(),
+            resolve_result.resolved.params.len(),
+            resolve_result.resolved.buffers.len(),
+        );
+    }
+
+    // TODO: implement remaining compiler pipeline phases (graph, analysis, codegen)
+    eprintln!("pcc: not yet implemented (past name resolution)");
     std::process::exit(1);
 }
