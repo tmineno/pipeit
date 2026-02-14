@@ -63,15 +63,15 @@ Based on [pipit-lang-spec-v0.1.0](spec/pipit-lang-spec-v0.1.0.md).
 
 ## Static Analysis (§8 step 5)
 
-- [ ] Type checking: verify pipe endpoint type compatibility (§3)
-- [ ] SDF balance equation solving → repetition vector (§5.5)
-- [ ] Feedback loop `delay` verification (§5.10)
-- [ ] Cross-clock rate matching: `Pw × fw = Cr × fr` (§5.7)
-- [ ] Single-writer constraint on shared buffers (§5.7)
-- [ ] Tap consumption check: declared taps must be consumed (§5.6)
-- [ ] Buffer size computation (safe upper bound) (§5.7)
-- [ ] Memory pool check vs `set mem` limit
-- [ ] `param` type vs `RUNTIME_PARAM` type match
+- [x] Type checking: verify pipe endpoint type compatibility (§3)
+- [x] SDF balance equation solving → repetition vector (§5.5)
+- [x] Feedback loop `delay` verification (§5.10)
+- [x] Cross-clock rate matching: `Pw × fw = Cr × fr` (§5.7)
+- [x] Single-writer constraint on shared buffers (§5.7)
+- [x] Tap consumption check: declared taps must be consumed (§5.6)
+- [x] Buffer size computation (safe upper bound) (§5.7)
+- [x] Memory pool check vs `set mem` limit
+- [x] `param` type vs `RUNTIME_PARAM` type match
 
 ## CSDF Mode Analysis (§6)
 

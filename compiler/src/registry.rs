@@ -23,6 +23,21 @@ pub enum PipitType {
     Void,
 }
 
+impl fmt::Display for PipitType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PipitType::Int8 => write!(f, "int8"),
+            PipitType::Int16 => write!(f, "int16"),
+            PipitType::Int32 => write!(f, "int32"),
+            PipitType::Float => write!(f, "float"),
+            PipitType::Double => write!(f, "double"),
+            PipitType::Cfloat => write!(f, "cfloat"),
+            PipitType::Cdouble => write!(f, "cdouble"),
+            PipitType::Void => write!(f, "void"),
+        }
+    }
+}
+
 /// Token count on an actor port.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenCount {

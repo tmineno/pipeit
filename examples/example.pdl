@@ -14,12 +14,12 @@ param gain = 1.0
 
 # Sub-pipeline definition
 define frontend(n) {
-    adc(0) | mul($gain) | fft(n) | c2r()
+    adc(0) | mul($gain) | fft(n)
 }
 
 # Main capture task: 10MHz target rate
 clock 10MHz capture {
-    frontend(fft_size) | :raw | fir(coeff) | ?filtered -> signal
+    frontend(fft_size) | :raw | c2r() | fir(coeff) | ?filtered -> signal
     :raw | mag() | stdout()
 }
 

@@ -158,7 +158,34 @@ fn main() {
         std::process::exit(0);
     }
 
-    // TODO: implement remaining compiler pipeline phases (analysis, codegen)
-    eprintln!("pcc: not yet implemented (past graph construction)");
+    // ── Static analysis ──
+    let analysis_result = pcc::analyze::analyze(
+        &program,
+        &resolve_result.resolved,
+        &graph_result.graph,
+        &registry,
+    );
+    if !analysis_result.diagnostics.is_empty() {
+        for diag in &analysis_result.diagnostics {
+            eprintln!("pcc: {}", diag);
+        }
+        if analysis_result
+            .diagnostics
+            .iter()
+            .any(|d| d.level == pcc::resolve::DiagLevel::Error)
+        {
+            std::process::exit(1);
+        }
+    }
+
+    if cli.verbose {
+        eprintln!(
+            "pcc: analysis complete, {} repetition vectors computed",
+            analysis_result.analysis.repetition_vectors.len(),
+        );
+    }
+
+    // TODO: implement remaining compiler pipeline phases (schedule, codegen)
+    eprintln!("pcc: not yet implemented (past static analysis)");
     std::process::exit(1);
 }

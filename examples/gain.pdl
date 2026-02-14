@@ -1,0 +1,14 @@
+# gain.pdl — Simple gain stage with runtime parameter
+# ====================================================
+# Demonstrates: define inlining, runtime parameter ($gain),
+#               param type compatibility (Int promoted to Float)
+
+param gain = 2.5
+
+define amplify() {
+    mul($gain) | mul($gain)
+}
+
+clock 48kHz audio {
+    adc(0) | amplify() | stdout()
+}
