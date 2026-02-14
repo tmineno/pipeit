@@ -61,6 +61,7 @@ pub fn analyze(
     ctx.compute_buffer_sizes();
     ctx.check_memory_pool();
     ctx.check_param_types();
+    ctx.check_ctrl_types();
     ctx.build_result()
 }
 
@@ -722,6 +723,49 @@ impl<'a> AnalyzeCtx<'a> {
             }
         }
     }
+
+    // ── Phase 8: Ctrl type validation (§6) ──────────────────────────────
+
+    /// For each modal task, verify the ctrl buffer type is int32.
+    fn check_ctrl_types(&mut self) {
+        for stmt in &self.program.statements {
+            let task = match &stmt.kind {
+                StatementKind::Task(t) => t,
+                _ => continue,
+            };
+            let modal = match &task.body {
+                TaskBody::Modal(m) => m,
+                _ => continue,
+            };
+            let ctrl_buffer_name = match &modal.switch.source {
+                SwitchSource::Buffer(ident) => &ident.name,
+                SwitchSource::Param(_) => continue, // param-based ctrl: no buffer type check
+            };
+            let control_sub = match self.graph.tasks.get(&task.name.name) {
+                Some(TaskGraph::Modal { control, .. }) => control,
+                _ => continue,
+            };
+            // Find the BufferWrite node for the ctrl buffer in the control subgraph
+            for node in &control_sub.nodes {
+                if let NodeKind::BufferWrite { buffer_name } = &node.kind {
+                    if buffer_name == ctrl_buffer_name {
+                        if let Some(wire_type) = self.trace_type_backward(node.id, control_sub) {
+                            if wire_type != PipitType::Int32 {
+                                self.error(
+                                    node.span,
+                                    format!(
+                                        "ctrl buffer '{}' in task '{}' has type {}, \
+                                         but switch ctrl must be int32",
+                                        buffer_name, task.name.name, wire_type
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ── Free helper functions ───────────────────────────────────────────────────
@@ -1147,6 +1191,65 @@ mod tests {
         assert!(
             errors.is_empty(),
             "receiver.pdl should pass analysis without errors: {:#?}",
+            errors
+        );
+    }
+
+    // ── Ctrl type checks ──
+
+    #[test]
+    fn ctrl_type_int32_ok() {
+        // detect() outputs int32 -> ctrl is valid
+        let reg = test_registry();
+        let result = analyze_ok(
+            concat!(
+                "clock 1kHz t {\n",
+                "    control {\n",
+                "        adc(0) | detect() -> ctrl\n",
+                "    }\n",
+                "    mode a {\n        adc(0) | stdout()\n    }\n",
+                "    mode b {\n        adc(0) | stdout()\n    }\n",
+                "    switch(ctrl, a, b) default a\n",
+                "}",
+            ),
+            &reg,
+        );
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .all(|d| d.level != DiagLevel::Error),
+            "ctrl int32 should pass: {:#?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn ctrl_type_not_int32_error() {
+        // fir() outputs float -> ctrl is NOT int32 -> error
+        let reg = test_registry();
+        let result = analyze_source(
+            concat!(
+                "const coeff = [1.0]\n",
+                "clock 1kHz t {\n",
+                "    control {\n",
+                "        adc(0) | fir(coeff) -> ctrl\n",
+                "    }\n",
+                "    mode a {\n        adc(0) | stdout()\n    }\n",
+                "    mode b {\n        adc(0) | stdout()\n    }\n",
+                "    switch(ctrl, a, b) default a\n",
+                "}",
+            ),
+            &reg,
+        );
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(
+            errors.iter().any(|d| d.message.contains("int32")),
+            "should error about ctrl not being int32: {:#?}",
             errors
         );
     }

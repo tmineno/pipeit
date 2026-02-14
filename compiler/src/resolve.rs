@@ -649,6 +649,36 @@ impl<'a> ResolveCtx<'a> {
                 );
             }
         }
+
+        // Validate mode index coverage: every defined mode must appear in
+        // the switch list exactly once (contiguous 0..N-1 mapping).
+        let switch_mode_names: Vec<&str> = switch.modes.iter().map(|m| m.name.as_str()).collect();
+        for (mode_name, mode_span) in modes {
+            if !switch_mode_names.contains(&mode_name.as_str()) {
+                self.error(
+                    *mode_span,
+                    format!(
+                        "mode '{}' defined in task '{}' but not listed in switch statement",
+                        mode_name, task_name
+                    ),
+                );
+            }
+        }
+        // Check for duplicate mode references in switch list
+        let mut seen: std::collections::HashMap<&str, Span> = std::collections::HashMap::new();
+        for mode_ref in &switch.modes {
+            if let Some(&first_span) = seen.get(mode_ref.name.as_str()) {
+                self.error(
+                    mode_ref.span,
+                    format!(
+                        "mode '{}' listed multiple times in switch of task '{}' (first at offset {})",
+                        mode_ref.name, task_name, first_span.start
+                    ),
+                );
+            } else {
+                seen.insert(&mode_ref.name, mode_ref.span);
+            }
+        }
     }
 
     // ── Deferred tap-ref validation ────────────────────────────────────
@@ -1183,6 +1213,56 @@ mod tests {
         assert!(errs
             .iter()
             .any(|e| e.message.contains("undefined param '$missing'")));
+    }
+
+    // ── Mode coverage checks ─────────────────────────────────────────
+
+    #[test]
+    fn switch_missing_mode_error() {
+        // mode 'c' is defined but not listed in switch → error
+        let reg = test_registry();
+        let result = resolve_source(
+            concat!(
+                "clock 1kHz t {\n",
+                "    control {\n        adc(0) | detect() -> ctrl\n    }\n",
+                "    mode a {\n        adc(0) | stdout()\n    }\n",
+                "    mode b {\n        adc(0) | stdout()\n    }\n",
+                "    mode c {\n        adc(0) | stdout()\n    }\n",
+                "    switch(ctrl, a, b) default a\n",
+                "}"
+            ),
+            &reg,
+        );
+        let errs = errors(&result);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("mode 'c'") && e.message.contains("not listed")),
+            "expected error about mode 'c' not in switch: {:#?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn switch_duplicate_mode_error() {
+        let reg = test_registry();
+        let result = resolve_source(
+            concat!(
+                "clock 1kHz t {\n",
+                "    control {\n        adc(0) | detect() -> ctrl\n    }\n",
+                "    mode a {\n        adc(0) | stdout()\n    }\n",
+                "    mode b {\n        adc(0) | stdout()\n    }\n",
+                "    switch(ctrl, a, b, a) default a\n",
+                "}"
+            ),
+            &reg,
+        );
+        let errs = errors(&result);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("mode 'a'") && e.message.contains("multiple times")),
+            "expected error about duplicate mode 'a': {:#?}",
+            errs
+        );
     }
 
     // ── Integration tests ───────────────────────────────────────────────

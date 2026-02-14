@@ -75,18 +75,21 @@ Based on [pipit-lang-spec-v0.1.0](spec/pipit-lang-spec-v0.1.0.md).
 
 ## CSDF Mode Analysis (§6)
 
-- [ ] Build control subgraph as independent SDF graph
-- [ ] Build each `mode` block as independent SDF graph
-- [ ] Validate `switch` ctrl supplier exists (control block or param)
-- [ ] Validate ctrl type is `int32`
-- [ ] Validate mode index coverage (0 .. N-1)
-- [ ] Per-mode balance equation solving and buffer sizing
+- [x] Build control subgraph as independent SDF graph
+- [x] Build each `mode` block as independent SDF graph
+- [x] Validate `switch` ctrl supplier exists (control block or param)
+- [x] Validate ctrl type is `int32`
+- [x] Validate mode index coverage (0 .. N-1)
+- [x] Per-mode balance equation solving and buffer sizing
 
 ## Schedule Generation (§8 step 6)
 
-- [ ] Per-task topological order (PASS construction)
-- [ ] Determine K (iterations per tick) from target rate
-- [ ] Batching optimization for high target rates
+- [x] Per-task topological order (PASS construction via Kahn's algorithm)
+- [x] Determine K (iterations per tick) from target rate
+- [x] Batching optimization for high target rates (K = ceil(freq / 1MHz))
+- [x] Intra-task buffer sizing per edge
+- [x] Feedback cycle back-edge identification (delay actor breaks cycle)
+- [x] `--emit schedule` output for debugging
 
 ## C++ Code Generation (§8 step 7)
 

@@ -8,6 +8,7 @@ enum EmitStage {
     Ast,
     Graph,
     GraphDot,
+    Schedule,
 }
 
 #[derive(Parser, Debug)]
@@ -193,7 +194,40 @@ fn main() {
         );
     }
 
-    // TODO: implement remaining compiler pipeline phases (schedule, codegen)
-    eprintln!("pcc: not yet implemented (past static analysis)");
+    // ── Schedule generation ──
+    let schedule_result = pcc::schedule::schedule(
+        &program,
+        &resolve_result.resolved,
+        &graph_result.graph,
+        &analysis_result.analysis,
+        &registry,
+    );
+    if !schedule_result.diagnostics.is_empty() {
+        for diag in &schedule_result.diagnostics {
+            eprintln!("pcc: {}", diag);
+        }
+        if schedule_result
+            .diagnostics
+            .iter()
+            .any(|d| d.level == pcc::resolve::DiagLevel::Error)
+        {
+            std::process::exit(1);
+        }
+    }
+
+    if cli.verbose {
+        eprintln!(
+            "pcc: schedule complete, {} task schedules generated",
+            schedule_result.schedule.tasks.len(),
+        );
+    }
+
+    if matches!(cli.emit, EmitStage::Schedule) {
+        print!("{}", schedule_result.schedule);
+        std::process::exit(0);
+    }
+
+    // TODO: implement remaining compiler pipeline phases (codegen)
+    eprintln!("pcc: not yet implemented (past schedule generation)");
     std::process::exit(1);
 }

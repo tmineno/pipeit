@@ -1,0 +1,845 @@
+// schedule.rs — PASS schedule generation for Pipit SDF graphs
+//
+// Generates a Periodic Asynchronous Static Schedule (PASS) for each task.
+// Per-task topological sort of actors in dependency order, with each actor
+// firing repetition_vector[node] times per PASS cycle.
+//
+// Preconditions: `program` is a parsed AST; `resolved` passed name resolution;
+//                `graph` is a valid ProgramGraph with detected cycles;
+//                `analysis` has computed repetition vectors; `registry` has actor metadata.
+// Postconditions: returns `ScheduleResult` with per-task schedules, K factors,
+//                 and intra-task buffer sizes.
+// Failure modes: unsortable subgraphs produce `Diagnostic` entries.
+// Side effects: none.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
+
+use chumsky::span::Span as _;
+
+use crate::analyze::AnalyzedProgram;
+use crate::ast::*;
+use crate::graph::*;
+use crate::registry::{ActorMeta, Registry, TokenCount};
+use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
+
+// ── Public types ────────────────────────────────────────────────────────────
+
+/// A single firing entry: which node fires and how many times per PASS cycle.
+#[derive(Debug, Clone)]
+pub struct FiringEntry {
+    pub node_id: NodeId,
+    pub repetition_count: u32,
+}
+
+/// Schedule for a single subgraph (pipeline, control, or mode).
+#[derive(Debug, Clone)]
+pub struct SubgraphSchedule {
+    /// Topological firing order with repetition counts.
+    pub firings: Vec<FiringEntry>,
+    /// Intra-task buffer tokens per edge: (source, target) → tokens.
+    pub edge_buffers: HashMap<(NodeId, NodeId), u32>,
+}
+
+/// Schedule for an entire task.
+#[derive(Debug, Clone)]
+pub enum TaskSchedule {
+    Pipeline(SubgraphSchedule),
+    Modal {
+        control: SubgraphSchedule,
+        modes: Vec<(String, SubgraphSchedule)>,
+    },
+}
+
+/// Per-task scheduling metadata.
+#[derive(Debug, Clone)]
+pub struct TaskMeta {
+    pub schedule: TaskSchedule,
+    /// K = iterations per tick (≥ 1).
+    pub k_factor: u32,
+    /// Task target frequency in Hz.
+    pub freq_hz: f64,
+}
+
+/// Result of schedule generation.
+#[derive(Debug)]
+pub struct ScheduleResult {
+    pub schedule: ScheduledProgram,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Computed schedule data, consumed by downstream codegen phases.
+#[derive(Debug)]
+pub struct ScheduledProgram {
+    /// Per-task schedule and metadata.
+    pub tasks: HashMap<String, TaskMeta>,
+}
+
+// ── Public entry point ──────────────────────────────────────────────────────
+
+/// Generate PASS schedules for all tasks in a program.
+pub fn schedule(
+    program: &Program,
+    resolved: &ResolvedProgram,
+    graph: &ProgramGraph,
+    analysis: &AnalyzedProgram,
+    registry: &Registry,
+) -> ScheduleResult {
+    let mut ctx = ScheduleCtx::new(program, resolved, graph, analysis, registry);
+    ctx.schedule_all_tasks();
+    ctx.build_result()
+}
+
+// ── Internal context ────────────────────────────────────────────────────────
+
+struct ScheduleCtx<'a> {
+    program: &'a Program,
+    resolved: &'a ResolvedProgram,
+    graph: &'a ProgramGraph,
+    analysis: &'a AnalyzedProgram,
+    registry: &'a Registry,
+    diagnostics: Vec<Diagnostic>,
+    task_schedules: HashMap<String, TaskMeta>,
+}
+
+impl<'a> ScheduleCtx<'a> {
+    fn new(
+        program: &'a Program,
+        resolved: &'a ResolvedProgram,
+        graph: &'a ProgramGraph,
+        analysis: &'a AnalyzedProgram,
+        registry: &'a Registry,
+    ) -> Self {
+        ScheduleCtx {
+            program,
+            resolved,
+            graph,
+            analysis,
+            registry,
+            diagnostics: Vec::new(),
+            task_schedules: HashMap::new(),
+        }
+    }
+
+    fn error(&mut self, span: Span, message: String) {
+        self.diagnostics.push(Diagnostic {
+            level: DiagLevel::Error,
+            span,
+            message,
+        });
+    }
+
+    fn build_result(self) -> ScheduleResult {
+        ScheduleResult {
+            schedule: ScheduledProgram {
+                tasks: self.task_schedules,
+            },
+            diagnostics: self.diagnostics,
+        }
+    }
+
+    // ── Task scheduling ─────────────────────────────────────────────────
+
+    fn schedule_all_tasks(&mut self) {
+        for stmt in &self.program.statements {
+            if let StatementKind::Task(task) = &stmt.kind {
+                self.schedule_task(task);
+            }
+        }
+    }
+
+    fn schedule_task(&mut self, task: &TaskStmt) {
+        let task_name = &task.name.name;
+        let freq_hz = task.freq;
+
+        let task_graph = match self.graph.tasks.get(task_name) {
+            Some(g) => g,
+            None => return,
+        };
+
+        let task_schedule = match task_graph {
+            TaskGraph::Pipeline(sub) => {
+                let rv_key = (task_name.to_string(), "pipeline".to_string());
+                match self.analysis.repetition_vectors.get(&rv_key) {
+                    Some(rv) => match self.sort_subgraph(task_name, "pipeline", sub, rv) {
+                        Some(sched) => TaskSchedule::Pipeline(sched),
+                        None => return,
+                    },
+                    None => return,
+                }
+            }
+            TaskGraph::Modal { control, modes } => {
+                let ctrl_rv_key = (task_name.to_string(), "control".to_string());
+                let ctrl_sched = self
+                    .analysis
+                    .repetition_vectors
+                    .get(&ctrl_rv_key)
+                    .and_then(|rv| self.sort_subgraph(task_name, "control", control, rv));
+
+                let ctrl_sched = match ctrl_sched {
+                    Some(s) => s,
+                    None => return,
+                };
+
+                let mut mode_scheds = Vec::new();
+                for (mode_name, sub) in modes {
+                    let mode_rv_key = (task_name.to_string(), mode_name.clone());
+                    if let Some(rv) = self.analysis.repetition_vectors.get(&mode_rv_key) {
+                        if let Some(sched) = self.sort_subgraph(task_name, mode_name, sub, rv) {
+                            mode_scheds.push((mode_name.clone(), sched));
+                        }
+                    }
+                }
+
+                TaskSchedule::Modal {
+                    control: ctrl_sched,
+                    modes: mode_scheds,
+                }
+            }
+        };
+
+        let k = compute_k_factor(freq_hz);
+
+        self.task_schedules.insert(
+            task_name.to_string(),
+            TaskMeta {
+                schedule: task_schedule,
+                k_factor: k,
+                freq_hz,
+            },
+        );
+    }
+
+    // ── Topological sort (Kahn's algorithm) ─────────────────────────────
+
+    fn sort_subgraph(
+        &mut self,
+        task_name: &str,
+        label: &str,
+        sub: &Subgraph,
+        rv: &HashMap<NodeId, u32>,
+    ) -> Option<SubgraphSchedule> {
+        if sub.nodes.is_empty() {
+            return Some(SubgraphSchedule {
+                firings: Vec::new(),
+                edge_buffers: HashMap::new(),
+            });
+        }
+
+        // Identify back-edges from feedback cycles (delay actors break cycles)
+        let back_edges = self.identify_back_edges(sub);
+
+        // Build in-degree map and adjacency list (excluding back-edges)
+        let mut in_degree: HashMap<NodeId, u32> = HashMap::new();
+        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+
+        for node in &sub.nodes {
+            in_degree.entry(node.id).or_insert(0);
+            adj.entry(node.id).or_default();
+        }
+
+        for edge in &sub.edges {
+            if back_edges.contains(&(edge.source, edge.target)) {
+                continue;
+            }
+            *in_degree.entry(edge.target).or_insert(0) += 1;
+            adj.entry(edge.source).or_default().push(edge.target);
+        }
+
+        // Kahn's algorithm with deterministic ordering (sort by NodeId)
+        let mut queue: Vec<NodeId> = in_degree
+            .iter()
+            .filter(|(_, &deg)| deg == 0)
+            .map(|(&id, _)| id)
+            .collect();
+        queue.sort_by_key(|id| id.0);
+        let mut queue: VecDeque<NodeId> = queue.into_iter().collect();
+
+        let mut firings = Vec::new();
+
+        while let Some(node_id) = queue.pop_front() {
+            let count = rv.get(&node_id).copied().unwrap_or(1);
+            firings.push(FiringEntry {
+                node_id,
+                repetition_count: count,
+            });
+
+            if let Some(neighbors) = adj.get(&node_id) {
+                let mut sorted = neighbors.clone();
+                sorted.sort_by_key(|id| id.0);
+                for next in sorted {
+                    if let Some(deg) = in_degree.get_mut(&next) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push_back(next);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check all nodes were scheduled
+        if firings.len() < sub.nodes.len() {
+            let scheduled: HashSet<NodeId> = firings.iter().map(|f| f.node_id).collect();
+            let stuck: Vec<NodeId> = sub
+                .nodes
+                .iter()
+                .map(|n| n.id)
+                .filter(|id| !scheduled.contains(id))
+                .collect();
+            self.error(
+                Span::new((), 0..0),
+                format!(
+                    "cannot schedule subgraph '{}' of task '{}': {} node(s) in \
+                     unresolvable cycle ({:?})",
+                    label,
+                    task_name,
+                    stuck.len(),
+                    stuck
+                ),
+            );
+            return None;
+        }
+
+        let edge_buffers = self.compute_edge_buffers(sub, rv, &back_edges);
+
+        Some(SubgraphSchedule {
+            firings,
+            edge_buffers,
+        })
+    }
+
+    // ── Back-edge identification ────────────────────────────────────────
+
+    /// Identify feedback back-edges to remove for topological sort.
+    /// For each detected cycle, the outgoing edge from the delay actor is a
+    /// back-edge (delay provides initial tokens, breaking the dependency).
+    fn identify_back_edges(&self, sub: &Subgraph) -> HashSet<(NodeId, NodeId)> {
+        let mut back_edges = HashSet::new();
+        let node_ids: HashSet<u32> = sub.nodes.iter().map(|n| n.id.0).collect();
+
+        for cycle in &self.graph.cycles {
+            // Only process cycles belonging to this subgraph
+            if !cycle.iter().all(|id| node_ids.contains(&id.0)) {
+                continue;
+            }
+
+            // Find the delay actor; its outgoing cycle edge is the back-edge
+            for (i, &nid) in cycle.iter().enumerate() {
+                if let Some(node) = find_node(sub, nid) {
+                    if matches!(&node.kind, NodeKind::Actor { name, .. } if name == "delay") {
+                        let next_nid = cycle[(i + 1) % cycle.len()];
+                        if sub
+                            .edges
+                            .iter()
+                            .any(|e| e.source == nid && e.target == next_nid)
+                        {
+                            back_edges.insert((nid, next_nid));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        back_edges
+    }
+
+    // ── Intra-task buffer sizing ────────────────────────────────────────
+
+    fn compute_edge_buffers(
+        &self,
+        sub: &Subgraph,
+        rv: &HashMap<NodeId, u32>,
+        back_edges: &HashSet<(NodeId, NodeId)>,
+    ) -> HashMap<(NodeId, NodeId), u32> {
+        let mut buffers = HashMap::new();
+
+        for edge in &sub.edges {
+            if back_edges.contains(&(edge.source, edge.target)) {
+                // Back-edge: buffer holds initial tokens from delay actor
+                let tokens = self.delay_initial_tokens(sub, edge.source);
+                buffers.insert((edge.source, edge.target), tokens);
+                continue;
+            }
+
+            let src_node = find_node(sub, edge.source);
+            let p = src_node.and_then(|n| self.production_rate(n)).unwrap_or(1);
+            let rv_src = rv.get(&edge.source).copied().unwrap_or(1);
+            buffers.insert((edge.source, edge.target), p * rv_src);
+        }
+
+        buffers
+    }
+
+    /// Get the initial token count from a delay actor (first arg).
+    fn delay_initial_tokens(&self, sub: &Subgraph, node_id: NodeId) -> u32 {
+        if let Some(node) = find_node(sub, node_id) {
+            if let NodeKind::Actor { args, name, .. } = &node.kind {
+                if name == "delay" {
+                    if let Some(Arg::Value(Value::Scalar(Scalar::Number(n, _)))) = args.first() {
+                        return *n as u32;
+                    }
+                }
+            }
+        }
+        1
+    }
+
+    // ── Rate helpers (duplicated from analyze.rs) ───────────────────────
+
+    fn actor_meta(&self, name: &str) -> Option<&ActorMeta> {
+        self.registry.lookup(name)
+    }
+
+    fn production_rate(&self, node: &Node) -> Option<u32> {
+        match &node.kind {
+            NodeKind::Actor { name, args, .. } => {
+                let meta = self.actor_meta(name)?;
+                self.resolve_token_count(&meta.out_count, meta, args)
+            }
+            _ => Some(1),
+        }
+    }
+
+    fn resolve_token_count(
+        &self,
+        count: &TokenCount,
+        actor_meta: &ActorMeta,
+        actor_args: &[Arg],
+    ) -> Option<u32> {
+        match count {
+            TokenCount::Literal(n) => Some(*n),
+            TokenCount::Symbolic(sym) => {
+                let idx = actor_meta.params.iter().position(|p| p.name == *sym)?;
+                let arg = actor_args.get(idx)?;
+                self.resolve_arg_to_u32(arg)
+            }
+        }
+    }
+
+    fn resolve_arg_to_u32(&self, arg: &Arg) -> Option<u32> {
+        match arg {
+            Arg::Value(Value::Scalar(Scalar::Number(n, _))) => Some(*n as u32),
+            Arg::Value(Value::Array(elems, _)) => Some(elems.len() as u32),
+            Arg::ConstRef(ident) => {
+                let entry = self.resolved.consts.get(&ident.name)?;
+                let stmt = &self.program.statements[entry.stmt_index];
+                if let StatementKind::Const(c) = &stmt.kind {
+                    match &c.value {
+                        Value::Scalar(Scalar::Number(n, _)) => Some(*n as u32),
+                        Value::Array(elems, _) => Some(elems.len() as u32),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+// ── Free helpers ────────────────────────────────────────────────────────────
+
+fn find_node(sub: &Subgraph, id: NodeId) -> Option<&Node> {
+    sub.nodes.iter().find(|n| n.id == id)
+}
+
+/// K factor: iterations per tick (compile-time heuristic).
+/// freq < 1 MHz → K = 1; freq ≥ 1 MHz → K = ceil(freq / 1 MHz).
+fn compute_k_factor(freq_hz: f64) -> u32 {
+    const TICK_RATE_HZ: f64 = 1_000_000.0;
+    if freq_hz <= TICK_RATE_HZ {
+        1
+    } else {
+        (freq_hz / TICK_RATE_HZ).ceil() as u32
+    }
+}
+
+// ── Display ─────────────────────────────────────────────────────────────────
+
+impl fmt::Display for ScheduledProgram {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "ScheduledProgram ({} tasks)", self.tasks.len())?;
+        let mut task_names: Vec<&String> = self.tasks.keys().collect();
+        task_names.sort();
+
+        for task_name in task_names {
+            let meta = &self.tasks[task_name];
+            writeln!(
+                f,
+                "  task '{}' (K={}, freq={:.0}Hz):",
+                task_name, meta.k_factor, meta.freq_hz
+            )?;
+            match &meta.schedule {
+                TaskSchedule::Pipeline(sched) => {
+                    write_subgraph_schedule(f, "pipeline", sched, "    ")?;
+                }
+                TaskSchedule::Modal { control, modes } => {
+                    write_subgraph_schedule(f, "control", control, "    ")?;
+                    for (mode_name, sched) in modes {
+                        write_subgraph_schedule(f, &format!("mode:{mode_name}"), sched, "    ")?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn write_subgraph_schedule(
+    f: &mut fmt::Formatter<'_>,
+    label: &str,
+    sched: &SubgraphSchedule,
+    indent: &str,
+) -> fmt::Result {
+    writeln!(f, "{indent}[{label}]")?;
+    for (i, entry) in sched.firings.iter().enumerate() {
+        writeln!(
+            f,
+            "{indent}  {i}: node {} x{}",
+            entry.node_id.0, entry.repetition_count
+        )?;
+    }
+    if !sched.edge_buffers.is_empty() {
+        writeln!(f, "{indent}  buffers:")?;
+        let mut edges: Vec<_> = sched.edge_buffers.iter().collect();
+        edges.sort_by_key(|((a, b), _)| (a.0, b.0));
+        for ((src, tgt), size) in edges {
+            writeln!(f, "{indent}    ({} -> {}): {size} tokens", src.0, tgt.0)?;
+        }
+    }
+    Ok(())
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::Registry;
+    use crate::resolve;
+    use std::path::PathBuf;
+
+    fn test_registry() -> Registry {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("examples/actors.h");
+        let mut reg = Registry::new();
+        reg.load_header(&path).expect("failed to load actors.h");
+        reg
+    }
+
+    fn schedule_source(source: &str, registry: &Registry) -> ScheduleResult {
+        let parse_result = crate::parser::parse(source);
+        assert!(
+            parse_result.errors.is_empty(),
+            "parse errors: {:?}",
+            parse_result.errors
+        );
+        let program = parse_result.program.expect("parse failed");
+        let resolve_result = resolve::resolve(&program, registry);
+        assert!(
+            resolve_result
+                .diagnostics
+                .iter()
+                .all(|d| d.level != DiagLevel::Error),
+            "resolve errors: {:#?}",
+            resolve_result.diagnostics
+        );
+        let graph_result = crate::graph::build_graph(&program, &resolve_result.resolved, registry);
+        assert!(
+            graph_result
+                .diagnostics
+                .iter()
+                .all(|d| d.level != DiagLevel::Error),
+            "graph errors: {:#?}",
+            graph_result.diagnostics
+        );
+        let analysis_result = crate::analyze::analyze(
+            &program,
+            &resolve_result.resolved,
+            &graph_result.graph,
+            registry,
+        );
+        assert!(
+            analysis_result
+                .diagnostics
+                .iter()
+                .all(|d| d.level != DiagLevel::Error),
+            "analysis errors: {:#?}",
+            analysis_result.diagnostics
+        );
+        schedule(
+            &program,
+            &resolve_result.resolved,
+            &graph_result.graph,
+            &analysis_result.analysis,
+            registry,
+        )
+    }
+
+    fn schedule_ok(source: &str, registry: &Registry) -> ScheduleResult {
+        let result = schedule_source(source, registry);
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "unexpected schedule errors: {:#?}",
+            errors
+        );
+        result
+    }
+
+    fn get_pipeline_schedule(meta: &TaskMeta) -> &SubgraphSchedule {
+        match &meta.schedule {
+            TaskSchedule::Pipeline(s) => s,
+            _ => panic!("expected Pipeline schedule"),
+        }
+    }
+
+    // ── Basic tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn linear_pipeline_order() {
+        let reg = test_registry();
+        let result = schedule_ok("clock 1kHz t {\n    adc(0) | stdout()\n}", &reg);
+        let meta = result.schedule.tasks.get("t").expect("task 't'");
+        let sched = get_pipeline_schedule(meta);
+        assert_eq!(sched.firings.len(), 2);
+        assert_eq!(meta.k_factor, 1);
+    }
+
+    #[test]
+    fn topological_dependency_order() {
+        // adc must fire before fft, fft before c2r, c2r before stdout
+        let reg = test_registry();
+        let result = schedule_ok(
+            "clock 1kHz t {\n    adc(0) | fft(256) | c2r() | stdout()\n}",
+            &reg,
+        );
+        let meta = result.schedule.tasks.get("t").unwrap();
+        let sched = get_pipeline_schedule(meta);
+        assert_eq!(sched.firings.len(), 4);
+        // rv: adc=256, fft=1, c2r=256, stdout=256
+        assert_eq!(sched.firings[0].repetition_count, 256, "adc fires 256x");
+        assert_eq!(sched.firings[1].repetition_count, 1, "fft fires 1x");
+        assert_eq!(sched.firings[2].repetition_count, 256, "c2r fires 256x");
+        assert_eq!(sched.firings[3].repetition_count, 256, "stdout fires 256x");
+    }
+
+    #[test]
+    fn decimation_repetition_counts() {
+        let reg = test_registry();
+        let result = schedule_ok(
+            "clock 1kHz t {\n    adc(0) | fft(256) | c2r() | stdout()\n}",
+            &reg,
+        );
+        let meta = result.schedule.tasks.get("t").unwrap();
+        let sched = get_pipeline_schedule(meta);
+        // fft(256): IN(float,256), OUT(cfloat,256)
+        // rv: adc=256, fft=1, c2r=256, stdout=256
+        let adc_rv = sched.firings.first().unwrap().repetition_count;
+        assert_eq!(adc_rv, 256, "adc should fire 256 times for fft(256)");
+    }
+
+    // ── K factor tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn k_factor_high_freq() {
+        let reg = test_registry();
+        let result = schedule_ok("clock 10MHz t {\n    adc(0) | stdout()\n}", &reg);
+        let meta = result.schedule.tasks.get("t").unwrap();
+        assert_eq!(meta.k_factor, 10);
+    }
+
+    #[test]
+    fn k_factor_low_freq() {
+        let reg = test_registry();
+        let result = schedule_ok("clock 1kHz t {\n    adc(0) | stdout()\n}", &reg);
+        let meta = result.schedule.tasks.get("t").unwrap();
+        assert_eq!(meta.k_factor, 1);
+    }
+
+    #[test]
+    fn k_factor_1mhz_boundary() {
+        let reg = test_registry();
+        let result = schedule_ok("clock 1MHz t {\n    adc(0) | stdout()\n}", &reg);
+        let meta = result.schedule.tasks.get("t").unwrap();
+        assert_eq!(meta.k_factor, 1);
+    }
+
+    // ── Feedback cycle tests ────────────────────────────────────────────
+
+    #[test]
+    fn feedback_with_delay_scheduled() {
+        let reg = test_registry();
+        let result = schedule_ok(
+            concat!(
+                "param alpha = 0.5\n",
+                "clock 1kHz t {\n",
+                "    adc(0) | add(:fb) | mul($alpha) | :out | stdout()\n",
+                "    :out | delay(1, 0.0) | :fb\n",
+                "}",
+            ),
+            &reg,
+        );
+        let meta = result.schedule.tasks.get("t").unwrap();
+        let sched = get_pipeline_schedule(meta);
+        // All nodes must be scheduled (delay cycle was broken)
+        assert!(sched.firings.len() >= 5, "all nodes should be scheduled");
+    }
+
+    // ── Modal task tests ────────────────────────────────────────────────
+
+    #[test]
+    fn modal_task_scheduled() {
+        let reg = test_registry();
+        let result = schedule_ok(
+            concat!(
+                "clock 1kHz t {\n",
+                "    control {\n        adc(0) | detect() -> ctrl\n    }\n",
+                "    mode sync {\n        adc(0) | stdout()\n    }\n",
+                "    mode data {\n        adc(0) | fft(256) | c2r() | stdout()\n    }\n",
+                "    switch(ctrl, sync, data) default sync\n",
+                "}",
+            ),
+            &reg,
+        );
+        let meta = result.schedule.tasks.get("t").unwrap();
+        match &meta.schedule {
+            TaskSchedule::Modal { control, modes } => {
+                assert!(!control.firings.is_empty(), "control should have firings");
+                assert_eq!(modes.len(), 2, "should have 2 mode schedules");
+            }
+            _ => panic!("expected Modal schedule"),
+        }
+    }
+
+    // ── Buffer sizing tests ─────────────────────────────────────────────
+
+    #[test]
+    fn edge_buffer_sizes() {
+        let reg = test_registry();
+        let result = schedule_ok(
+            "clock 1kHz t {\n    adc(0) | fft(256) | c2r() | stdout()\n}",
+            &reg,
+        );
+        let meta = result.schedule.tasks.get("t").unwrap();
+        let sched = get_pipeline_schedule(meta);
+        assert!(
+            !sched.edge_buffers.is_empty(),
+            "should have buffer size entries"
+        );
+        // adc→fft edge: adc fires 256 times producing 1 token each = 256 tokens
+        let max_buf = sched.edge_buffers.values().max().copied().unwrap_or(0);
+        assert!(max_buf >= 256, "adc→fft buffer should be ≥ 256 tokens");
+    }
+
+    // ── Fork topology tests ─────────────────────────────────────────────
+
+    #[test]
+    fn fork_topology() {
+        let reg = test_registry();
+        let result = schedule_ok(
+            "clock 1kHz t {\n    adc(0) | :raw | stdout()\n    :raw | stdout()\n}",
+            &reg,
+        );
+        let meta = result.schedule.tasks.get("t").unwrap();
+        let sched = get_pipeline_schedule(meta);
+        // adc, fork(:raw), stdout, stdout = 4 nodes
+        assert_eq!(sched.firings.len(), 4);
+    }
+
+    // ── Display test ────────────────────────────────────────────────────
+
+    #[test]
+    fn display_output() {
+        let reg = test_registry();
+        let result = schedule_ok("clock 1kHz t {\n    adc(0) | stdout()\n}", &reg);
+        let output = format!("{}", result.schedule);
+        assert!(output.contains("task 't'"));
+        assert!(output.contains("K=1"));
+        assert!(output.contains("[pipeline]"));
+    }
+
+    // ── Integration tests ───────────────────────────────────────────────
+
+    #[test]
+    fn example_pdl_schedule() {
+        let reg = test_registry();
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("examples/example.pdl");
+        let source = std::fs::read_to_string(&path).expect("failed to read example.pdl");
+        let result = schedule_source(&source, &reg);
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "example.pdl schedule errors: {:#?}",
+            errors
+        );
+        assert!(
+            result.schedule.tasks.len() >= 2,
+            "example.pdl should have at least 2 tasks"
+        );
+    }
+
+    #[test]
+    fn receiver_pdl_schedule() {
+        let reg = test_registry();
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("examples/receiver.pdl");
+        let source = std::fs::read_to_string(&path).expect("failed to read receiver.pdl");
+        let result = schedule_source(&source, &reg);
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "receiver.pdl schedule errors: {:#?}",
+            errors
+        );
+        // receiver.pdl has a modal task
+        let receiver = result.schedule.tasks.get("receiver");
+        assert!(receiver.is_some(), "should have 'receiver' task");
+        assert!(
+            matches!(&receiver.unwrap().schedule, TaskSchedule::Modal { .. }),
+            "receiver should have Modal schedule"
+        );
+    }
+
+    #[test]
+    fn feedback_pdl_schedule() {
+        let reg = test_registry();
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("examples/feedback.pdl");
+        let source = std::fs::read_to_string(&path).expect("failed to read feedback.pdl");
+        let result = schedule_source(&source, &reg);
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "feedback.pdl schedule errors: {:#?}",
+            errors
+        );
+    }
+}

@@ -10,3 +10,4 @@ pub mod lexer;
 pub mod parser;
 pub mod registry;
 pub mod resolve;
+pub mod schedule;
