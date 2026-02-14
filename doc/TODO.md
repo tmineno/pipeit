@@ -13,16 +13,16 @@ Based on [pipit-lang-spec-v0.1.0](spec/pipit-lang-spec-v0.1.0.md).
 
 ## Lexer (§2)
 
-- [ ] UTF-8 source reading
-- [ ] Tokenize keywords: `set const param define clock mode control switch default delay`
-- [ ] Tokenize special symbols: `| -> @ : ? $ #`
-- [ ] Numeric literals (int, float, negative, exponent)
-- [ ] Unit literals: frequency (`Hz kHz MHz GHz`), size (`KB MB GB`)
-- [ ] String literals with `\"` `\\` escapes
-- [ ] Array literals `[...]`
-- [ ] Identifiers `[a-zA-Z_][a-zA-Z0-9_]*`
-- [ ] Line comments `#`
-- [ ] Error reporting with source location
+- [x] UTF-8 source reading
+- [x] Tokenize keywords: `set const param define clock mode control switch default delay`
+- [x] Tokenize special symbols: `| -> @ : ? $ ( ) { } [ ] , =`
+- [x] Numeric literals (int, float, negative, exponent)
+- [x] Unit literals: frequency (`Hz kHz MHz GHz`), size (`KB MB GB`)
+- [x] String literals with `\"` `\\` escapes
+- [x] Array literals `[...]` — brackets tokenized; array parsing deferred to parser
+- [x] Identifiers `[a-zA-Z_][a-zA-Z0-9_]*`
+- [x] Line comments `#`
+- [x] Error reporting with source location
 
 ## Parser & AST (§10 BNF)
 

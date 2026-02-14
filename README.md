@@ -16,7 +16,7 @@ source.pdl → pcc → source_gen.cpp → g++/clang++ → executable
 
 ## Example
 
-```text
+```TypeScript
 const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]
 
 clock 10MHz capture {
