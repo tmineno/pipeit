@@ -4,6 +4,7 @@
 
 pub mod analyze;
 pub mod ast;
+pub mod dot;
 pub mod graph;
 pub mod lexer;
 pub mod parser;

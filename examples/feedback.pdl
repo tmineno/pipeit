@@ -1,9 +1,22 @@
-# feedback.pdl — IIR filter with feedback loop
-# =============================================
-# Demonstrates: feedback delay verification, multi-input actor,
-#               tap-input syntax, SDF balance with add(IN(float,2))
+# feedback.pdl — IIR feedback loop example (Pipit)
+# ================================================
+#
+# Demonstrates cyclic dataflow using tap-input feedback syntax.
+# The add(:fb) actor receives both the forward path from adc and
+# the delayed feedback path, forming a first-order IIR filter.
+#
+#   adc ──► add ──► mul ──► :out ──► stdout
+#            ▲                 │
+#            │                 ▼
+#           :fb ◄── delay ◄───┘
+
+set mem = 16MB
+set overrun = drop
+
+# Feedback coefficient
+param alpha = 0.5
 
 clock 1kHz iir {
-    adc(0) | add(:fb) | :out | stdout()
+    adc(0) | add(:fb) | mul($alpha) | :out | ?tap | stdout()
     :out | delay(1, 0.0) | :fb
 }

@@ -1,0 +1,75 @@
+# complex.pdl — Multi-task DSP pipeline with feedback, taps, and shared buffers
+# =============================================================================
+#
+# A dual-channel capture system with:
+#   - Two ADC channels with independent FIR front-ends
+#   - Tap forks for spectrum monitoring and logging
+#   - IIR feedback loop (AGC — automatic gain control)
+#   - Multiple probes for runtime observation
+#   - Three tasks at different clock rates sharing buffers
+#   - Define-based sub-pipeline reuse
+
+set mem = 128MB
+set overrun = drop
+
+const lp_coeff = [0.1, 0.2, 0.4, 0.2, 0.1]
+const bp_coeff = [0.05, -0.1, 0.3, -0.1, 0.05]
+
+param agc_gain = 1.0
+
+# Reusable front-end: ADC → FFT → complex-to-real
+define frontend(ch, n) {
+    adc(ch) | fft(n) | c2r()
+}
+
+# ── Fast capture: 10 MHz ─────────────────────────────────────────────
+#
+#   ch0: frontend → :raw0 → fir(lp) → AGC feedback → ?agc_out → →filtered
+#                     ├──→ mag → stdout  (spectrum monitor)
+#
+#   ch1: frontend → :raw1 → fir(bp) → ?bp_out → →narrow
+#                     ├──→ fir(lp) → →wideband
+#
+#   AGC loop: add(:fb) receives delayed feedback from its own output
+
+clock 10MHz capture {
+    frontend(0, 256) | :raw0 | fir(lp_coeff) | add(:fb) | mul($agc_gain) | :agc | ?agc_out -> filtered
+    :agc | delay(1, 0.0) | :fb
+    :raw0 | mag() | stdout()
+
+    frontend(1, 256) | :raw1 | fir(bp_coeff) | ?bp_out -> narrow
+    :raw1 | fir(lp_coeff) -> wideband
+}
+
+# ── Medium-rate analysis: 1 kHz ──────────────────────────────────────
+#
+#   Reads both shared buffers from capture, decimates, and logs to CSV.
+
+clock 1kHz analysis {
+    @filtered | decimate(10000) | :dec_f | csvwrite("filtered.csv")
+    :dec_f | stdout()
+
+    @narrow | decimate(10000) | csvwrite("narrow.csv")
+    @wideband | decimate(10000) | csvwrite("wideband.csv")
+}
+
+# ── Slow logger: 100 Hz ─────────────────────────────────────────────
+#
+#   Modal task: switches between correlation-based sync and data logging
+#   depending on the control signal.
+
+clock 10MHz monitor {
+    control {
+        adc(0) | correlate() | detect() -> ctl
+    }
+
+    mode sync {
+        adc(0) | fir(lp_coeff) | ?sync_probe -> sync_buf
+    }
+
+    mode data {
+        adc(0) | fft(256) | c2r() | fir(bp_coeff) | ?data_probe -> data_buf
+    }
+
+    switch(ctl, sync, data) default sync
+}
