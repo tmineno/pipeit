@@ -49,16 +49,17 @@ using int32 = std::int32_t;
         __VA_ARGS__                                                                                \
         int operator()(const _PIPIT_FIRST(in_spec) * in, _PIPIT_FIRST(out_spec) * out)
 
-// ── Ring buffer (lock-free SPSC) ────────────────────────────────────────────
+// ── Ring buffer (lock-free single-writer, multi-reader) ─────────────────────
 
 namespace pipit {
 
-template <typename T, std::size_t Capacity> class RingBuffer {
+template <typename T, std::size_t Capacity, std::size_t Readers = 1> class RingBuffer {
     static_assert(Capacity > 0, "RingBuffer capacity must be > 0");
-    static constexpr std::size_t N = Capacity + 1; // one extra slot for full/empty
+    static_assert(Readers > 0, "RingBuffer must have at least one reader");
+    static constexpr std::size_t N = Capacity;
 
-    alignas(64) std::atomic<std::size_t> head_{0};
-    alignas(64) std::atomic<std::size_t> tail_{0};
+    alignas(64) std::atomic<std::size_t> head_{0};          // absolute write cursor
+    alignas(64) std::atomic<std::size_t> tails_[Readers]{}; // absolute read cursors
     T buf_[N];
 
   public:
@@ -66,34 +67,48 @@ template <typename T, std::size_t Capacity> class RingBuffer {
 
     bool write(const T *src, std::size_t count) {
         std::size_t h = head_.load(std::memory_order_relaxed);
-        std::size_t t = tail_.load(std::memory_order_acquire);
-        std::size_t free = (t - h - 1 + N) % N;
+        std::size_t min_tail = tails_[0].load(std::memory_order_acquire);
+        for (std::size_t i = 1; i < Readers; ++i) {
+            std::size_t t = tails_[i].load(std::memory_order_acquire);
+            if (t < min_tail)
+                min_tail = t;
+        }
+        std::size_t used = h - min_tail;
+        if (used > Capacity)
+            return false;
+        std::size_t free = Capacity - used;
         if (count > free)
             return false;
         for (std::size_t i = 0; i < count; ++i) {
             buf_[(h + i) % N] = src[i];
         }
-        head_.store((h + count) % N, std::memory_order_release);
+        head_.store(h + count, std::memory_order_release);
         return true;
     }
 
-    bool read(T *dst, std::size_t count) {
-        std::size_t t = tail_.load(std::memory_order_relaxed);
+    bool read(std::size_t reader_idx, T *dst, std::size_t count) {
+        if (reader_idx >= Readers)
+            return false;
+        std::size_t t = tails_[reader_idx].load(std::memory_order_relaxed);
         std::size_t h = head_.load(std::memory_order_acquire);
-        std::size_t avail = (h - t + N) % N;
+        std::size_t avail = h - t;
         if (count > avail)
             return false;
         for (std::size_t i = 0; i < count; ++i) {
             dst[i] = buf_[(t + i) % N];
         }
-        tail_.store((t + count) % N, std::memory_order_release);
+        tails_[reader_idx].store(t + count, std::memory_order_release);
         return true;
     }
 
-    std::size_t available() const {
+    bool read(T *dst, std::size_t count) { return read(0, dst, count); }
+
+    std::size_t available(std::size_t reader_idx = 0) const {
+        if (reader_idx >= Readers)
+            return 0;
         std::size_t h = head_.load(std::memory_order_acquire);
-        std::size_t t = tail_.load(std::memory_order_acquire);
-        return (h - t + N) % N;
+        std::size_t t = tails_[reader_idx].load(std::memory_order_acquire);
+        return h - t;
     }
 };
 

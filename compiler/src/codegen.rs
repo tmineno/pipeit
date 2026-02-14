@@ -249,10 +249,11 @@ impl<'a> CodegenCtx<'a> {
             let wire_type = self.infer_buffer_wire_type(buf_name);
             let cpp_type = pipit_type_to_cpp(wire_type);
             let capacity = self.inter_task_buffer_capacity(buf_name, wire_type);
+            let reader_count = self.buffer_reader_tasks(buf_name).len().max(1);
             let _ = writeln!(
                 self.out,
-                "static pipit::RingBuffer<{}, {}> _ringbuf_{};",
-                cpp_type, capacity, buf_name
+                "static pipit::RingBuffer<{}, {}, {}> _ringbuf_{};",
+                cpp_type, capacity, reader_count, buf_name
             );
         }
         self.out.push('\n');
@@ -532,10 +533,10 @@ impl<'a> CodegenCtx<'a> {
                 self.emit_probe(sub, sched, node, probe_name, ind, edge_bufs);
             }
             NodeKind::BufferRead { buffer_name } => {
-                self.emit_buffer_read(sub, sched, node, buffer_name, ind, edge_bufs);
+                self.emit_buffer_read(task_name, sub, sched, node, buffer_name, ind, edge_bufs);
             }
             NodeKind::BufferWrite { buffer_name } => {
-                self.emit_buffer_write(sub, sched, node, buffer_name, ind, edge_bufs);
+                self.emit_buffer_write(task_name, sub, sched, node, buffer_name, ind, edge_bufs);
             }
         }
 
@@ -711,10 +712,12 @@ impl<'a> CodegenCtx<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_buffer_read(
         &mut self,
+        task_name: &str,
         sub: &Subgraph,
-        _sched: &SubgraphSchedule,
+        sched: &SubgraphSchedule,
         node: &Node,
         buffer_name: &str,
         indent: &str,
@@ -725,19 +728,44 @@ impl<'a> CodegenCtx<'a> {
 
         if let Some(out_edge) = outgoing.first() {
             if let Some(dst_buf) = edge_bufs.get(&(out_edge.source, out_edge.target)) {
+                let rep = self.firing_repetition(sched, node.id).max(1);
+                let total_tokens = self.edge_buffer_tokens(sched, out_edge.source, out_edge.target);
+                let per_firing_tokens = (total_tokens / rep).max(1);
+                let dst_expr = if rep > 1 {
+                    format!("&{}[_r * {}]", dst_buf, per_firing_tokens)
+                } else {
+                    dst_buf.clone()
+                };
+                let reader_idx = self
+                    .reader_index_for_task(buffer_name, task_name)
+                    .unwrap_or(0);
                 let _ = writeln!(
                     self.out,
-                    "{}_ringbuf_{}.read({}, 1);",
-                    indent, buffer_name, dst_buf
+                    "{}if (!_ringbuf_{}.read({}, {}, {})) {{",
+                    indent, buffer_name, reader_idx, dst_expr, per_firing_tokens
                 );
+                let _ = writeln!(
+                    self.out,
+                    "{}    std::fprintf(stderr, \"runtime error: task '{}' failed to read {} token(s) from shared buffer '{}'\\n\");",
+                    indent, task_name, per_firing_tokens, buffer_name
+                );
+                let _ = writeln!(
+                    self.out,
+                    "{}    _stop.store(true, std::memory_order_release);",
+                    indent
+                );
+                let _ = writeln!(self.out, "{}    return;", indent);
+                let _ = writeln!(self.out, "{}}}", indent);
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_buffer_write(
         &mut self,
+        task_name: &str,
         sub: &Subgraph,
-        _sched: &SubgraphSchedule,
+        sched: &SubgraphSchedule,
         node: &Node,
         buffer_name: &str,
         indent: &str,
@@ -748,11 +776,31 @@ impl<'a> CodegenCtx<'a> {
 
         if let Some(in_edge) = incoming.first() {
             if let Some(src_buf) = edge_bufs.get(&(in_edge.source, in_edge.target)) {
+                let rep = self.firing_repetition(sched, node.id).max(1);
+                let total_tokens = self.edge_buffer_tokens(sched, in_edge.source, in_edge.target);
+                let per_firing_tokens = (total_tokens / rep).max(1);
+                let src_expr = if rep > 1 {
+                    format!("&{}[_r * {}]", src_buf, per_firing_tokens)
+                } else {
+                    src_buf.clone()
+                };
                 let _ = writeln!(
                     self.out,
-                    "{}_ringbuf_{}.write({}, 1);",
-                    indent, buffer_name, src_buf
+                    "{}if (!_ringbuf_{}.write({}, {})) {{",
+                    indent, buffer_name, src_expr, per_firing_tokens
                 );
+                let _ = writeln!(
+                    self.out,
+                    "{}    std::fprintf(stderr, \"runtime error: task '{}' failed to write {} token(s) to shared buffer '{}'\\n\");",
+                    indent, task_name, per_firing_tokens, buffer_name
+                );
+                let _ = writeln!(
+                    self.out,
+                    "{}    _stop.store(true, std::memory_order_release);",
+                    indent
+                );
+                let _ = writeln!(self.out, "{}    return;", indent);
+                let _ = writeln!(self.out, "{}}}", indent);
             }
         }
     }
@@ -1341,6 +1389,24 @@ impl<'a> CodegenCtx<'a> {
             }
         }
         PipitType::Float
+    }
+
+    fn buffer_reader_tasks(&self, buffer_name: &str) -> Vec<String> {
+        let mut readers = HashSet::new();
+        if let Some(info) = self.resolved.buffers.get(buffer_name) {
+            for (task_name, _) in &info.readers {
+                readers.insert(task_name.clone());
+            }
+        }
+        let mut sorted: Vec<String> = readers.into_iter().collect();
+        sorted.sort();
+        sorted
+    }
+
+    fn reader_index_for_task(&self, buffer_name: &str, task_name: &str) -> Option<usize> {
+        self.buffer_reader_tasks(buffer_name)
+            .iter()
+            .position(|t| t == task_name)
     }
 
     fn inter_task_buffer_capacity(&self, buf_name: &str, wire_type: PipitType) -> u32 {

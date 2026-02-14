@@ -147,6 +147,45 @@ fn assert_inline_compiles(pdl_source: &str, test_name: &str) {
     );
 }
 
+/// Run pcc on inline PDL source and return generated C++ source.
+fn generate_inline_cpp(pdl_source: &str, test_name: &str) -> String {
+    let root = project_root();
+    let actors_h = root.join("examples").join("actors.h");
+
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_dir = std::env::temp_dir();
+    let pdl_file = tmp_dir.join(format!("pipit_inline_gen_{}.pdl", n));
+    std::fs::write(&pdl_file, pdl_source).expect("write pdl temp");
+
+    let pcc = pcc_binary();
+    let n2 = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let cpp_out = std::env::temp_dir().join(format!("pipit_gen_check_{}.cpp", n2));
+    let gen = Command::new(&pcc)
+        .arg(pdl_file.to_str().unwrap())
+        .arg("-I")
+        .arg(actors_h.to_str().unwrap())
+        .arg("--emit")
+        .arg("cpp")
+        .arg("-o")
+        .arg(cpp_out.to_str().unwrap())
+        .output()
+        .expect("failed to run pcc");
+
+    let _ = std::fs::remove_file(&pdl_file);
+
+    assert!(
+        gen.status.success(),
+        "pcc failed for '{}':\n{}",
+        test_name,
+        String::from_utf8_lossy(&gen.stderr)
+    );
+
+    let cpp = std::fs::read_to_string(&cpp_out).expect("failed to read generated cpp");
+    let _ = std::fs::remove_file(&cpp_out);
+    assert!(!cpp.is_empty(), "empty output for '{}'", test_name);
+    cpp
+}
+
 /// Syntax-check a C++ source string with the system compiler.
 fn compile_cpp(
     cxx: &str,
@@ -504,5 +543,84 @@ fn define_with_probe_and_tap() {
             "clock 1kHz t { adc(0) | :in | process() | stdout()\n:in | stdout() }\n",
         ),
         "define_probe_tap",
+    );
+}
+
+// ── Shared-memory model correctness (regressions) ──────────────────────
+
+#[test]
+fn shared_buffer_multi_reader_has_independent_reader_indices() {
+    let cpp = generate_inline_cpp(
+        concat!(
+            "clock 1kHz w { adc(0) -> sig }\n",
+            "clock 1kHz r1 { @sig | stdout() }\n",
+            "clock 1kHz r2 { @sig | stdout() }\n",
+        ),
+        "shared_multi_reader_indices",
+    );
+
+    assert!(
+        cpp.contains("RingBuffer<float, 2, 2> _ringbuf_sig"),
+        "expected 2-reader shared ring buffer, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("_ringbuf_sig.read(0,"),
+        "first reader should use index 0, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("_ringbuf_sig.read(1,"),
+        "second reader should use index 1, got:\n{}",
+        cpp
+    );
+}
+
+#[test]
+fn shared_buffer_io_checks_status_and_stops_on_failure() {
+    let cpp = generate_inline_cpp(
+        concat!(
+            "clock 1kHz w { adc(0) -> sig }\n",
+            "clock 1kHz r { @sig | stdout() }\n",
+        ),
+        "shared_io_status_checks",
+    );
+
+    assert!(
+        cpp.contains("if (!_ringbuf_sig.write("),
+        "write should check ring-buffer status, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("if (!_ringbuf_sig.read("),
+        "read should check ring-buffer status, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("_stop.store(true, std::memory_order_release)"),
+        "failed I/O should set stop flag, got:\n{}",
+        cpp
+    );
+}
+
+#[test]
+fn shared_buffer_io_uses_pointer_offsets_in_repetition_loops() {
+    let cpp = generate_inline_cpp(
+        concat!(
+            "clock 1MHz w { adc(0) | fft(256) | c2r() | fir(5, [0.1, 0.2, 0.4, 0.2, 0.1]) -> sig }\n",
+            "clock 1kHz r { @sig | decimate(10000) | stdout() }\n",
+        ),
+        "shared_io_offsets",
+    );
+
+    assert!(
+        cpp.contains("_ringbuf_sig.write(&_"),
+        "writer should advance pointer with per-firing offset, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("_ringbuf_sig.read(0, &_"),
+        "reader should advance pointer with per-firing offset, got:\n{}",
+        cpp
     );
 }
