@@ -58,12 +58,16 @@ fn assert_pdl_file_compiles(pdl_name: &str) {
     assert!(pdl_path.exists(), "missing {}", pdl_path.display());
 
     let pcc = pcc_binary();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let cpp_out = std::env::temp_dir().join(format!("pipit_gen_{}.cpp", n));
     let gen = Command::new(&pcc)
         .arg(pdl_path.to_str().unwrap())
         .arg("-I")
         .arg(actors_h.to_str().unwrap())
         .arg("--emit")
         .arg("cpp")
+        .arg("-o")
+        .arg(cpp_out.to_str().unwrap())
         .output()
         .expect("failed to run pcc");
 
@@ -74,7 +78,8 @@ fn assert_pdl_file_compiles(pdl_name: &str) {
         String::from_utf8_lossy(&gen.stderr)
     );
 
-    let cpp = String::from_utf8(gen.stdout).unwrap();
+    let cpp = std::fs::read_to_string(&cpp_out).expect("failed to read generated cpp");
+    let _ = std::fs::remove_file(&cpp_out);
     assert!(!cpp.is_empty(), "empty output for {}", pdl_name);
 
     compile_cpp(
@@ -107,12 +112,16 @@ fn assert_inline_compiles(pdl_source: &str, test_name: &str) {
     std::fs::write(&pdl_file, pdl_source).expect("write pdl temp");
 
     let pcc = pcc_binary();
+    let n2 = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let cpp_out = std::env::temp_dir().join(format!("pipit_gen_inline_{}.cpp", n2));
     let gen = Command::new(&pcc)
         .arg(pdl_file.to_str().unwrap())
         .arg("-I")
         .arg(actors_h.to_str().unwrap())
         .arg("--emit")
         .arg("cpp")
+        .arg("-o")
+        .arg(cpp_out.to_str().unwrap())
         .output()
         .expect("failed to run pcc");
 
@@ -125,7 +134,8 @@ fn assert_inline_compiles(pdl_source: &str, test_name: &str) {
         String::from_utf8_lossy(&gen.stderr)
     );
 
-    let cpp = String::from_utf8(gen.stdout).unwrap();
+    let cpp = std::fs::read_to_string(&cpp_out).expect("failed to read generated cpp");
+    let _ = std::fs::remove_file(&cpp_out);
     assert!(!cpp.is_empty(), "empty output for '{}'", test_name);
 
     compile_cpp(
