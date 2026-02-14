@@ -188,6 +188,9 @@ struct GraphBuilder<'a> {
     inter_task_edges: Vec<InterTaskEdge>,
     cycles: Vec<Vec<NodeId>>,
     diagnostics: Vec<Diagnostic>,
+    /// Global counters to ensure unique NodeId/EdgeId across all subgraphs.
+    next_global_node_id: u32,
+    next_global_edge_id: u32,
 }
 
 /// Context for building a single subgraph.
@@ -208,12 +211,12 @@ struct SubgraphCtx {
 }
 
 impl SubgraphCtx {
-    fn new() -> Self {
+    fn new(start_node_id: u32, start_edge_id: u32) -> Self {
         SubgraphCtx {
             nodes: Vec::new(),
             edges: Vec::new(),
-            next_node_id: 0,
-            next_edge_id: 0,
+            next_node_id: start_node_id,
+            next_edge_id: start_edge_id,
             taps: HashMap::new(),
             buffer_writes: HashMap::new(),
             buffer_reads: HashMap::new(),
@@ -282,6 +285,8 @@ impl<'a> GraphBuilder<'a> {
             inter_task_edges: Vec::new(),
             cycles: Vec::new(),
             diagnostics: Vec::new(),
+            next_global_node_id: 0,
+            next_global_edge_id: 0,
         }
     }
 
@@ -324,7 +329,7 @@ impl<'a> GraphBuilder<'a> {
     }
 
     fn build_subgraph(&mut self, body: &PipelineBody) -> Subgraph {
-        let mut ctx = SubgraphCtx::new();
+        let mut ctx = SubgraphCtx::new(self.next_global_node_id, self.next_global_edge_id);
 
         for line in &body.lines {
             self.build_pipe_expr(line, &mut ctx, 0);
@@ -332,6 +337,10 @@ impl<'a> GraphBuilder<'a> {
 
         // Post-pass: resolve deferred tap-input edges (for feedback loops)
         self.resolve_pending_tap_inputs(&mut ctx);
+
+        // Update global counters so next subgraph gets unique IDs
+        self.next_global_node_id = ctx.next_node_id;
+        self.next_global_edge_id = ctx.next_edge_id;
 
         ctx.into_subgraph()
     }
