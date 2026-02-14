@@ -137,6 +137,7 @@ impl std::error::Error for RegistryError {}
 // ── Registry ────────────────────────────────────────────────────────────────
 
 /// Actor metadata registry. Populated by scanning C++ header files.
+#[derive(Clone)]
 pub struct Registry {
     actors: HashMap<String, (ActorMeta, PathBuf)>,
 }
@@ -193,6 +194,15 @@ impl Registry {
 
     pub fn is_empty(&self) -> bool {
         self.actors.is_empty()
+    }
+
+    /// Overlay entries from another registry.
+    /// Existing names are replaced by entries from `other`.
+    pub fn overlay_from(&mut self, other: &Registry) {
+        for (name, (meta, path)) in &other.actors {
+            self.actors
+                .insert(name.clone(), (meta.clone(), path.clone()));
+        }
     }
 }
 

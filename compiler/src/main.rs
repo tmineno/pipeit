@@ -1,5 +1,12 @@
 use clap::Parser;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+
+const EXIT_OK: i32 = 0;
+const EXIT_COMPILE_ERROR: i32 = 1;
+const EXIT_USAGE_ERROR: i32 = 2;
+const EXIT_SYSTEM_ERROR: i32 = 3;
 
 #[derive(Debug, Clone, clap::ValueEnum)]
 enum EmitStage {
@@ -46,9 +53,9 @@ struct Cli {
     #[arg(long, default_value = "c++")]
     cc: String,
 
-    /// Additional C++ compiler flags
-    #[arg(long, default_value = "-O2")]
-    cflags: String,
+    /// Additional C++ compiler flags (overrides default optimization flags)
+    #[arg(long)]
+    cflags: Option<String>,
 
     /// Print compiler phases and timing
     #[arg(long)]
@@ -64,47 +71,37 @@ fn main() {
         eprintln!("pcc: emit   = {:?}", cli.emit);
     }
 
-    // ── Load actor registry ──
-    let mut registry = pcc::registry::Registry::new();
-    for path in &cli.include {
-        match registry.load_header(path) {
-            Ok(n) => {
-                if cli.verbose {
-                    eprintln!("pcc: loaded {} actors from {}", n, path.display());
-                }
-            }
-            Err(e) => {
-                eprintln!("pcc: error: {}", e);
-                std::process::exit(2);
-            }
-        }
-    }
-
-    if cli.verbose {
-        eprintln!("pcc: {} actors registered", registry.len());
-    }
-
     // ── Read and parse source ──
     let source = match std::fs::read_to_string(&cli.source) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("pcc: error: {}: {}", cli.source.display(), e);
-            std::process::exit(2);
+            eprintln!("error: {}: {}", cli.source.display(), e);
+            std::process::exit(EXIT_USAGE_ERROR);
         }
     };
 
     let parse_result = pcc::parser::parse(&source);
     if !parse_result.errors.is_empty() {
         for err in &parse_result.errors {
-            eprintln!("pcc: parse error: {}", err);
+            let span = err.span();
+            print_span_diagnostic(
+                "error",
+                &format!("{}", err),
+                &cli.source,
+                &source,
+                span.start,
+                span.end,
+                None,
+            );
         }
-        std::process::exit(1);
+        std::process::exit(EXIT_COMPILE_ERROR);
     }
+
     let program = match parse_result.program {
         Some(p) => p,
         None => {
-            eprintln!("pcc: parse failed with no output");
-            std::process::exit(1);
+            eprintln!("error: parse failed with no output");
+            std::process::exit(EXIT_COMPILE_ERROR);
         }
     };
 
@@ -112,19 +109,30 @@ fn main() {
         eprintln!("pcc: parsed {} statements", program.statements.len());
     }
 
+    if matches!(cli.emit, EmitStage::Ast) {
+        println!("{:#?}", program);
+        std::process::exit(EXIT_OK);
+    }
+
+    // ── Load actor registry ──
+    let (registry, loaded_headers) = match load_actor_registry(&cli) {
+        Ok(v) => v,
+        Err((msg, code)) => {
+            eprintln!("error: {}", msg);
+            std::process::exit(code);
+        }
+    };
+
+    if cli.verbose {
+        eprintln!("pcc: {} actors registered", registry.len());
+    }
+
     // ── Name resolution ──
     let resolve_result = pcc::resolve::resolve(&program, &registry);
-    if !resolve_result.diagnostics.is_empty() {
-        for diag in &resolve_result.diagnostics {
-            eprintln!("pcc: {}", diag);
-        }
-        if resolve_result
-            .diagnostics
-            .iter()
-            .any(|d| d.level == pcc::resolve::DiagLevel::Error)
-        {
-            std::process::exit(1);
-        }
+    let resolve_has_errors =
+        print_pipeline_diags(&cli.source, &source, &resolve_result.diagnostics);
+    if resolve_has_errors {
+        std::process::exit(EXIT_COMPILE_ERROR);
     }
 
     if cli.verbose {
@@ -138,34 +146,18 @@ fn main() {
 
     // ── Graph construction ──
     let graph_result = pcc::graph::build_graph(&program, &resolve_result.resolved, &registry);
-    if !graph_result.diagnostics.is_empty() {
-        for diag in &graph_result.diagnostics {
-            eprintln!("pcc: {}", diag);
-        }
-        if graph_result
-            .diagnostics
-            .iter()
-            .any(|d| d.level == pcc::resolve::DiagLevel::Error)
-        {
-            std::process::exit(1);
-        }
+    let graph_has_errors = print_pipeline_diags(&cli.source, &source, &graph_result.diagnostics);
+    if graph_has_errors {
+        std::process::exit(EXIT_COMPILE_ERROR);
     }
 
     if cli.verbose {
         eprintln!("pcc: built {} task graphs", graph_result.graph.tasks.len());
     }
 
-    // ── Emit graph (if requested) ──
-    match cli.emit {
-        EmitStage::Graph => {
-            println!("{}", graph_result.graph);
-            std::process::exit(0);
-        }
-        EmitStage::GraphDot => {
-            print!("{}", pcc::dot::emit_dot(&graph_result.graph));
-            std::process::exit(0);
-        }
-        _ => {}
+    if matches!(cli.emit, EmitStage::GraphDot) {
+        print!("{}", pcc::dot::emit_dot(&graph_result.graph));
+        std::process::exit(EXIT_OK);
     }
 
     // ── Static analysis ──
@@ -175,17 +167,10 @@ fn main() {
         &graph_result.graph,
         &registry,
     );
-    if !analysis_result.diagnostics.is_empty() {
-        for diag in &analysis_result.diagnostics {
-            eprintln!("pcc: {}", diag);
-        }
-        if analysis_result
-            .diagnostics
-            .iter()
-            .any(|d| d.level == pcc::resolve::DiagLevel::Error)
-        {
-            std::process::exit(1);
-        }
+    let analysis_has_errors =
+        print_pipeline_diags(&cli.source, &source, &analysis_result.diagnostics);
+    if analysis_has_errors {
+        std::process::exit(EXIT_COMPILE_ERROR);
     }
 
     if cli.verbose {
@@ -203,17 +188,10 @@ fn main() {
         &analysis_result.analysis,
         &registry,
     );
-    if !schedule_result.diagnostics.is_empty() {
-        for diag in &schedule_result.diagnostics {
-            eprintln!("pcc: {}", diag);
-        }
-        if schedule_result
-            .diagnostics
-            .iter()
-            .any(|d| d.level == pcc::resolve::DiagLevel::Error)
-        {
-            std::process::exit(1);
-        }
+    let schedule_has_errors =
+        print_pipeline_diags(&cli.source, &source, &schedule_result.diagnostics);
+    if schedule_has_errors {
+        std::process::exit(EXIT_COMPILE_ERROR);
     }
 
     if cli.verbose {
@@ -223,9 +201,21 @@ fn main() {
         );
     }
 
+    if matches!(cli.emit, EmitStage::Graph) {
+        print!(
+            "{}",
+            emit_graph_dump(
+                &graph_result.graph,
+                &analysis_result.analysis,
+                &schedule_result.schedule,
+            )
+        );
+        std::process::exit(EXIT_OK);
+    }
+
     if matches!(cli.emit, EmitStage::Schedule) {
         print!("{}", schedule_result.schedule);
-        std::process::exit(0);
+        std::process::exit(EXIT_OK);
     }
 
     if matches!(cli.emit, EmitStage::TimingChart) {
@@ -233,13 +223,13 @@ fn main() {
             "{}",
             pcc::timing::emit_timing_chart(&schedule_result.schedule, &graph_result.graph)
         );
-        std::process::exit(0);
+        std::process::exit(EXIT_OK);
     }
 
     // ── Code generation ──
     let codegen_options = pcc::codegen::CodegenOptions {
         release: cli.release,
-        include_paths: cli.include.clone(),
+        include_paths: loaded_headers.clone(),
     };
     let codegen_result = pcc::codegen::codegen(
         &program,
@@ -250,17 +240,11 @@ fn main() {
         &registry,
         &codegen_options,
     );
-    if !codegen_result.diagnostics.is_empty() {
-        for diag in &codegen_result.diagnostics {
-            eprintln!("pcc: {}", diag);
-        }
-        if codegen_result
-            .diagnostics
-            .iter()
-            .any(|d| d.level == pcc::resolve::DiagLevel::Error)
-        {
-            std::process::exit(1);
-        }
+
+    let codegen_has_errors =
+        print_pipeline_diags(&cli.source, &source, &codegen_result.diagnostics);
+    if codegen_has_errors {
+        std::process::exit(EXIT_COMPILE_ERROR);
     }
 
     if cli.verbose {
@@ -272,40 +256,76 @@ fn main() {
 
     match cli.emit {
         EmitStage::Cpp => {
-            print!("{}", codegen_result.generated.cpp_source);
-            std::process::exit(0);
+            if cli.output == Path::new("-") {
+                print!("{}", codegen_result.generated.cpp_source);
+            } else if let Err(e) = std::fs::write(&cli.output, &codegen_result.generated.cpp_source)
+            {
+                eprintln!("error: failed to write {}: {}", cli.output.display(), e);
+                std::process::exit(EXIT_SYSTEM_ERROR);
+            }
+
+            if cli.verbose {
+                eprintln!("pcc: wrote {}", cli.output.display());
+            }
+            std::process::exit(EXIT_OK);
         }
         EmitStage::Exe => {
             // Write generated C++ to temp file
             let tmp_dir = std::env::temp_dir();
-            let tmp_cpp = tmp_dir.join("pcc_generated.cpp");
+            let tmp_cpp = tmp_dir.join(format!("pcc_generated_{}.cpp", std::process::id()));
             if let Err(e) = std::fs::write(&tmp_cpp, &codegen_result.generated.cpp_source) {
-                eprintln!("pcc: error: failed to write temp file: {}", e);
-                std::process::exit(2);
+                eprintln!(
+                    "error: failed to write temp file {}: {}",
+                    tmp_cpp.display(),
+                    e
+                );
+                std::process::exit(EXIT_SYSTEM_ERROR);
             }
 
             // Build compiler command
             let mut cmd = std::process::Command::new(&cli.cc);
             cmd.arg("-std=c++17");
-            for flag in cli.cflags.split_whitespace() {
-                cmd.arg(flag);
+
+            if let Some(flags) = &cli.cflags {
+                for flag in flags.split_whitespace() {
+                    cmd.arg(flag);
+                }
+            } else if cli.release {
+                cmd.arg("-O2");
+            } else {
+                cmd.arg("-O0").arg("-g");
             }
+
             if cli.release {
                 cmd.arg("-DNDEBUG");
             }
-            // Include runtime header path (relative to source)
-            let runtime_include = cli
-                .source
-                .parent()
-                .unwrap_or(std::path::Path::new("."))
-                .join("../runtime/libpipit/include");
+
+            // Runtime headers live at workspace/runtime/libpipit/include.
+            let runtime_include = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("runtime")
+                .join("libpipit")
+                .join("include");
             if runtime_include.exists() {
                 cmd.arg("-I").arg(&runtime_include);
             }
-            // Include actor headers
-            for path in &cli.include {
+
+            // Include directories for actor headers (needed for emitted #include "..." lines).
+            let mut include_dirs = BTreeSet::new();
+            for path in &loaded_headers {
+                if let Some(dir) = path.parent() {
+                    include_dirs.insert(dir.to_path_buf());
+                }
+            }
+            for dir in include_dirs {
+                cmd.arg("-I").arg(dir);
+            }
+
+            // Force-include actor headers discovered from both -I and --actor-path.
+            for path in &loaded_headers {
                 cmd.arg("-include").arg(path);
             }
+
             cmd.arg("-lpthread");
             cmd.arg("-o").arg(&cli.output);
             cmd.arg(&tmp_cpp);
@@ -317,8 +337,9 @@ fn main() {
             let status = match cmd.status() {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("pcc: error: failed to run C++ compiler '{}': {}", cli.cc, e);
-                    std::process::exit(2);
+                    eprintln!("error: failed to run C++ compiler '{}': {}", cli.cc, e);
+                    let _ = std::fs::remove_file(&tmp_cpp);
+                    std::process::exit(EXIT_SYSTEM_ERROR);
                 }
             };
 
@@ -326,14 +347,304 @@ fn main() {
             let _ = std::fs::remove_file(&tmp_cpp);
 
             if !status.success() {
-                eprintln!("pcc: error: C++ compilation failed");
-                std::process::exit(1);
+                eprintln!("error: C++ compilation failed");
+                std::process::exit(EXIT_COMPILE_ERROR);
             }
 
             if cli.verbose {
                 eprintln!("pcc: wrote {}", cli.output.display());
             }
+
+            std::process::exit(EXIT_OK);
         }
-        _ => {} // Already handled earlier
+        _ => {}
+    }
+}
+
+fn load_actor_registry(
+    cli: &Cli,
+) -> Result<(pcc::registry::Registry, Vec<PathBuf>), (String, i32)> {
+    let include_headers = canonicalize_all(&cli.include, EXIT_USAGE_ERROR)?;
+    let actor_path_headers = discover_actor_headers(&cli.actor_path)?;
+
+    let mut include_registry = pcc::registry::Registry::new();
+    for path in &include_headers {
+        include_registry
+            .load_header(path)
+            .map_err(map_registry_error)?;
+
+        if cli.verbose {
+            eprintln!("pcc: loaded actors from include {}", path.display());
+        }
+    }
+
+    let mut actor_path_registry = pcc::registry::Registry::new();
+    for path in &actor_path_headers {
+        actor_path_registry
+            .load_header(path)
+            .map_err(map_registry_error)?;
+
+        if cli.verbose {
+            eprintln!("pcc: loaded actors from actor-path {}", path.display());
+        }
+    }
+
+    // --actor-path is base registry; -I overlays with precedence.
+    actor_path_registry.overlay_from(&include_registry);
+
+    let mut all_headers = Vec::new();
+    all_headers.extend(actor_path_headers);
+    all_headers.extend(include_headers);
+
+    let mut dedup = BTreeSet::new();
+    all_headers.retain(|p| dedup.insert(p.clone()));
+
+    Ok((actor_path_registry, all_headers))
+}
+
+fn canonicalize_all(paths: &[PathBuf], err_code: i32) -> Result<Vec<PathBuf>, (String, i32)> {
+    let mut out = Vec::new();
+    for path in paths {
+        let abs = std::fs::canonicalize(path)
+            .map_err(|e| (format!("{}: {}", path.display(), e), err_code))?;
+        out.push(abs);
+    }
+    Ok(out)
+}
+
+fn discover_actor_headers(actor_paths: &[PathBuf]) -> Result<Vec<PathBuf>, (String, i32)> {
+    let mut discovered = BTreeSet::new();
+
+    for path in actor_paths {
+        let root = std::fs::canonicalize(path)
+            .map_err(|e| (format!("{}: {}", path.display(), e), EXIT_USAGE_ERROR))?;
+
+        if !root.is_dir() {
+            return Err((
+                format!("--actor-path expects a directory: {}", root.display()),
+                EXIT_USAGE_ERROR,
+            ));
+        }
+
+        discover_headers_recursive(&root, &mut discovered)?;
+    }
+
+    Ok(discovered.into_iter().collect())
+}
+
+fn discover_headers_recursive(
+    dir: &Path,
+    out: &mut BTreeSet<PathBuf>,
+) -> Result<(), (String, i32)> {
+    let entries = std::fs::read_dir(dir).map_err(|e| {
+        (
+            format!("failed to read {}: {}", dir.display(), e),
+            EXIT_SYSTEM_ERROR,
+        )
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            (
+                format!("failed to read directory entry in {}: {}", dir.display(), e),
+                EXIT_SYSTEM_ERROR,
+            )
+        })?;
+
+        let path = entry.path();
+        if path.is_dir() {
+            discover_headers_recursive(&path, out)?;
+            continue;
+        }
+
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase());
+
+        if matches!(ext.as_deref(), Some("h" | "hh" | "hpp" | "hxx")) {
+            let abs = std::fs::canonicalize(&path).map_err(|e| {
+                (
+                    format!("failed to canonicalize {}: {}", path.display(), e),
+                    EXIT_SYSTEM_ERROR,
+                )
+            })?;
+            out.insert(abs);
+        }
+    }
+
+    Ok(())
+}
+
+fn map_registry_error(e: pcc::registry::RegistryError) -> (String, i32) {
+    match e {
+        pcc::registry::RegistryError::IoError { .. } => (format!("{}", e), EXIT_SYSTEM_ERROR),
+        pcc::registry::RegistryError::ParseError { .. }
+        | pcc::registry::RegistryError::DuplicateActor { .. } => {
+            (format!("{}", e), EXIT_COMPILE_ERROR)
+        }
+    }
+}
+
+fn print_pipeline_diags(
+    source_path: &Path,
+    source: &str,
+    diags: &[pcc::resolve::Diagnostic],
+) -> bool {
+    let mut has_error = false;
+
+    for diag in diags {
+        let (level, is_error) = match diag.level {
+            pcc::resolve::DiagLevel::Error => ("error", true),
+            pcc::resolve::DiagLevel::Warning => ("warning", false),
+        };
+
+        print_span_diagnostic(
+            level,
+            &diag.message,
+            source_path,
+            source,
+            diag.span.start,
+            diag.span.end,
+            None,
+        );
+
+        has_error |= is_error;
+    }
+
+    has_error
+}
+
+fn print_span_diagnostic(
+    level: &str,
+    message: &str,
+    source_path: &Path,
+    source: &str,
+    span_start: usize,
+    span_end: usize,
+    hint: Option<&str>,
+) {
+    let start = span_start.min(source.len());
+    let end = span_end.min(source.len());
+
+    let line_start = source[..start].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = source[start..]
+        .find('\n')
+        .map_or(source.len(), |i| start + i);
+    let line_text = &source[line_start..line_end];
+
+    let line_no = source[..line_start].bytes().filter(|b| *b == b'\n').count() + 1;
+    let col_no = source[line_start..start].chars().count() + 1;
+
+    let mut caret_width = if end > start {
+        let caret_end = end.min(line_end);
+        source[start..caret_end].chars().count().max(1)
+    } else {
+        1
+    };
+
+    if line_text.is_empty() {
+        caret_width = 1;
+    }
+
+    eprintln!("{}: {}", level, message);
+    eprintln!("  at {}:{}:{}", source_path.display(), line_no, col_no);
+    eprintln!("  {}", line_text);
+    eprintln!(
+        "  {}{}",
+        " ".repeat(col_no.saturating_sub(1)),
+        "^".repeat(caret_width)
+    );
+    if let Some(h) = hint {
+        eprintln!("  hint: {}", h);
+    }
+}
+
+fn emit_graph_dump(
+    graph: &pcc::graph::ProgramGraph,
+    analysis: &pcc::analyze::AnalyzedProgram,
+    schedule: &pcc::schedule::ScheduledProgram,
+) -> String {
+    let mut out = String::new();
+
+    let _ = writeln!(out, "{}", graph);
+
+    // repetition_vector entries
+    let mut rv = BTreeMap::new();
+    for ((task, label), counts) in &analysis.repetition_vectors {
+        let mut nodes: Vec<(u32, u32)> = counts.iter().map(|(id, c)| (id.0, *c)).collect();
+        nodes.sort_unstable_by_key(|(id, _)| *id);
+        rv.insert((task.clone(), label.clone()), nodes);
+    }
+
+    if !rv.is_empty() {
+        let _ = writeln!(out, "repetition_vectors:");
+        for ((task, label), nodes) in rv {
+            let parts = nodes
+                .iter()
+                .map(|(id, c)| format!("n{}={}", id, c))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(out, "  repetition_vector {}.{}: {}", task, label, parts);
+        }
+    }
+
+    // inter-task buffer sizes (bytes)
+    if !analysis.inter_task_buffers.is_empty() {
+        let mut inter: Vec<_> = analysis.inter_task_buffers.iter().collect();
+        inter.sort_by(|a, b| a.0.cmp(b.0));
+
+        let _ = writeln!(out, "buffer_sizes:");
+        for (name, bytes) in inter {
+            let _ = writeln!(out, "  buffer_size inter.{}: {}", name, bytes);
+        }
+    }
+
+    // intra-task edge buffer sizes (tokens)
+    let mut task_names: Vec<_> = schedule.tasks.keys().cloned().collect();
+    task_names.sort();
+
+    for task in task_names {
+        let Some(meta) = schedule.tasks.get(&task) else {
+            continue;
+        };
+
+        match &meta.schedule {
+            pcc::schedule::TaskSchedule::Pipeline(sub) => {
+                emit_subgraph_buffer_sizes(&mut out, &task, "pipeline", sub);
+            }
+            pcc::schedule::TaskSchedule::Modal { control, modes } => {
+                emit_subgraph_buffer_sizes(&mut out, &task, "control", control);
+                let mut sorted_modes = modes.clone();
+                sorted_modes.sort_by(|a, b| a.0.cmp(&b.0));
+                for (mode, sub) in sorted_modes {
+                    emit_subgraph_buffer_sizes(&mut out, &task, &mode, &sub);
+                }
+            }
+        }
+    }
+
+    out
+}
+
+fn emit_subgraph_buffer_sizes(
+    out: &mut String,
+    task: &str,
+    label: &str,
+    sub: &pcc::schedule::SubgraphSchedule,
+) {
+    if sub.edge_buffers.is_empty() {
+        return;
+    }
+
+    let mut edges: Vec<_> = sub.edge_buffers.iter().collect();
+    edges.sort_by_key(|((src, dst), _)| (src.0, dst.0));
+
+    for ((src, dst), tokens) in edges {
+        let _ = writeln!(
+            out,
+            "  buffer_size edge {}.{} n{}->n{}: {}",
+            task, label, src.0, dst.0, tokens
+        );
     }
 }

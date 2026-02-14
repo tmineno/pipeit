@@ -58,12 +58,16 @@ fn assert_pdl_file_compiles(pdl_name: &str) {
     assert!(pdl_path.exists(), "missing {}", pdl_path.display());
 
     let pcc = pcc_binary();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let cpp_out = std::env::temp_dir().join(format!("pipit_gen_{}.cpp", n));
     let gen = Command::new(&pcc)
         .arg(pdl_path.to_str().unwrap())
         .arg("-I")
         .arg(actors_h.to_str().unwrap())
         .arg("--emit")
         .arg("cpp")
+        .arg("-o")
+        .arg(cpp_out.to_str().unwrap())
         .output()
         .expect("failed to run pcc");
 
@@ -74,7 +78,8 @@ fn assert_pdl_file_compiles(pdl_name: &str) {
         String::from_utf8_lossy(&gen.stderr)
     );
 
-    let cpp = String::from_utf8(gen.stdout).unwrap();
+    let cpp = std::fs::read_to_string(&cpp_out).expect("failed to read generated cpp");
+    let _ = std::fs::remove_file(&cpp_out);
     assert!(!cpp.is_empty(), "empty output for {}", pdl_name);
 
     compile_cpp(
@@ -107,12 +112,16 @@ fn assert_inline_compiles(pdl_source: &str, test_name: &str) {
     std::fs::write(&pdl_file, pdl_source).expect("write pdl temp");
 
     let pcc = pcc_binary();
+    let n2 = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let cpp_out = std::env::temp_dir().join(format!("pipit_gen_inline_{}.cpp", n2));
     let gen = Command::new(&pcc)
         .arg(pdl_file.to_str().unwrap())
         .arg("-I")
         .arg(actors_h.to_str().unwrap())
         .arg("--emit")
         .arg("cpp")
+        .arg("-o")
+        .arg(cpp_out.to_str().unwrap())
         .output()
         .expect("failed to run pcc");
 
@@ -125,7 +134,8 @@ fn assert_inline_compiles(pdl_source: &str, test_name: &str) {
         String::from_utf8_lossy(&gen.stderr)
     );
 
-    let cpp = String::from_utf8(gen.stdout).unwrap();
+    let cpp = std::fs::read_to_string(&cpp_out).expect("failed to read generated cpp");
+    let _ = std::fs::remove_file(&cpp_out);
     assert!(!cpp.is_empty(), "empty output for '{}'", test_name);
 
     compile_cpp(
@@ -135,6 +145,45 @@ fn assert_inline_compiles(pdl_source: &str, test_name: &str) {
         &runtime_include,
         &root.join("examples"),
     );
+}
+
+/// Run pcc on inline PDL source and return generated C++ source.
+fn generate_inline_cpp(pdl_source: &str, test_name: &str) -> String {
+    let root = project_root();
+    let actors_h = root.join("examples").join("actors.h");
+
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_dir = std::env::temp_dir();
+    let pdl_file = tmp_dir.join(format!("pipit_inline_gen_{}.pdl", n));
+    std::fs::write(&pdl_file, pdl_source).expect("write pdl temp");
+
+    let pcc = pcc_binary();
+    let n2 = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let cpp_out = std::env::temp_dir().join(format!("pipit_gen_check_{}.cpp", n2));
+    let gen = Command::new(&pcc)
+        .arg(pdl_file.to_str().unwrap())
+        .arg("-I")
+        .arg(actors_h.to_str().unwrap())
+        .arg("--emit")
+        .arg("cpp")
+        .arg("-o")
+        .arg(cpp_out.to_str().unwrap())
+        .output()
+        .expect("failed to run pcc");
+
+    let _ = std::fs::remove_file(&pdl_file);
+
+    assert!(
+        gen.status.success(),
+        "pcc failed for '{}':\n{}",
+        test_name,
+        String::from_utf8_lossy(&gen.stderr)
+    );
+
+    let cpp = std::fs::read_to_string(&cpp_out).expect("failed to read generated cpp");
+    let _ = std::fs::remove_file(&cpp_out);
+    assert!(!cpp.is_empty(), "empty output for '{}'", test_name);
+    cpp
 }
 
 /// Syntax-check a C++ source string with the system compiler.
@@ -497,6 +546,36 @@ fn define_with_probe_and_tap() {
     );
 }
 
+// ── Shared-memory model correctness (regressions) ──────────────────────
+
+#[test]
+fn shared_buffer_multi_reader_has_independent_reader_indices() {
+    let cpp = generate_inline_cpp(
+        concat!(
+            "clock 1kHz w { adc(0) -> sig }\n",
+            "clock 1kHz r1 { @sig | stdout() }\n",
+            "clock 1kHz r2 { @sig | stdout() }\n",
+        ),
+        "shared_multi_reader_indices",
+    );
+
+    assert!(
+        cpp.contains("RingBuffer<float, 2, 2> _ringbuf_sig"),
+        "expected 2-reader shared ring buffer, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("_ringbuf_sig.read(0,"),
+        "first reader should use index 0, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("_ringbuf_sig.read(1,"),
+        "second reader should use index 1, got:\n{}",
+        cpp
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 3. Overrun policy tests
 // ═══════════════════════════════════════════════════════════════════════════
@@ -510,10 +589,59 @@ fn overrun_policy_drop() {
 }
 
 #[test]
+fn shared_buffer_io_checks_status_and_stops_on_failure() {
+    let cpp = generate_inline_cpp(
+        concat!(
+            "clock 1kHz w { adc(0) -> sig }\n",
+            "clock 1kHz r { @sig | stdout() }\n",
+        ),
+        "shared_io_status_checks",
+    );
+
+    assert!(
+        cpp.contains("if (!_ringbuf_sig.write("),
+        "write should check ring-buffer status, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("if (!_ringbuf_sig.read("),
+        "read should check ring-buffer status, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("_stop.store(true, std::memory_order_release)"),
+        "failed I/O should set stop flag, got:\n{}",
+        cpp
+    );
+}
+
+#[test]
 fn overrun_policy_slip() {
     assert_inline_compiles(
         "set overrun = slip\nclock 1kHz t { adc(0) | stdout() }",
         "overrun_slip",
+    );
+}
+
+#[test]
+fn shared_buffer_io_uses_pointer_offsets_in_repetition_loops() {
+    let cpp = generate_inline_cpp(
+        concat!(
+            "clock 1MHz w { adc(0) | fft(256) | c2r() | fir(5, [0.1, 0.2, 0.4, 0.2, 0.1]) -> sig }\n",
+            "clock 1kHz r { @sig | decimate(10000) | stdout() }\n",
+        ),
+        "shared_io_offsets",
+    );
+
+    assert!(
+        cpp.contains("_ringbuf_sig.write(&_"),
+        "writer should advance pointer with per-firing offset, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("_ringbuf_sig.read(0, &_"),
+        "reader should advance pointer with per-firing offset, got:\n{}",
+        cpp
     );
 }
 
@@ -538,6 +666,11 @@ fn compile_and_run_pdl(pdl_name: &str, run_args: &[&str]) -> Option<(i32, String
     let actors_h = root.join("examples").join("actors.h");
     let runtime_include = root.join("runtime").join("libpipit").join("include");
 
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_dir = std::env::temp_dir();
+    let cpp_file = tmp_dir.join(format!("pipit_run_{}.cpp", n));
+    let bin_file = tmp_dir.join(format!("pipit_run_{}", n));
+
     let pcc = pcc_binary();
     let gen = Command::new(&pcc)
         .arg(pdl_path.to_str().unwrap())
@@ -545,6 +678,8 @@ fn compile_and_run_pdl(pdl_name: &str, run_args: &[&str]) -> Option<(i32, String
         .arg(actors_h.to_str().unwrap())
         .arg("--emit")
         .arg("cpp")
+        .arg("-o")
+        .arg(cpp_file.to_str().unwrap())
         .output()
         .expect("failed to run pcc");
 
@@ -556,13 +691,7 @@ fn compile_and_run_pdl(pdl_name: &str, run_args: &[&str]) -> Option<(i32, String
         );
     }
 
-    let cpp = String::from_utf8(gen.stdout).unwrap();
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_dir = std::env::temp_dir();
-    let cpp_file = tmp_dir.join(format!("pipit_run_{}.cpp", n));
-    let bin_file = tmp_dir.join(format!("pipit_run_{}", n));
-
-    std::fs::write(&cpp_file, &cpp).expect("write cpp");
+    let cpp = std::fs::read_to_string(&cpp_file).expect("read generated cpp");
 
     let compile = Command::new(&cxx)
         .arg("-std=c++20")
@@ -620,6 +749,8 @@ fn compile_and_run_inline(
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp_dir = std::env::temp_dir();
     let pdl_file = tmp_dir.join(format!("pipit_runinl_{}.pdl", n));
+    let cpp_file = tmp_dir.join(format!("pipit_runinl_{}.cpp", n));
+    let bin_file = tmp_dir.join(format!("pipit_runinl_{}", n));
     std::fs::write(&pdl_file, pdl_source).expect("write pdl");
 
     let pcc = pcc_binary();
@@ -629,6 +760,8 @@ fn compile_and_run_inline(
         .arg(actors_h.to_str().unwrap())
         .arg("--emit")
         .arg("cpp")
+        .arg("-o")
+        .arg(cpp_file.to_str().unwrap())
         .output()
         .expect("failed to run pcc");
 
@@ -642,11 +775,7 @@ fn compile_and_run_inline(
         );
     }
 
-    let cpp = String::from_utf8(gen.stdout).unwrap();
-    let cpp_file = tmp_dir.join(format!("pipit_runinl_{}.cpp", n));
-    let bin_file = tmp_dir.join(format!("pipit_runinl_{}", n));
-
-    std::fs::write(&cpp_file, &cpp).expect("write cpp");
+    let cpp = std::fs::read_to_string(&cpp_file).expect("read generated cpp");
 
     let compile = Command::new(&cxx)
         .arg("-std=c++20")
