@@ -13,5 +13,6 @@ name = "pcc"
 path = "src/lib.rs"
 
 [dependencies]
+chumsky = "0.10"
 clap = { version = "4", features = ["derive"] }
 logos = "0.15"

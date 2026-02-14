@@ -2,4 +2,6 @@
 //
 // Library root. Compiler phases will be added as modules here.
 
+pub mod ast;
 pub mod lexer;
+pub mod parser;

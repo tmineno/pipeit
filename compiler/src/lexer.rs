@@ -9,6 +9,7 @@
 // Side effects: none.
 
 use logos::Logos;
+use std::fmt;
 
 /// Byte-offset span in source text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +124,43 @@ pub enum Token {
     /// One or more newlines (significant — statement terminator per BNF §10).
     #[regex(r"\n+")]
     Newline,
+}
+
+impl fmt::Display for Token {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Token::Set => write!(f, "set"),
+            Token::Const => write!(f, "const"),
+            Token::Param => write!(f, "param"),
+            Token::Define => write!(f, "define"),
+            Token::Clock => write!(f, "clock"),
+            Token::Mode => write!(f, "mode"),
+            Token::Control => write!(f, "control"),
+            Token::Switch => write!(f, "switch"),
+            Token::Default => write!(f, "default"),
+            Token::Delay => write!(f, "delay"),
+            Token::Pipe => write!(f, "|"),
+            Token::Arrow => write!(f, "->"),
+            Token::At => write!(f, "@"),
+            Token::Colon => write!(f, ":"),
+            Token::Question => write!(f, "?"),
+            Token::Dollar => write!(f, "$"),
+            Token::LParen => write!(f, "("),
+            Token::RParen => write!(f, ")"),
+            Token::LBrace => write!(f, "{{"),
+            Token::RBrace => write!(f, "}}"),
+            Token::LBracket => write!(f, "["),
+            Token::RBracket => write!(f, "]"),
+            Token::Comma => write!(f, ","),
+            Token::Equals => write!(f, "="),
+            Token::Freq(v) => write!(f, "{v}Hz"),
+            Token::Size(v) => write!(f, "{v}B"),
+            Token::Number(v) => write!(f, "{v}"),
+            Token::StringLit(s) => write!(f, "\"{s}\""),
+            Token::Ident => write!(f, "<ident>"),
+            Token::Newline => write!(f, "<newline>"),
+        }
+    }
 }
 
 // ── Callbacks ──

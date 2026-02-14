@@ -26,15 +26,15 @@ Based on [pipit-lang-spec-v0.1.0](spec/pipit-lang-spec-v0.1.0.md).
 
 ## Parser & AST (§10 BNF)
 
-- [ ] Define AST node types for all grammar productions
-- [ ] `set_stmt`, `const_stmt`, `param_stmt`
-- [ ] `define_stmt` (sub-pipeline)
-- [ ] `task_stmt` (`clock <freq> <name> { ... }`)
-- [ ] `pipeline_body`: pipe expressions with source / elem / sink
-- [ ] `actor_call` with args (scalar, `$param`, const ref)
-- [ ] Tap `:name`, probe `?name`, buffer read `@name`, buffer write `-> name`
-- [ ] `modal_body`: `control`, `mode`, `switch` with `default` clause
-- [ ] Syntax error recovery and diagnostics
+- [x] Define AST node types for all grammar productions
+- [x] `set_stmt`, `const_stmt`, `param_stmt`
+- [x] `define_stmt` (sub-pipeline)
+- [x] `task_stmt` (`clock <freq> <name> { ... }`)
+- [x] `pipeline_body`: pipe expressions with source / elem / sink
+- [x] `actor_call` with args (scalar, `$param`, const ref)
+- [x] Tap `:name`, probe `?name`, buffer read `@name`, buffer write `-> name`
+- [x] `modal_body`: `control`, `mode`, `switch` with `default` clause
+- [x] Syntax error recovery and diagnostics
 
 ## Actor Registry Interface (§4)
 
