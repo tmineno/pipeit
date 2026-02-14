@@ -9,6 +9,7 @@ enum EmitStage {
     Graph,
     GraphDot,
     Schedule,
+    TimingChart,
 }
 
 #[derive(Parser, Debug)]
@@ -224,6 +225,14 @@ fn main() {
 
     if matches!(cli.emit, EmitStage::Schedule) {
         print!("{}", schedule_result.schedule);
+        std::process::exit(0);
+    }
+
+    if matches!(cli.emit, EmitStage::TimingChart) {
+        print!(
+            "{}",
+            pcc::timing::emit_timing_chart(&schedule_result.schedule, &graph_result.graph)
+        );
         std::process::exit(0);
     }
 

@@ -130,7 +130,14 @@ Based on [pipit-lang-spec-v0.1.0](spec/pipit-lang-spec-v0.1.0.md).
   - [x] Inter-task buffer edges (dashed red)
   - [x] Feedback cycle edges (bold blue)
   - [x] Deterministic output (sorted tasks, namespaced node IDs)
-- [ ] Timing diagram visualization (render actor firing order and timing from schedule results)
+- [x] Timing diagram visualization (`--emit timing-chart` produces Mermaid Gantt chart)
+  - [x] ASAP parallel scheduling (independent branches run concurrently)
+  - [x] Mermaid-safe labels (fork, probe, buffer nodes avoid `:` separator conflicts)
+  - [x] Zero-duration probes omitted from output
+  - [x] Numeric cycle axis (`dateFormat x` + `axisFormat %Q`)
+  - [x] Feedback back-edges excluded from timing dependencies
+  - [x] Modal task sections (control + per-mode, modes start at offset 0)
+  - [x] Deterministic output (sorted tasks, unique task IDs)
 
 ## Polish & Release Prep
 
