@@ -44,6 +44,10 @@ pub struct AnalyzedProgram {
     pub inter_task_buffers: HashMap<String, u64>,
     /// Total memory required (bytes).
     pub total_memory: u64,
+    /// Inferred shape constraints from SDF edge propagation (§13.3.3).
+    /// For actors with unresolved SHAPE dims, this stores the shapes inferred
+    /// from connected edges. NodeId → inferred ShapeConstraint.
+    pub inferred_shapes: HashMap<NodeId, ShapeConstraint>,
 }
 
 // ── Public entry point ──────────────────────────────────────────────────────
@@ -57,6 +61,7 @@ pub fn analyze(
 ) -> AnalysisResult {
     let mut ctx = AnalyzeCtx::new(program, resolved, graph, registry);
     ctx.check_types();
+    ctx.infer_shapes_from_edges();
     ctx.solve_balance_equations();
     ctx.check_feedback_delays();
     ctx.check_cross_clock_rates();
@@ -78,6 +83,7 @@ struct AnalyzeCtx<'a> {
     repetition_vectors: HashMap<(String, String), HashMap<NodeId, u32>>,
     inter_buffers: HashMap<String, u64>,
     total_memory: u64,
+    inferred_shapes: HashMap<NodeId, ShapeConstraint>,
 }
 
 impl<'a> AnalyzeCtx<'a> {
@@ -96,6 +102,7 @@ impl<'a> AnalyzeCtx<'a> {
             repetition_vectors: HashMap::new(),
             inter_buffers: HashMap::new(),
             total_memory: 0,
+            inferred_shapes: HashMap::new(),
         }
     }
 
@@ -132,6 +139,7 @@ impl<'a> AnalyzeCtx<'a> {
                 repetition_vectors: self.repetition_vectors,
                 inter_task_buffers: self.inter_buffers,
                 total_memory: self.total_memory,
+                inferred_shapes: self.inferred_shapes,
             },
             diagnostics: self.diagnostics,
         }
@@ -212,6 +220,7 @@ impl<'a> AnalyzeCtx<'a> {
     }
 
     /// Get production rate of a node (out_count). Passthrough nodes return 1.
+    /// Uses explicit shape constraint first, then inferred shape as fallback.
     fn production_rate(&self, node: &Node) -> Option<u32> {
         match &node.kind {
             NodeKind::Actor {
@@ -221,13 +230,25 @@ impl<'a> AnalyzeCtx<'a> {
                 ..
             } => {
                 let meta = self.actor_meta(name)?;
-                self.resolve_port_rate(&meta.out_shape, meta, args, shape_constraint.as_ref())
+                // Try explicit shape constraint first, then inferred
+                let result =
+                    self.resolve_port_rate(&meta.out_shape, meta, args, shape_constraint.as_ref());
+                if result.is_some() {
+                    return result;
+                }
+                self.resolve_port_rate(
+                    &meta.out_shape,
+                    meta,
+                    args,
+                    self.inferred_shapes.get(&node.id),
+                )
             }
             _ => Some(1),
         }
     }
 
     /// Get consumption rate of a node (in_count). Passthrough nodes return 1.
+    /// Uses explicit shape constraint first, then inferred shape as fallback.
     fn consumption_rate(&self, node: &Node) -> Option<u32> {
         match &node.kind {
             NodeKind::Actor {
@@ -237,7 +258,17 @@ impl<'a> AnalyzeCtx<'a> {
                 ..
             } => {
                 let meta = self.actor_meta(name)?;
-                self.resolve_port_rate(&meta.in_shape, meta, args, shape_constraint.as_ref())
+                let result =
+                    self.resolve_port_rate(&meta.in_shape, meta, args, shape_constraint.as_ref());
+                if result.is_some() {
+                    return result;
+                }
+                self.resolve_port_rate(
+                    &meta.in_shape,
+                    meta,
+                    args,
+                    self.inferred_shapes.get(&node.id),
+                )
             }
             _ => Some(1),
         }
@@ -345,6 +376,300 @@ impl<'a> AnalyzeCtx<'a> {
             }
         }
         None
+    }
+
+    // ── Phase 0: Shape inference from SDF edges (§13.3.3) ────────────────
+    //
+    // For actors with unresolved symbolic dimensions in SHAPE(...),
+    // propagate known shapes from connected edges. When the connected port
+    // has a fully resolved shape of the same rank, infer dimension values
+    // positionally (dim-for-dim).
+
+    fn infer_shapes_from_edges(&mut self) {
+        for task_graph in self.graph.tasks.values() {
+            for sub in subgraphs_of(task_graph) {
+                self.infer_shapes_in_subgraph(sub);
+            }
+        }
+    }
+
+    fn infer_shapes_in_subgraph(&mut self, sub: &Subgraph) {
+        // Iterate until fixpoint (handles chains like fft()[256] | mag() | some_other())
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for edge in &sub.edges {
+                let src = match find_node(sub, edge.source) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let tgt = match find_node(sub, edge.target) {
+                    Some(n) => n,
+                    None => continue,
+                };
+
+                // Try: propagate from src's output shape → tgt's input shape
+                if let Some(sc) = self.try_propagate_shape(src, tgt, sub) {
+                    if let std::collections::hash_map::Entry::Vacant(e) =
+                        self.inferred_shapes.entry(tgt.id)
+                    {
+                        e.insert(sc);
+                        changed = true;
+                    }
+                }
+
+                // Try: propagate from tgt's input shape → src's output shape
+                if let Some(sc) = self.try_propagate_shape_reverse(tgt, src, sub) {
+                    if let std::collections::hash_map::Entry::Vacant(e) =
+                        self.inferred_shapes.entry(src.id)
+                    {
+                        e.insert(sc);
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Try to propagate shape from src's output to tgt's input.
+    /// Returns an inferred ShapeConstraint for tgt if successful.
+    fn try_propagate_shape(
+        &self,
+        src: &Node,
+        tgt: &Node,
+        sub: &Subgraph,
+    ) -> Option<ShapeConstraint> {
+        // tgt must be an actor with unresolved input shape
+        let (tgt_name, tgt_args, tgt_sc) = match &tgt.kind {
+            NodeKind::Actor {
+                name,
+                args,
+                shape_constraint,
+                ..
+            } => (name.as_str(), args.as_slice(), shape_constraint.as_ref()),
+            _ => return None,
+        };
+
+        // Skip if tgt already has explicit shape constraint or inferred shape
+        if tgt_sc.is_some() || self.inferred_shapes.contains_key(&tgt.id) {
+            return None;
+        }
+
+        let tgt_meta = self.actor_meta(tgt_name)?;
+
+        // Check if tgt has unresolved symbolic dims in its input shape
+        if !self.has_unresolved_dims(&tgt_meta.in_shape, tgt_meta, tgt_args) {
+            return None;
+        }
+
+        // Get src's resolved output shape (as a list of concrete dim values)
+        let src_dims = self.resolve_output_shape_dims(src, sub)?;
+        let tgt_in_rank = tgt_meta.in_shape.rank();
+
+        // Only propagate if ranks match
+        if src_dims.len() != tgt_in_rank {
+            return None;
+        }
+
+        // Build a ShapeConstraint from src's resolved output dims
+        let span = tgt.span;
+        Some(ShapeConstraint {
+            dims: src_dims
+                .into_iter()
+                .map(|v| ShapeDim::Literal(v, span))
+                .collect(),
+            span,
+        })
+    }
+
+    /// Try to propagate shape from tgt's input back to src's output.
+    /// Returns an inferred ShapeConstraint for src if successful.
+    fn try_propagate_shape_reverse(
+        &self,
+        tgt: &Node,
+        src: &Node,
+        sub: &Subgraph,
+    ) -> Option<ShapeConstraint> {
+        // src must be an actor with unresolved output shape
+        let (src_name, src_args, src_sc) = match &src.kind {
+            NodeKind::Actor {
+                name,
+                args,
+                shape_constraint,
+                ..
+            } => (name.as_str(), args.as_slice(), shape_constraint.as_ref()),
+            _ => return None,
+        };
+
+        if src_sc.is_some() || self.inferred_shapes.contains_key(&src.id) {
+            return None;
+        }
+
+        let src_meta = self.actor_meta(src_name)?;
+
+        if !self.has_unresolved_dims(&src_meta.out_shape, src_meta, src_args) {
+            return None;
+        }
+
+        // Get tgt's resolved input shape dims
+        let tgt_dims = self.resolve_input_shape_dims(tgt, sub)?;
+        let src_out_rank = src_meta.out_shape.rank();
+
+        if tgt_dims.len() != src_out_rank {
+            return None;
+        }
+
+        let span = src.span;
+        Some(ShapeConstraint {
+            dims: tgt_dims
+                .into_iter()
+                .map(|v| ShapeDim::Literal(v, span))
+                .collect(),
+            span,
+        })
+    }
+
+    /// Check if a PortShape has any unresolved symbolic dimensions.
+    fn has_unresolved_dims(&self, shape: &PortShape, meta: &ActorMeta, args: &[Arg]) -> bool {
+        for dim in &shape.dims {
+            if let TokenCount::Symbolic(sym) = dim {
+                // Check if resolved from args
+                let from_arg = meta
+                    .params
+                    .iter()
+                    .position(|p| p.name == *sym)
+                    .and_then(|idx| args.get(idx))
+                    .and_then(|arg| self.resolve_arg_to_u32(arg));
+                if from_arg.is_none() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Resolve a node's output shape to concrete dim values.
+    /// For passthrough nodes (Fork, Probe), traces upstream to find the shape.
+    fn resolve_output_shape_dims(&self, node: &Node, sub: &Subgraph) -> Option<Vec<u32>> {
+        match &node.kind {
+            NodeKind::Actor {
+                name,
+                args,
+                shape_constraint,
+                ..
+            } => {
+                let meta = self.actor_meta(name)?;
+                let sc = shape_constraint
+                    .as_ref()
+                    .or_else(|| self.inferred_shapes.get(&node.id));
+                self.resolve_shape_to_dims(&meta.out_shape, meta, args, sc)
+            }
+            // Passthrough nodes: trace upstream to find an actor with known shape
+            NodeKind::Fork { .. } | NodeKind::Probe { .. } => {
+                self.trace_shape_backward(node.id, sub)
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve a node's input shape to concrete dim values.
+    /// For passthrough nodes, traces downstream to find the shape.
+    fn resolve_input_shape_dims(&self, node: &Node, sub: &Subgraph) -> Option<Vec<u32>> {
+        match &node.kind {
+            NodeKind::Actor {
+                name,
+                args,
+                shape_constraint,
+                ..
+            } => {
+                let meta = self.actor_meta(name)?;
+                let sc = shape_constraint
+                    .as_ref()
+                    .or_else(|| self.inferred_shapes.get(&node.id));
+                self.resolve_shape_to_dims(&meta.in_shape, meta, args, sc)
+            }
+            // Passthrough nodes: trace downstream to find an actor with known shape
+            NodeKind::Fork { .. } | NodeKind::Probe { .. } => {
+                self.trace_shape_forward(node.id, sub)
+            }
+            _ => None,
+        }
+    }
+
+    /// Trace backward from a passthrough node to find resolved output shape dims.
+    fn trace_shape_backward(&self, node_id: NodeId, sub: &Subgraph) -> Option<Vec<u32>> {
+        let mut current = node_id;
+        let mut visited = Vec::new();
+        loop {
+            if visited.contains(&current) {
+                return None;
+            }
+            visited.push(current);
+            let node = find_node(sub, current)?;
+            if let NodeKind::Actor { .. } = &node.kind {
+                return self.resolve_output_shape_dims(node, sub);
+            }
+            let pred = sub.edges.iter().find(|e| e.target == current);
+            match pred {
+                Some(edge) => current = edge.source,
+                None => return None,
+            }
+        }
+    }
+
+    /// Trace forward from a passthrough node to find resolved input shape dims.
+    fn trace_shape_forward(&self, node_id: NodeId, sub: &Subgraph) -> Option<Vec<u32>> {
+        let mut current = node_id;
+        let mut visited = Vec::new();
+        loop {
+            if visited.contains(&current) {
+                return None;
+            }
+            visited.push(current);
+            let node = find_node(sub, current)?;
+            if let NodeKind::Actor { .. } = &node.kind {
+                return self.resolve_input_shape_dims(node, sub);
+            }
+            // Find first successor
+            let succ = sub.edges.iter().find(|e| e.source == current);
+            match succ {
+                Some(edge) => current = edge.target,
+                None => return None,
+            }
+        }
+    }
+
+    /// Resolve each dimension of a PortShape to a concrete u32 value.
+    fn resolve_shape_to_dims(
+        &self,
+        shape: &PortShape,
+        meta: &ActorMeta,
+        args: &[Arg],
+        shape_constraint: Option<&ShapeConstraint>,
+    ) -> Option<Vec<u32>> {
+        let mut dims = Vec::with_capacity(shape.dims.len());
+        for (i, dim) in shape.dims.iter().enumerate() {
+            let val = match dim {
+                TokenCount::Literal(n) => Some(*n),
+                TokenCount::Symbolic(sym) => {
+                    let from_arg = meta
+                        .params
+                        .iter()
+                        .position(|p| p.name == *sym)
+                        .and_then(|idx| args.get(idx))
+                        .and_then(|arg| self.resolve_arg_to_u32(arg));
+                    if from_arg.is_some() {
+                        from_arg
+                    } else {
+                        shape_constraint
+                            .and_then(|sc| sc.dims.get(i))
+                            .and_then(|sd| self.resolve_shape_dim(sd))
+                    }
+                }
+            };
+            dims.push(val?);
+        }
+        Some(dims)
     }
 
     // ── Phase 1: Type checking ──────────────────────────────────────────
@@ -1270,6 +1595,60 @@ mod tests {
             .get(&("t".to_string(), "pipeline".to_string()))
             .expect("rv missing");
         assert!(!rv.is_empty());
+    }
+
+    // ── Phase 9: SDF edge shape inference (§13.3.3) ───────────────────
+
+    #[test]
+    fn sdf_edge_inference_direct() {
+        // fft()[256] | mag(): N inferred from upstream fft output shape
+        let reg = test_registry();
+        let result = analyze_ok(
+            "clock 1kHz t {\n    constant(0.0) | fft()[256] | mag() | stdout()\n}",
+            &reg,
+        );
+        // mag() should have an inferred shape in the analysis result
+        assert!(
+            !result.analysis.inferred_shapes.is_empty(),
+            "expected inferred shapes for mag(), got none"
+        );
+    }
+
+    #[test]
+    fn sdf_edge_inference_through_fork() {
+        // fft(256) | :raw | mag(): N inferred through fork node
+        let reg = test_registry();
+        let result = analyze_ok(
+            concat!(
+                "clock 1kHz t {\n",
+                "    constant(0.0) | fft(256) | :raw | mag() | stdout()\n",
+                "    :raw | c2r() | stdout()\n",
+                "}",
+            ),
+            &reg,
+        );
+        assert!(
+            !result.analysis.inferred_shapes.is_empty(),
+            "expected inferred shapes for mag() through fork"
+        );
+    }
+
+    #[test]
+    fn sdf_edge_inference_chain() {
+        // fft()[256] | mag() | stdout(): mag's N inferred from fft's output,
+        // and the pipeline should have valid balance equations
+        let reg = test_registry();
+        let result = analyze_ok(
+            "clock 1kHz t {\n    constant(0.0) | fft()[256] | mag() | stdout()\n}",
+            &reg,
+        );
+        let rv = result
+            .analysis
+            .repetition_vectors
+            .get(&("t".to_string(), "pipeline".to_string()))
+            .expect("rv missing");
+        // constant fires 256x, fft 1x, mag 1x, stdout 256x
+        assert!(rv.values().any(|&v| v > 1), "expected non-trivial rv");
     }
 
     // ── Integration tests ───────────────────────────────────────────────

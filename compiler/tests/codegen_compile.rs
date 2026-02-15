@@ -869,6 +869,41 @@ fn shape_constraint_const_ref_infers_param_value() {
     );
 }
 
+// ── SDF edge shape inference (§13.3.3) ──────────────────────────────────
+
+#[test]
+fn sdf_edge_infers_mag_dimension() {
+    // mag() after fft()[256]: N inferred from upstream output shape
+    let cpp = generate_inline_cpp(
+        "clock 1kHz t { constant(0.0) | fft()[256] | mag() | stdout() }",
+        "sdf_edge_infers_mag",
+    );
+    assert!(
+        cpp.contains("Actor_mag{256}"),
+        "expected Actor_mag{{256}} inferred from upstream fft, but got:\n{}",
+        cpp
+    );
+}
+
+#[test]
+fn sdf_edge_infers_through_fork() {
+    // mag() after fork from fft(256): N inferred through fork passthrough
+    let cpp = generate_inline_cpp(
+        concat!(
+            "clock 1kHz t {\n",
+            "    constant(0.0) | fft(256) | :raw | mag() | stdout()\n",
+            "    :raw | c2r() | stdout()\n",
+            "}",
+        ),
+        "sdf_edge_infers_through_fork",
+    );
+    assert!(
+        cpp.contains("Actor_mag{256}"),
+        "expected Actor_mag{{256}} inferred through fork, but got:\n{}",
+        cpp
+    );
+}
+
 // ── Shared-memory model correctness (regressions) ──────────────────────
 
 #[test]

@@ -401,7 +401,18 @@ impl<'a> ScheduleCtx<'a> {
                 ..
             } => {
                 let meta = self.actor_meta(name)?;
-                self.resolve_port_rate(&meta.out_shape, meta, args, shape_constraint.as_ref())
+                // Try explicit shape constraint first, then inferred from analysis
+                let result =
+                    self.resolve_port_rate(&meta.out_shape, meta, args, shape_constraint.as_ref());
+                if result.is_some() {
+                    return result;
+                }
+                self.resolve_port_rate(
+                    &meta.out_shape,
+                    meta,
+                    args,
+                    self.analysis.inferred_shapes.get(&node.id),
+                )
             }
             _ => Some(1),
         }

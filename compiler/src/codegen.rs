@@ -595,6 +595,10 @@ impl<'a> CodegenCtx<'a> {
                 shape_constraint,
                 ..
             } => {
+                // Use explicit shape constraint, or inferred from analysis
+                let effective_sc = shape_constraint
+                    .as_ref()
+                    .or_else(|| self.analysis.inferred_shapes.get(&node.id));
                 self.emit_actor_firing(
                     task_name,
                     sub,
@@ -602,7 +606,7 @@ impl<'a> CodegenCtx<'a> {
                     node,
                     name,
                     args,
-                    shape_constraint.as_ref(),
+                    effective_sc,
                     ind,
                     edge_bufs,
                 );
