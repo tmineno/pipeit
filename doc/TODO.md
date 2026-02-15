@@ -111,7 +111,8 @@ Based on [pipit-lang-spec-v0.1.0](spec/pipit-lang-spec-v0.1.0.md).
   - [x] Multi-reader FIFO with independent read cursors ([ADR-006](adr/006-shared-buffer-multi-reader-ring.md))
   - [x] Per-reader tail tracking for capacity calculation
   - [x] Status-checking read/write API for fail-fast semantics
-- [ ] Scheduler: `static` and `round_robin` strategies
+- [x] Scheduler: `static` strategy (one thread per task, current implementation)
+  - [ ] Future: `round_robin` strategy with thread pool (deferred to v0.2)
 - [x] Timer / tick generator (OS timer abstraction)
 - [x] Overrun policies: drop, slip, backlog (Timer: `last_latency`, `missed_count`, `reset_phase`)
 - [x] Double-buffering for runtime parameters (atomic swap at iteration boundary)
