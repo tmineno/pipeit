@@ -1,0 +1,12 @@
+# Audio processing chain benchmark — multi-stage effects pipeline
+# Single task at 48kHz with gain, EQ filter, delay, and output
+#
+# Exercises: deep actor chains, FIR filtering, feedback delay
+
+const eq_coeff = [0.05, 0.1, 0.2, 0.3, 0.2, 0.1, 0.05]
+param gain = 0.8
+param volume = 1.0
+
+clock 48kHz audio {
+    adc(0) | mul($gain) | fir(7, eq_coeff) | delay(1, 0.0) | mul($volume) | stdout()
+}
