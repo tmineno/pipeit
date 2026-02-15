@@ -1093,7 +1093,7 @@ impl<'a> CodegenCtx<'a> {
             );
             let _ = writeln!(
                 self.out,
-                "        std::fprintf(stderr, \"startup warning: --threads is advisory in v0.1.0 (requested=%d, tasks={})\\\\n\", _threads);",
+                "        std::fprintf(stderr, \"startup warning: --threads is advisory (requested=%d, tasks={})\\\\n\", _threads);",
                 task_names.len()
             );
             self.out.push_str("    }\n");
@@ -1832,6 +1832,9 @@ fn pipit_type_size(t: PipitType) -> usize {
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
+// Unit tests: verify structural and semantic properties of generated C++ strings
+// (firing order, buffer layout, probe stripping) without a C++ compiler.
+// Complements compiler/tests/codegen_compile.rs (compilation + runtime checks).
 
 #[cfg(test)]
 mod tests {
@@ -1855,7 +1858,11 @@ mod tests {
         reg
     }
 
-    fn codegen_source(source: &str, registry: &Registry) -> CodegenResult {
+    fn codegen_source_with_options(
+        source: &str,
+        registry: &Registry,
+        options: CodegenOptions,
+    ) -> CodegenResult {
         let parse_result = crate::parser::parse(source);
         assert!(
             parse_result.errors.is_empty(),
@@ -1910,10 +1917,6 @@ mod tests {
             "schedule errors: {:#?}",
             schedule_result.diagnostics
         );
-        let options = CodegenOptions {
-            release: false,
-            include_paths: vec![],
-        };
         codegen(
             &program,
             &resolve_result.resolved,
@@ -1922,6 +1925,17 @@ mod tests {
             &schedule_result.schedule,
             registry,
             &options,
+        )
+    }
+
+    fn codegen_source(source: &str, registry: &Registry) -> CodegenResult {
+        codegen_source_with_options(
+            source,
+            registry,
+            CodegenOptions {
+                release: false,
+                include_paths: vec![],
+            },
         )
     }
 
@@ -2002,6 +2016,13 @@ mod tests {
             "should fire stdout actor: {}",
             cpp
         );
+        // Verify topological firing order
+        let pos_const = cpp.find("Actor_constant").unwrap();
+        let pos_stdout = cpp.find("Actor_stdout").unwrap();
+        assert!(
+            pos_const < pos_stdout,
+            "constant must fire before stdout in schedule order"
+        );
     }
 
     #[test]
@@ -2013,6 +2034,34 @@ mod tests {
         );
         assert!(cpp.contains("Actor_fft"), "should fire fft actor: {}", cpp);
         assert!(cpp.contains("Actor_c2r"), "should fire c2r actor: {}", cpp);
+        // Verify full topological firing order
+        let pos_const = cpp.find("Actor_constant").unwrap();
+        let pos_fft = cpp.find("Actor_fft").unwrap();
+        let pos_c2r = cpp.find("Actor_c2r").unwrap();
+        let pos_stdout = cpp.find("Actor_stdout").unwrap();
+        assert!(pos_const < pos_fft, "constant must fire before fft");
+        assert!(pos_fft < pos_c2r, "fft must fire before c2r");
+        assert!(pos_c2r < pos_stdout, "c2r must fire before stdout");
+    }
+
+    #[test]
+    fn repetition_offset_emission() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            "clock 1kHz t { constant(0.0) | fft(256) | c2r() | stdout() }",
+            &reg,
+        );
+        // fft produces 256 tokens from 1 input; downstream actors repeat with _r offsets
+        assert!(
+            cpp.contains("for (int _r = 0; _r <"),
+            "rate mismatch should produce _r repetition loop: {}",
+            cpp
+        );
+        assert!(
+            cpp.contains("_r *"),
+            "repetition loop should use _r offset expressions: {}",
+            cpp
+        );
     }
 
     // ── Task structure tests ────────────────────────────────────────────
@@ -2042,6 +2091,13 @@ mod tests {
             cpp.contains("for (int _k = 0; _k < 10; ++_k)"),
             "should have K-loop: {}",
             cpp
+        );
+        // Verify firing order within K-loop
+        let pos_const = cpp.find("Actor_constant").unwrap();
+        let pos_stdout = cpp.find("Actor_stdout").unwrap();
+        assert!(
+            pos_const < pos_stdout,
+            "constant must fire before stdout within K-loop"
         );
     }
 
@@ -2099,6 +2155,64 @@ mod tests {
         );
         assert!(cpp.contains("int main("), "should have main: {}", cpp);
         assert!(cpp.contains("std::thread"), "should spawn threads: {}", cpp);
+    }
+
+    // ── Release mode tests ─────────────────────────────────────────────
+
+    #[test]
+    fn release_mode_strips_probes() {
+        let reg = test_registry();
+        let source = "clock 1kHz t { constant(0.0) | mul(1.0) | ?debug | stdout() }";
+
+        // Debug mode: probe infrastructure present
+        let debug_cpp = codegen_ok(source, &reg);
+        assert!(
+            debug_cpp.contains("#ifndef NDEBUG"),
+            "debug build should contain #ifndef NDEBUG: {}",
+            debug_cpp
+        );
+        assert!(
+            debug_cpp.contains("_probe_debug_enabled"),
+            "debug build should contain probe enable flag: {}",
+            debug_cpp
+        );
+
+        // Release mode: probe infrastructure stripped
+        let release_result = codegen_source_with_options(
+            source,
+            &reg,
+            CodegenOptions {
+                release: true,
+                include_paths: vec![],
+            },
+        );
+        let errors: Vec<_> = release_result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "unexpected codegen errors: {:#?}",
+            errors
+        );
+        let release_cpp = release_result.generated.cpp_source;
+
+        assert!(
+            !release_cpp.contains("#ifndef NDEBUG"),
+            "release build should NOT contain #ifndef NDEBUG: {}",
+            release_cpp
+        );
+        assert!(
+            !release_cpp.contains("_probe_debug_enabled"),
+            "release build should NOT contain probe enable flag: {}",
+            release_cpp
+        );
+        assert!(
+            !release_cpp.contains("[probe:"),
+            "release build should NOT contain probe output formatting: {}",
+            release_cpp
+        );
     }
 
     // ── Integration tests ───────────────────────────────────────────────

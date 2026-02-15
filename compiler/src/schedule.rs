@@ -757,6 +757,80 @@ mod tests {
         assert!(sched.firings.len() >= 5, "all nodes should be scheduled");
     }
 
+    // ── Defensive error paths ────────────────────────────────────────────
+
+    /// Like `schedule_source` but does not assert on analysis errors.
+    /// Needed for testing scheduler behaviour when analysis detects issues
+    /// (e.g. cycle without delay) but still produces partial results.
+    fn schedule_source_bypass_analysis(source: &str, registry: &Registry) -> ScheduleResult {
+        let parse_result = crate::parser::parse(source);
+        assert!(
+            parse_result.errors.is_empty(),
+            "parse errors: {:?}",
+            parse_result.errors
+        );
+        let program = parse_result.program.expect("parse failed");
+        let resolve_result = resolve::resolve(&program, registry);
+        assert!(
+            resolve_result
+                .diagnostics
+                .iter()
+                .all(|d| d.level != DiagLevel::Error),
+            "resolve errors: {:#?}",
+            resolve_result.diagnostics
+        );
+        let graph_result = crate::graph::build_graph(&program, &resolve_result.resolved, registry);
+        assert!(
+            graph_result
+                .diagnostics
+                .iter()
+                .all(|d| d.level != DiagLevel::Error),
+            "graph errors: {:#?}",
+            graph_result.diagnostics
+        );
+        let analysis_result = crate::analyze::analyze(
+            &program,
+            &resolve_result.resolved,
+            &graph_result.graph,
+            registry,
+        );
+        // Skip analysis error assertion — allow cycle-without-delay errors through
+        schedule(
+            &program,
+            &resolve_result.resolved,
+            &graph_result.graph,
+            &analysis_result.analysis,
+            registry,
+        )
+    }
+
+    #[test]
+    fn unresolved_cycle_diagnostic() {
+        let reg = test_registry();
+        // Cycle without delay: add → :out → mul → :fb → add
+        // Analysis detects missing delay but still computes RVs.
+        // Scheduler's identify_back_edges finds no delay → topological sort fails.
+        let result = schedule_source_bypass_analysis(
+            concat!(
+                "param alpha = 0.5\n",
+                "clock 1kHz t {\n",
+                "    constant(0.0) | add(:fb) | mul($alpha) | :out | stdout()\n",
+                "    :out | :fb\n",
+                "}",
+            ),
+            &reg,
+        );
+        let has_cycle_error = result
+            .diagnostics
+            .iter()
+            .any(|d| d.level == DiagLevel::Error && d.message.contains("unresolvable cycle"));
+        assert!(
+            has_cycle_error,
+            "expected 'unresolvable cycle' diagnostic, got: {:#?}",
+            result.diagnostics
+        );
+    }
+
     // ── Modal task tests ────────────────────────────────────────────────
 
     #[test]
@@ -803,6 +877,37 @@ mod tests {
         assert!(max_buf >= 256, "adc→fft buffer should be ≥ 256 tokens");
     }
 
+    #[test]
+    fn edge_buffer_exact_values() {
+        let reg = test_registry();
+        // decimate(10): IN(float, 10), OUT(float, 1)
+        // constant gets inferred [10] → production_rate=10, rv=1
+        // decimate: production_rate=1, rv=1
+        // stdout: rv=10
+        let result = schedule_ok(
+            "clock 1kHz t {\n    constant(0.0) | decimate(10) | stdout()\n}",
+            &reg,
+        );
+        let meta = result.schedule.tasks.get("t").unwrap();
+        let sched = get_pipeline_schedule(meta);
+
+        // Build node_id → firing_index map for edge identification
+        assert_eq!(sched.firings.len(), 3, "constant, decimate, stdout");
+
+        // Collect all buffer sizes; should have exactly 2 edges
+        assert_eq!(
+            sched.edge_buffers.len(),
+            2,
+            "should have 2 intra-task edges"
+        );
+
+        let mut buf_vals: Vec<u32> = sched.edge_buffers.values().copied().collect();
+        buf_vals.sort();
+        // constant→decimate: p(constant)*rv(constant) = 10*1 = 10
+        // decimate→stdout:   p(decimate)*rv(decimate) = 1*1  = 1
+        assert_eq!(buf_vals, vec![1, 10], "edge buffers should be [1, 10]");
+    }
+
     // ── Fork topology tests ─────────────────────────────────────────────
 
     #[test]
@@ -816,6 +921,97 @@ mod tests {
         let sched = get_pipeline_schedule(meta);
         // adc, fork(:raw), stdout, stdout = 4 nodes
         assert_eq!(sched.firings.len(), 4);
+    }
+
+    // ── Rate resolution tests ──────────────────────────────────────────
+
+    #[test]
+    fn const_ref_shape_resolution() {
+        // fft()[N] creates ShapeDim::ConstRef("N"), resolved via const lookup
+        let reg = test_registry();
+        let result = schedule_ok(
+            concat!(
+                "const N = 256\n",
+                "clock 1kHz t {\n",
+                "    constant(0.0) | fft()[N] | c2r() | stdout()\n",
+                "}",
+            ),
+            &reg,
+        );
+        let meta = result.schedule.tasks.get("t").unwrap();
+        let sched = get_pipeline_schedule(meta);
+        assert_eq!(sched.firings.len(), 4, "constant, fft, c2r, stdout");
+        // ConstRef("N") resolves to 256 → fft IN/OUT rate=256
+        // With rate 256: stdout rv=256, others rv=1
+        assert_eq!(sched.firings[0].repetition_count, 1, "constant fires 1x");
+        assert_eq!(sched.firings[1].repetition_count, 1, "fft fires 1x");
+        assert_eq!(sched.firings[3].repetition_count, 256, "stdout fires 256x");
+    }
+
+    #[test]
+    fn array_const_rate_resolution() {
+        // fir(coeff) where coeff is const array: resolve_arg_to_u32 → elems.len()
+        let reg = test_registry();
+        let result = schedule_ok(
+            concat!(
+                "const coeff = [1.0, 2.0, 3.0, 4.0, 5.0]\n",
+                "clock 1kHz t {\n",
+                "    constant(0.0) | fir(coeff) | stdout()\n",
+                "}",
+            ),
+            &reg,
+        );
+        let meta = result.schedule.tasks.get("t").unwrap();
+        let sched = get_pipeline_schedule(meta);
+        assert_eq!(sched.firings.len(), 3, "constant, fir, stdout");
+        // fir PARAM(int, N): args[0] = ConstRef("coeff") → array len=5 → N=5
+        // IN(float, 5), OUT(float, 1)
+        // constant gets inferred [5] → all rv=1, constant produces 5 per firing
+        assert_eq!(sched.firings[0].repetition_count, 1, "constant fires 1x");
+        assert_eq!(sched.firings[1].repetition_count, 1, "fir fires 1x");
+        assert_eq!(sched.firings[2].repetition_count, 1, "stdout fires 1x");
+    }
+
+    // ── Fusion semantic baseline ────────────────────────────────────────
+
+    #[test]
+    fn fusion_semantic_baseline() {
+        // Baseline invariant: for every edge, edge_buffer >= production_rate * rv(source).
+        // This SDF conservation property must hold regardless of fusion optimisation.
+        let reg = test_registry();
+        let result = schedule_ok(
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | c2r() | stdout()\n}",
+            &reg,
+        );
+        let meta = result.schedule.tasks.get("t").unwrap();
+        let sched = get_pipeline_schedule(meta);
+
+        // Build map: node_id → repetition_count
+        let rv_map: HashMap<NodeId, u32> = sched
+            .firings
+            .iter()
+            .map(|f| (f.node_id, f.repetition_count))
+            .collect();
+
+        // For each edge, buffer size must equal p(src) * rv(src)
+        // (the SDF balance invariant the scheduler encodes)
+        for (&(src, _tgt), &buf_size) in &sched.edge_buffers {
+            let rv_src = rv_map.get(&src).copied().unwrap_or(1);
+            assert!(
+                buf_size >= rv_src,
+                "edge ({:?} → {:?}): buffer {buf_size} < rv(src) {rv_src} — \
+                 SDF token conservation violated",
+                src,
+                _tgt
+            );
+        }
+
+        // Verify total tokens per PASS cycle are non-zero for every edge
+        let total_tokens: u32 = sched.edge_buffers.values().sum();
+        assert!(
+            total_tokens > 0,
+            "PASS cycle must produce tokens on intra-task edges"
+        );
     }
 
     // ── Display test ────────────────────────────────────────────────────

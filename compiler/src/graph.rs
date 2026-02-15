@@ -986,6 +986,70 @@ mod tests {
         assert_eq!(edge.reader_task, "b");
     }
 
+    #[test]
+    fn inter_task_edges_multiple_readers() {
+        let reg = test_registry();
+        let graph = build_ok(
+            concat!(
+                "set mem = 64MB\n",
+                "clock 1kHz a { constant(0.0) -> sig }\n",
+                "clock 1kHz b { @sig | stdout() }\n",
+                "clock 1kHz c { @sig | stdout() }\n",
+            ),
+            &reg,
+        );
+        assert_eq!(
+            graph.inter_task_edges.len(),
+            2,
+            "1 writer + 2 readers should produce 2 inter-task edges"
+        );
+        // Both edges reference the same buffer and writer
+        assert!(graph
+            .inter_task_edges
+            .iter()
+            .all(|e| e.buffer_name == "sig"));
+        assert!(graph.inter_task_edges.iter().all(|e| e.writer_task == "a"));
+        // Reader tasks should be b and c
+        let reader_tasks: Vec<&str> = graph
+            .inter_task_edges
+            .iter()
+            .map(|e| e.reader_task.as_str())
+            .collect();
+        assert!(reader_tasks.contains(&"b"));
+        assert!(reader_tasks.contains(&"c"));
+    }
+
+    #[test]
+    fn inter_task_edge_in_modal_task() {
+        let reg = test_registry();
+        let graph = build_ok(
+            concat!(
+                "set mem = 64MB\n",
+                "clock 1kHz producer { constant(0.0) -> sig }\n",
+                "clock 1kHz consumer {\n",
+                "    control { constant(0.0) | detect() -> ctrl }\n",
+                "    mode sync { @sig | stdout() }\n",
+                "    mode data { constant(0.0) | stdout() }\n",
+                "    switch(ctrl, sync, data) default sync\n",
+                "}\n",
+            ),
+            &reg,
+        );
+        // find_buffer_node_in_task traverses modal subgraphs to find BufferRead
+        let sig_edges: Vec<_> = graph
+            .inter_task_edges
+            .iter()
+            .filter(|e| e.buffer_name == "sig")
+            .collect();
+        assert_eq!(
+            sig_edges.len(),
+            1,
+            "modal task with @sig should produce 1 inter-task edge: {:?}",
+            graph.inter_task_edges
+        );
+        assert_eq!(sig_edges[0].reader_task, "consumer");
+    }
+
     // ── Probes ──────────────────────────────────────────────────────────
 
     #[test]
@@ -1114,6 +1178,31 @@ mod tests {
         assert!(
             has_depth_error,
             "expected recursion depth error, got: {:#?}",
+            result.diagnostics
+        );
+    }
+
+    // ── Defensive error paths ────────────────────────────────────────────
+
+    #[test]
+    fn pending_tap_unresolved_diagnostic() {
+        let reg = test_registry();
+        // :nonexistent is never declared — resolve catches it first,
+        // but graph layer should also emit its own defensive diagnostic.
+        let source = "clock 1kHz t {\n    constant(0.0) | add(:nonexistent) | stdout()\n}";
+        let parse_result = crate::parser::parse(source);
+        assert!(parse_result.errors.is_empty());
+        let program = parse_result.program.unwrap();
+        let resolve_result = resolve::resolve(&program, &reg);
+        // Skip resolve error assertion — resolve catches the undefined tap before graph does
+        let result = build_graph(&program, &resolve_result.resolved, &reg);
+        let has_graph_error = result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("not found in graph"));
+        assert!(
+            has_graph_error,
+            "expected graph-level 'not found in graph' diagnostic, got: {:#?}",
             result.diagnostics
         );
     }
@@ -1584,5 +1673,56 @@ mod tests {
         // Should have: adc, fork(:sig), mag, stdout, stdout = 5 nodes
         let forks = count_nodes_of_kind(sub, |k| matches!(k, NodeKind::Fork { .. }));
         assert_eq!(forks, 1, "expected 1 fork node");
+    }
+
+    // ── Shape constraint preservation ────────────────────────────────────
+
+    #[test]
+    fn shape_constraint_preserved_in_node() {
+        let reg = test_registry();
+        let graph = build_ok(
+            "clock 1kHz t {\n    constant(0.0) | fft()[256] | c2r() | stdout()\n}",
+            &reg,
+        );
+        let sub = get_pipeline_subgraph(&graph, "t");
+
+        // fft()[256] should have shape_constraint = Some(ShapeConstraint { dims: [Literal(256)] })
+        let fft_node = sub
+            .nodes
+            .iter()
+            .find(|n| matches!(&n.kind, NodeKind::Actor { name, .. } if name == "fft"))
+            .expect("fft node not found");
+        if let NodeKind::Actor {
+            shape_constraint, ..
+        } = &fft_node.kind
+        {
+            let sc = shape_constraint
+                .as_ref()
+                .expect("fft()[256] should have shape_constraint");
+            assert_eq!(sc.dims.len(), 1, "expected 1 dimension");
+            assert!(
+                matches!(sc.dims[0], crate::ast::ShapeDim::Literal(256, _)),
+                "expected ShapeDim::Literal(256), got: {:?}",
+                sc.dims[0]
+            );
+        } else {
+            panic!("expected Actor node");
+        }
+
+        // constant(0.0) should NOT have shape_constraint
+        let const_node = sub
+            .nodes
+            .iter()
+            .find(|n| matches!(&n.kind, NodeKind::Actor { name, .. } if name == "constant"))
+            .expect("constant node not found");
+        if let NodeKind::Actor {
+            shape_constraint, ..
+        } = &const_node.kind
+        {
+            assert!(
+                shape_constraint.is_none(),
+                "constant(0.0) should not have shape_constraint"
+            );
+        }
     }
 }

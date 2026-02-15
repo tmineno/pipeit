@@ -1,9 +1,11 @@
-// Integration tests: verify that generated C++ code compiles with a C++ compiler.
+// Integration tests: verify that generated C++ code compiles and runs correctly.
 //
 // Two categories:
 //   1. Example files: compile each examples/*.pdl end-to-end
 //   2. Inline snippets: targeted coverage of individual language features
 //
+// Complements the unit tests in codegen.rs which verify structural properties
+// of generated C++ strings without invoking a compiler.
 // Skipped automatically if no C++ compiler is found.
 
 use std::path::{Path, PathBuf};

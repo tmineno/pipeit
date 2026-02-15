@@ -730,16 +730,7 @@ mod tests {
         assert_eq!(a.params[0].name, "N");
     }
 
-    #[test]
-    fn parse_span_param() {
-        let a = scan_one(
-            "ACTOR(fir, IN(float, N), OUT(float, 1), PARAM(int, N), PARAM(std::span<const float>, coeff)) { return ACTOR_OK; }",
-        );
-        assert_eq!(a.name, "fir");
-        assert_eq!(a.params.len(), 2);
-        assert_eq!(a.params[1].param_type, ParamType::SpanFloat);
-        assert_eq!(a.params[1].name, "coeff");
-    }
+    // parse_span_param removed: merged into parse_multi_param (identical input)
 
     #[test]
     fn parse_string_span_param() {
@@ -827,6 +818,76 @@ mod tests {
     }
 
     #[test]
+    fn malformed_actor_missing_fields() {
+        let path = PathBuf::from("test.h");
+        let result = scan_actors("ACTOR(foo, IN(float, 1)) { return ACTOR_OK; }", &path);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RegistryError::ParseError { message, .. } => {
+                assert!(
+                    message.contains("requires at least 3 fields"),
+                    "got: {}",
+                    message
+                );
+            }
+            other => panic!("expected ParseError, got: {}", other),
+        }
+    }
+
+    #[test]
+    fn malformed_actor_invalid_name() {
+        let path = PathBuf::from("test.h");
+        let result = scan_actors(
+            "ACTOR(bad-name!, IN(float, 1), OUT(float, 1)) { return ACTOR_OK; }",
+            &path,
+        );
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RegistryError::ParseError { message, .. } => {
+                assert!(message.contains("invalid actor name"), "got: {}", message);
+            }
+            other => panic!("expected ParseError, got: {}", other),
+        }
+    }
+
+    #[test]
+    fn malformed_actor_unbalanced_parens() {
+        let path = PathBuf::from("test.h");
+        let result = scan_actors("ACTOR(foo, IN(float, 1), OUT(float, 1)", &path);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RegistryError::ParseError { message, .. } => {
+                assert!(
+                    message.contains("unbalanced parentheses"),
+                    "got: {}",
+                    message
+                );
+            }
+            other => panic!("expected ParseError, got: {}", other),
+        }
+    }
+
+    #[test]
+    fn unknown_param_type_error() {
+        let path = PathBuf::from("test.h");
+        let result = scan_actors(
+            "ACTOR(x, IN(float, 1), OUT(float, 1), PARAM(bool, flag)) { return ACTOR_OK; }",
+            &path,
+        );
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RegistryError::ParseError { message, .. } => {
+                assert!(
+                    message.contains("unknown parameter type"),
+                    "got: {}",
+                    message
+                );
+            }
+            other => panic!("expected ParseError, got: {}", other),
+        }
+    }
+
+    #[test]
     fn skip_line_comments() {
         let src = r#"
 // ACTOR(commented_out, IN(float, 1), OUT(float, 1)) { }
@@ -847,6 +908,24 @@ ACTOR(real, IN(float, 1), OUT(float, 1)) { return ACTOR_OK; }
         let path = PathBuf::from("test.h");
         let actors = scan_actors(src, &path).unwrap();
         assert_eq!(actors.len(), 1);
+        assert_eq!(actors[0].name, "real");
+    }
+
+    #[test]
+    fn comment_markers_inside_string_preserved() {
+        // strip_comments should NOT strip // or /* */ inside string literals
+        let src = r#"
+const char* s1 = "// not a comment";
+const char* s2 = "/* not either */";
+ACTOR(real, IN(float, 1), OUT(float, 1)) { return ACTOR_OK; }
+"#;
+        let path = PathBuf::from("test.h");
+        let actors = scan_actors(src, &path).unwrap();
+        assert_eq!(
+            actors.len(),
+            1,
+            "actor should survive string-embedded comment markers"
+        );
         assert_eq!(actors[0].name, "real");
     }
 
@@ -1005,5 +1084,113 @@ ACTOR(b, IN(int32, 2), OUT(double, 1)) { return ACTOR_OK; }
         assert_eq!(a.in_shape.dims[0], TokenCount::Literal(1));
         assert_eq!(a.out_shape.rank(), 1);
         assert_eq!(a.out_shape.dims[0], TokenCount::Literal(1));
+    }
+
+    // ── Shape edge cases (documenting current permissive behavior) ──────
+
+    #[test]
+    fn shape_empty_becomes_symbolic() {
+        // SHAPE() → inner "" parsed as Symbolic("") — no validation in registry
+        let a = scan_one("ACTOR(x, IN(float, SHAPE()), OUT(float, 1)) { return ACTOR_OK; }");
+        assert_eq!(a.in_shape.rank(), 1);
+        assert_eq!(
+            a.in_shape.dims[0],
+            TokenCount::Symbolic("".into()),
+            "empty SHAPE() should produce Symbolic(\"\")"
+        );
+    }
+
+    #[test]
+    fn shape_zero_literal() {
+        // SHAPE(0) is valid at registry level — semantics checked in analysis
+        let a = scan_one("ACTOR(x, IN(float, SHAPE(0)), OUT(float, 1)) { return ACTOR_OK; }");
+        assert_eq!(a.in_shape.rank(), 1);
+        assert_eq!(a.in_shape.dims[0], TokenCount::Literal(0));
+        assert_eq!(a.in_count, TokenCount::Literal(0));
+    }
+
+    #[test]
+    fn shape_negative_becomes_symbolic() {
+        // -1 fails u32::parse → treated as Symbolic("-1")
+        let a = scan_one("ACTOR(x, IN(float, SHAPE(-1)), OUT(float, 1)) { return ACTOR_OK; }");
+        assert_eq!(a.in_shape.rank(), 1);
+        assert_eq!(
+            a.in_shape.dims[0],
+            TokenCount::Symbolic("-1".into()),
+            "negative value should become Symbolic"
+        );
+    }
+
+    // ── Registry API contract tests ─────────────────────────────────────
+
+    #[test]
+    fn registry_is_empty_and_len() {
+        let reg = Registry::new();
+        assert!(reg.is_empty());
+        assert_eq!(reg.len(), 0);
+    }
+
+    #[test]
+    fn registry_actors_iterator() {
+        let src = r#"
+ACTOR(a, IN(float, 1), OUT(float, 1)) { return ACTOR_OK; }
+ACTOR(b, IN(float, 1), OUT(float, 1)) { return ACTOR_OK; }
+"#;
+        let dir = std::env::temp_dir().join("pipit_test_iter");
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("actors.h");
+        std::fs::write(&f, src).unwrap();
+
+        let mut reg = Registry::new();
+        reg.load_header(&f).unwrap();
+
+        assert!(!reg.is_empty());
+        assert_eq!(reg.len(), 2);
+
+        let names: Vec<&str> = reg.actors().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"a"));
+        assert!(names.contains(&"b"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn registry_overlay_from() {
+        let dir = std::env::temp_dir().join("pipit_test_overlay");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Base registry: actor "a" with float input
+        let f1 = dir.join("base.h");
+        std::fs::write(
+            &f1,
+            "ACTOR(a, IN(float, 1), OUT(float, 1)) { return ACTOR_OK; }",
+        )
+        .unwrap();
+        let mut base = Registry::new();
+        base.load_header(&f1).unwrap();
+        assert_eq!(base.lookup("a").unwrap().in_type, PipitType::Float);
+
+        // Overlay registry: actor "a" with int32 input + new actor "b"
+        let f2 = dir.join("overlay.h");
+        std::fs::write(
+            &f2,
+            concat!(
+                "ACTOR(a, IN(int32, 1), OUT(int32, 1)) { return ACTOR_OK; }\n",
+                "ACTOR(b, IN(float, 1), OUT(float, 1)) { return ACTOR_OK; }\n",
+            ),
+        )
+        .unwrap();
+        let mut overlay = Registry::new();
+        overlay.load_header(&f2).unwrap();
+
+        base.overlay_from(&overlay);
+
+        // "a" should be overwritten by overlay's version
+        assert_eq!(base.lookup("a").unwrap().in_type, PipitType::Int32);
+        // "b" should be added
+        assert!(base.lookup("b").is_some());
+        assert_eq!(base.len(), 2);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
