@@ -264,6 +264,44 @@
   - [ ] Regression detection (compare against baseline)
   - [ ] CI integration: Track performance over commits
 
+### Optimization Backlog (From 2026-02-15 Benchmark Analysis)
+
+- [ ] **Scheduler/timer overhead reduction** (HIGH impact):
+  - [ ] Reduce empty-pipeline baseline cost (`BM_EmptyPipeline`) by optimizing task loop wake/sleep transitions
+  - [ ] Reduce context-switch and wake-up overhead (`BM_ContextSwitch`, `thread_wakeup`)
+  - [ ] Add batched timer wake processing option for high-frequency schedules (10kHz+)
+  - [ ] Define target: lower `timer.wait() @10kHz` overhead share below 95% of timer+work budget
+
+- [ ] **Ring buffer contention optimization** (HIGH impact):
+  - [ ] Rework multi-reader tail publication to reduce atomic contention in `Contention/{2,4,8,16}readers`
+  - [ ] Add cache-line padding/alignment review for reader metadata and shared indices
+  - [ ] Evaluate batched read/write publish strategy to reduce synchronization frequency
+  - [ ] Define target: cut 16-reader latency regression (currently ~14x vs 2-reader) by at least 2x
+
+- [ ] **Memory false-sharing and bandwidth tuning** (HIGH impact):
+  - [ ] Eliminate false-sharing hotspots in memory benchmarks (`BM_Memory_FalseSharing/*`)
+  - [ ] Audit memory layout and allocation alignment for hot runtime structs (ring buffer + task stats)
+  - [ ] Tune working-set access patterns for large chunk/cacheline scenarios (`CacheLineUtil/256+`)
+  - [ ] Define target: reduce 8-reader false-sharing latency by at least 30%
+
+- [ ] **Affinity task-scaling optimization** (HIGH impact):
+  - [ ] Investigate front-end stalls in `perf_affinity.sh` task-scaling path (IPC ~0.12, frontend idle ~69.85%)
+  - [ ] Reduce branchy control flow and instruction footprint in affinity scheduling fast-path
+  - [ ] Add microbench variant isolating affinity setup cost vs steady-state processing cost
+  - [ ] Define target: improve task-scaling IPC to >0.5 without throughput regression
+
+- [ ] **Timer precision and overrun behavior** (MEDIUM impact):
+  - [ ] Improve overrun handling for 100kHz/1MHz stress path (currently high overrun rates)
+  - [ ] Add configurable overrun policy benchmark matrix (drop/merge/catch-up) for latency vs throughput trade-offs
+  - [ ] Add long-running drift/stability benchmark harness (non-CI nightly)
+
+- [ ] **Benchmark harness correctness and reproducibility** (HIGH priority for trustworthy data):
+  - [ ] Fix compiler benchmark invocation (`--output-format` incompatibility) so compiler section is truly measured
+  - [ ] Fix PDL benchmark compile failures so end-to-end workloads emit runtime stats
+  - [ ] Make flamegraph step robust in offline environments (preinstalled tools path or graceful skip with instructions)
+  - [ ] Add release/perf build mode requirement checks and report when debug libraries skew results
+  - [ ] Add optional ASLR/state pinning guidance for reproducible local perf runs
+
 ---
 
 ## v0.2.2 - Standard Actor Library (Continuation)
