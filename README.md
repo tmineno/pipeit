@@ -2,6 +2,8 @@
 
 A domain-specific language for describing clock-driven, real-time data pipelines using Synchronous Dataflow (SDF) semantics on shared memory.
 
+**⚠️ Work in Progress**: Pipit is under active development. The core compiler pipeline and runtime are functional (v0.1.0), but some runtime features and the standard actor library are still being implemented. See [TODO.md](doc/TODO.md) for the development roadmap.
+
 ## What it does
 
 - Define actors in C++ with static input/output token rates

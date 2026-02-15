@@ -1,6 +1,6 @@
 # Pipit Development Roadmap
 
-**v0.1.0 Complete** ✅ (2026-02-15)
+**v0.1.0 Tagged** ✅ (2026-02-15)
 
 - Full compiler pipeline (parse → resolve → graph → analyze → schedule → codegen)
 - Runtime library with lock-free ring buffers, timers, statistics
@@ -9,13 +9,201 @@
 
 ---
 
-## v0.1.1 - Performance Characterization & Spec Sheet (Current)
+## v0.1.1 - Complete Core Runtime (Current)
 
-**Goal**: Establish comprehensive performance baselines and identify bottlenecks before major feature additions.
+**Goal**: Complete runtime features designed for v0.1.0 but not yet implemented. These are essential for production-ready generated code.
 
-### Wide Coverage Runtime Benchmarks
+**Criticality**: HIGH | **Complexity**: LOW-MEDIUM
 
-- [ ] **Extended compiler benchmarks**:
+### Runtime Features
+
+- [ ] **Actor error propagation**:
+  - [ ] Check `operator()` return value in generated code
+  - [ ] Propagate `ACTOR_ERROR` to exit code 1
+  - [ ] Print error message with actor/task name
+  - [ ] Stop all tasks on first error
+
+- [ ] **Overrun detection and policy**:
+  - [ ] Read `set overrun = drop|slip|backlog` from PDL
+  - [ ] Enhance Timer with `last_latency()`, `missed_count()`, `reset_phase()`
+  - [ ] Generate policy-specific code in task loops:
+    - **drop**: Skip firing on overrun (default)
+    - **slip**: Re-anchor timer phase, execute anyway
+    - **backlog**: Execute multiple firings to catch up
+  - [ ] Test all three policies with integration tests
+
+- [ ] **Statistics collection**:
+  - [ ] Add `TaskStats` struct to pipit.h (ticks, missed, avg/max latency)
+  - [ ] Generate `_stats_<task>` variables in codegen
+  - [ ] Record tick latency after `timer.wait()`
+  - [ ] Record misses on overrun drop
+  - [ ] Emit stats summary at exit when `--stats` flag provided
+
+- [ ] **Expanded CLI flags**:
+  - [ ] Unify CLI parsing in generated `main()`
+  - [ ] `--duration <time>` - Support "10s", "1m", "inf" formats (not just numbers)
+  - [ ] `--threads <N>` - Accept flag, warn if < task count
+  - [ ] `--probe <name>` - Enable named probe
+  - [ ] `--probe-output <file>` - Set probe output file (default stderr)
+  - [ ] `--stats` - Enable statistics collection
+  - [ ] Exit code 2 on unknown flags or invalid parameter values
+
+- [ ] **Functional probe output**:
+  - [ ] Generate `_probe_<name>_enabled` flags
+  - [ ] Emit actual fprintf when probe enabled (not just comments)
+  - [ ] Support `--probe <name>` to enable at runtime
+  - [ ] Support `--probe-output <file>` to redirect output
+  - [ ] Wrap in `#ifndef NDEBUG` for release builds
+
+### Quality & Testing
+
+- [ ] **Error message improvements**:
+  - [ ] Add `hint: Option<String>` field to `Diagnostic`
+  - [ ] Attach hints for common errors:
+    - Type mismatch → suggest conversion actor
+    - Unknown actor → suggest checking -I flag
+    - Feedback without delay → suggest delay(N, init) (already done)
+  - [ ] Update `Display` impl to print hint on next line
+
+- [ ] **End-to-end tests**:
+  - [ ] Test example.pdl compiles and runs (exit code 0)
+  - [ ] Test receiver.pdl compiles and runs
+  - [ ] Test exit code 2 on bad CLI flags
+  - [ ] Test each overrun policy (drop, slip, backlog)
+  - [ ] Test --stats output format
+  - [ ] Test probe functionality
+
+### Documentation
+
+- [ ] **pcc usage guide** (`doc/pcc-usage.md`):
+  - [ ] Compiler flags (-I, --emit, --release, etc.)
+  - [ ] Generated binary flags (--duration, --param, --probe, --stats, --threads)
+  - [ ] Examples of common workflows
+  - [ ] Probe and stats usage
+
+---
+
+## v0.1.2 - Standard Actor Library
+
+**Goal**: Provide well-tested, documented actors for common signal processing tasks. Prioritize simple, high-value actors before complex ones.
+
+**Criticality**: HIGH | **Complexity**: MEDIUM-HIGH
+
+### Phase 1: Essential I/O & Math (Simple, High Value)
+
+- [ ] **File I/O** (MEDIUM complexity):
+  - [ ] `binread(path, dtype)` - Binary file reader (int16, int32, float, cfloat)
+  - [ ] `binwrite(path, dtype)` - Binary file writer
+  - [ ] Error handling for file operations (ACTOR_ERROR on failure)
+  - [ ] Unit tests with known input/output files
+
+- [ ] **Standard I/O** (LOW complexity):
+  - [ ] Enhance `stdout()` with format options (hex, scientific notation)
+  - [ ] `stderr()` - Write to stderr for error reporting
+  - [ ] `stdin()` - Read from stdin (interactive pipelines)
+
+- [ ] **Basic arithmetic** (LOW complexity):
+  - [ ] `sub()` - Subtraction
+  - [ ] `div()` - Division
+  - [ ] `abs()` - Absolute value
+  - [ ] `sqrt()` - Square root
+  - [ ] Unit tests for each (edge cases: zero, negative, inf, NaN)
+
+- [ ] **Basic statistics** (LOW-MEDIUM complexity):
+  - [ ] `mean(N)` - Running mean over N samples
+  - [ ] `rms()` - RMS (verify existing implementation)
+  - [ ] `min(N)` - Minimum over window
+  - [ ] `max(N)` - Maximum over window
+  - [ ] Unit tests with known sequences
+
+### Phase 2: Signal Processing Basics (Medium Complexity)
+
+- [ ] **Simple filters** (MEDIUM complexity):
+  - [ ] `lpf(cutoff, order)` - Low-pass filter (Butterworth)
+  - [ ] `hpf(cutoff, order)` - High-pass filter
+  - [ ] `notch(freq, q)` - Notch filter
+  - [ ] Test with known signal characteristics
+
+- [ ] **Basic transforms** (MEDIUM-HIGH complexity):
+  - [ ] `ifft(N)` - Inverse FFT
+  - [ ] `rfft(N)` - Real FFT (optimize for real input)
+  - [ ] Validate against reference implementations (e.g., FFTW)
+
+- [ ] **Windowing** (LOW-MEDIUM complexity):
+  - [ ] `window(N, type)` - Window functions (hann, hamming, blackman)
+  - [ ] Test window properties (energy, side lobe levels)
+
+### Phase 3: Advanced Signal Processing (High Complexity)
+
+- [ ] **WAV file I/O** (MEDIUM-HIGH complexity):
+  - [ ] `wavread(path)` - WAV file reader (streaming, 16/24/32-bit PCM)
+  - [ ] `wavwrite(path)` - WAV file writer (configurable sample rate, channels)
+  - [ ] Handle WAV header parsing, endianness
+
+- [ ] **Advanced filters** (HIGH complexity):
+  - [ ] `iir(b_coeff, a_coeff)` - IIR filter (biquad sections)
+  - [ ] `bpf(low, high, order)` - Band-pass filter
+  - [ ] Numerical stability testing
+
+- [ ] **Resampling** (HIGH complexity):
+  - [ ] `resample(M, N)` - Rational resampling (upsample M, downsample N)
+  - [ ] `interp(N)` - Interpolation (zero-insert + LPF)
+  - [ ] `downsample(N)` - Downsampling (LPF + decimate)
+
+- [ ] **Advanced transforms** (HIGH complexity):
+  - [ ] `dct(N)` - Discrete Cosine Transform
+  - [ ] `hilbert(N)` - Hilbert transform (analytic signal)
+  - [ ] `stft(N, hop)` - Short-Time Fourier Transform
+  - [ ] `istft(N, hop)` - Inverse STFT
+
+- [ ] **Advanced statistics** (MEDIUM complexity):
+  - [ ] `var(N)` - Variance
+  - [ ] `std(N)` - Standard deviation
+  - [ ] `xcorr(N)` - Cross-correlation
+  - [ ] `acorr(N)` - Auto-correlation
+  - [ ] `convolve(N, kernel)` - Convolution
+
+- [ ] **Control flow** (MEDIUM complexity):
+  - [ ] `gate(threshold)` - Pass/block based on signal level
+  - [ ] `clipper(min, max)` - Hard clipping
+  - [ ] `limiter(threshold)` - Soft limiting
+  - [ ] `agc(target, attack, release)` - Automatic Gain Control
+
+### Infrastructure & Documentation
+
+- [ ] **Testing infrastructure**:
+  - [ ] Per-actor unit test framework
+  - [ ] Test harness for actor correctness
+  - [ ] Edge case testing (zero, infinity, NaN)
+  - [ ] Performance tests (measure ns/firing)
+
+- [ ] **Actor documentation**:
+  - [ ] API reference template
+  - [ ] Usage examples for each actor
+  - [ ] Performance characteristics
+  - [ ] Known limitations
+
+- [ ] **Example pipelines**:
+  - [ ] Audio effects (basic filters, gain)
+  - [ ] SDR examples (if filters/transforms complete)
+  - [ ] Simple sensor processing
+
+- [ ] **Actor header organization**:
+  - [ ] Split `actors.h` into categories: `io.h`, `filters.h`, `math.h`, etc.
+  - [ ] Maintain `actors.h` as umbrella include
+  - [ ] Consider `--actor-path` for automatic discovery
+
+---
+
+## v0.1.3 - Performance Characterization & Spec Sheet
+
+**Goal**: Establish comprehensive performance baselines and identify bottlenecks. Measure what exists before optimizing.
+
+**Criticality**: MEDIUM | **Complexity**: MEDIUM
+
+### Extended Benchmarks
+
+- [ ] **Compiler benchmarks**:
   - [ ] Large pipeline compilation (100+ actors, 20+ tasks)
   - [ ] Deep nesting (define within define, 5+ levels)
   - [ ] Wide fan-out (single source → 50 consumers via taps)
@@ -44,44 +232,42 @@
   - [ ] CPU affinity impact on performance
 
 - [ ] **Memory subsystem**:
-  - [ ] Total memory footprint per task (measure with /proc/self/status)
+  - [ ] Total memory footprint per task
   - [ ] Cache line utilization in RingBuffer
-  - [ ] False sharing detection (shared buffers on same cache line)
+  - [ ] False sharing detection
   - [ ] Memory bandwidth saturation point
-  - [ ] Page fault impact (large buffers, first access)
+  - [ ] Page fault impact
 
 - [ ] **Actor performance**:
   - [ ] Per-actor microbenchmarks (FFT, FIR, mul, add, etc.)
-  - [ ] Vectorization effectiveness (check assembly, measure speedup)
+  - [ ] Vectorization effectiveness
   - [ ] Pipeline stalls (data dependencies, cache misses)
-  - [ ] Actor fusion potential (measure overhead of actor boundaries)
+  - [ ] Actor fusion potential
 
 - [ ] **End-to-end workloads**:
   - [ ] SDR receiver chain (1 MSPS, 10 MSPS, 100 MSPS)
   - [ ] Audio processing (48 kHz, 16-bit stereo, 10 effects)
-  - [ ] Video frame processing (1080p@30fps, simple filters)
-  - [ ] Sensor fusion (10 sensors @ 1 kHz, Kalman filter)
-  - [ ] Network packet processing (1 Gbps, 10 Gbps theoretical)
+  - [ ] Sensor fusion (10 sensors @ 1 kHz)
 
-### Bottleneck Analysis
+### Profiling & Analysis
 
 - [ ] **Profiling with perf**:
-  - [ ] CPU hotspots: Which functions consume most time?
-  - [ ] Branch mispredictions: Control flow efficiency
-  - [ ] Cache misses: L1/L2/L3 miss rates per component
-  - [ ] TLB misses: Page table efficiency
-  - [ ] Generate flame graphs for representative workloads
+  - [ ] CPU hotspots
+  - [ ] Branch mispredictions
+  - [ ] Cache misses (L1/L2/L3)
+  - [ ] TLB misses
+  - [ ] Flame graphs for representative workloads
 
 - [ ] **Lock contention analysis**:
-  - [ ] Measure atomic contention in RingBuffer (multi-reader)
-  - [ ] Memory ordering overhead (relaxed vs acquire/release)
-  - [ ] Identify lock-free algorithm inefficiencies
+  - [ ] Atomic contention in RingBuffer (multi-reader)
+  - [ ] Memory ordering overhead
+  - [ ] Lock-free algorithm inefficiencies
 
 - [ ] **Latency breakdown**:
   - [ ] Time per actor firing (min/avg/max/p99)
   - [ ] Timer overhead vs actual work
   - [ ] Ring buffer read/write vs compute
-  - [ ] Task wake-up to first instruction executed
+  - [ ] Task wake-up to first instruction
   - [ ] End-to-end latency budget (source → sink)
 
 - [ ] **Comparison with alternatives**:
@@ -89,74 +275,23 @@
   - [ ] Pure C++ hand-written: Measure framework overhead
   - [ ] Theoretical maximum (FLOPS, memory bandwidth)
 
-### Performance Spec Sheet
+### Documentation
 
-Create `doc/PERFORMANCE.md` with:
-
-- [ ] **Hardware tested**:
-  - [ ] CPU model, core count, frequency
-  - [ ] Cache sizes (L1/L2/L3)
-  - [ ] RAM size, speed, channels
-  - [ ] OS, kernel version, governor settings
-
-- [ ] **Compiler performance**:
-  - [ ] Parse time vs program size (tokens, lines, actors)
-  - [ ] Memory usage during compilation
-  - [ ] Codegen size vs program complexity
-  - [ ] Time breakdown per compiler phase (table)
-
-- [ ] **Runtime performance**:
-  - [ ] Ring buffer throughput (tokens/sec, MB/s)
-    - Single reader, multi-reader (2/4/8)
-    - Different buffer sizes
-  - [ ] Timer precision (jitter distribution, histogram)
-  - [ ] Task startup overhead (time to first tick)
-  - [ ] Empty pipeline overhead (baseline cost)
-  - [ ] Per-actor performance (ns/firing for each actor)
-
-- [ ] **Scaling characteristics**:
-  - [ ] Throughput vs number of tasks (1-32)
-  - [ ] Latency vs pipeline depth (1-100 actors)
-  - [ ] Memory vs buffer sizes and task count
-  - [ ] Efficiency vs CPU utilization (ideal = 100%)
-
-- [ ] **Real-world workload benchmarks**:
-  - [ ] SDR receiver: Max sample rate sustained
-  - [ ] Audio: Max concurrent tracks/effects
-  - [ ] Video: Max resolution/framerate
-  - [ ] Identify bottleneck in each case
-
-- [ ] **Comparison table**:
-  - [ ] Pipit vs GNU Radio vs hand-coded C++
-  - [ ] For 3-5 representative pipelines
-  - [ ] Metrics: throughput, latency, CPU%, memory
-
-- [ ] **Known limitations**:
-  - [ ] Frequency limits (min/max sustainable)
-  - [ ] Buffer size constraints
-  - [ ] Platform-specific issues (Linux vs macOS vs Windows)
-
-### Documentation Updates
-
-- [ ] **Benchmark README** (`benches/README.md`):
-  - [ ] Add all new benchmarks to documentation
-  - [ ] Explain what each benchmark measures
-  - [ ] How to run comprehensive benchmark suite
-  - [ ] How to reproduce spec sheet results
+- [ ] **Performance spec sheet** (`doc/PERFORMANCE.md`):
+  - [ ] Hardware tested (CPU, cache, RAM, OS)
+  - [ ] Compiler performance (parse time, memory, codegen size)
+  - [ ] Runtime performance (ring buffer, timer, task overhead)
+  - [ ] Scaling characteristics (tasks, pipeline depth, buffer sizes)
+  - [ ] Real-world workload benchmarks
+  - [ ] Comparison table (Pipit vs GNU Radio vs hand-coded)
+  - [ ] Known limitations (frequency limits, buffer constraints)
 
 - [ ] **Performance tuning guide** (`doc/tuning.md`):
   - [ ] Buffer sizing guidelines
   - [ ] Thread/task mapping best practices
   - [ ] Overrun policy selection criteria
   - [ ] CPU affinity and NUMA considerations
-  - [ ] Compiler optimization flags (--march, -flto, PGO)
-
-- [ ] **Known issues** (`doc/known-issues.md`):
-  - [ ] Document any performance cliffs discovered
-  - [ ] Workarounds for common bottlenecks
-  - [ ] Platform-specific quirks
-
-### Tooling
+  - [ ] Compiler optimization flags
 
 - [ ] **Benchmark automation**:
   - [ ] `benches/run_all.sh` - Run full suite, generate report
@@ -164,20 +299,15 @@ Create `doc/PERFORMANCE.md` with:
   - [ ] Regression detection (compare against baseline)
   - [ ] CI integration: Track performance over commits
 
-- [ ] **Profiling helpers**:
-  - [ ] `scripts/profile.sh <pdl_file>` - Auto-profile with perf
-  - [ ] Flame graph generation
-  - [ ] Cache miss visualization
-
 ---
 
-## Future Releases (Deferred)
+## v0.2.0 - Language Evolution (Type Inference)
 
-### v0.2.0 - Quality of Life & Language Improvements
+**Goal**: Improve PDL ergonomics and type system based on real usage experience. Design-first approach.
 
-#### Type Inference Improvements
+**Criticality**: MEDIUM | **Complexity**: LOW (design), HIGH (implementation)
 
-##### Phase 1: Design & Specification
+### Phase 1: Design & Specification
 
 - [ ] **Review current type system**:
   - [ ] Document how types currently work (explicit only, no inference)
@@ -200,7 +330,7 @@ Create `doc/PERFORMANCE.md` with:
   - [ ] Generic actor syntax (if supported)
   - [ ] Backwards compatibility considerations
 
-##### Phase 2: Implementation (after spec approval)
+### Phase 2: Implementation (After Spec Approval)
 
 - [ ] **Implicit type conversions in pipelines**:
   - [ ] Auto-insert `c2r()` when connecting `cfloat → float` pipeline
@@ -217,44 +347,108 @@ Create `doc/PERFORMANCE.md` with:
 - [ ] **Generic actor support** (if spec approved):
   - [ ] Template-like syntax: `fir<float>(N, coeff)` vs `fir<int32>(N, coeff)`
   - [ ] Type parameter inference from arguments
-  - [ ] Monomorphization during codegen (generate specialized versions)
+  - [ ] Monomorphization during codegen
 
 - [ ] **Better type error messages**:
   - [ ] Show expected vs actual types in context
   - [ ] Suggest conversion actors with exact syntax
-  - [ ] Trace type through pipeline: `adc(0): float → mul(2.0): float → c2r(): ERROR`
-  - [ ] Highlight the problematic pipe operator in source
+  - [ ] Trace type through pipeline
+  - [ ] Highlight problematic pipe operator in source
 
-#### Runtime & Ecosystem
+---
+
+## v0.2.x - Ecosystem & Quality of Life
+
+**Goal**: Make Pipit easier to use and deploy in real projects.
+
+**Criticality**: LOW-MEDIUM | **Complexity**: MEDIUM-HIGH
+
+### Runtime Improvements
 
 - [ ] Round-robin scheduler with thread pools
 - [ ] Platform support (macOS, Windows native)
-- [ ] Actor library expansion (file I/O, network, signal processing)
 - [ ] LSP server for IDE integration
+- [ ] Improved documentation and tutorials
+
+### Build & Distribution
+
+- [ ] CMake integration for actor library
+- [ ] Install target (copy headers to system include path)
+- [ ] pkg-config support
 - [ ] Package manager for actor distribution
-- [ ] Improved documentation and tooling
 
-### v0.3 - Advanced Features
+---
 
-- Compiler optimizations (fusion, constant propagation, dead code elimination)
-- Real-time scheduling (priority, deadlines, CPU affinity)
-- Heterogeneous execution (GPU, FPGA support)
-- Distributed pipelines across nodes
-- Auto-tuning based on profiling data
+## v0.3.0 - Advanced Features (Future)
 
-### v0.4 - Production Ready
+**Goal**: Compiler optimizations, real-time scheduling, heterogeneous execution.
 
-- Metrics and monitoring (Prometheus, Grafana, OpenTelemetry)
-- Built-in profiler and debugger
-- Fault tolerance and checkpointing
-- Security (sandboxing, input validation)
-- Property-based testing and formal verification
+**Criticality**: LOW | **Complexity**: HIGH
+
+### Compiler Optimizations
+
+- [ ] Fusion (merge adjacent actors)
+- [ ] Constant propagation
+- [ ] Dead code elimination
+- [ ] Actor inlining
+
+### Real-time Scheduling
+
+- [ ] Priority-based scheduling
+- [ ] Deadline guarantees
+- [ ] CPU affinity control
+- [ ] NUMA-aware placement
+
+### Heterogeneous Execution
+
+- [ ] GPU support (CUDA, OpenCL)
+- [ ] FPGA code generation
+- [ ] Accelerator offload
+
+### Distributed Computing
+
+- [ ] Distributed pipelines across nodes
+- [ ] Network-transparent buffers
+- [ ] Fault tolerance and checkpointing
+
+---
+
+## v0.4.0 - Production Hardening (Future)
+
+**Goal**: Observability, reliability, security, verification for production deployments.
+
+**Criticality**: LOW (until production use) | **Complexity**: HIGH
+
+### Observability
+
+- [ ] Metrics and monitoring (Prometheus, Grafana, OpenTelemetry)
+- [ ] Built-in profiler and debugger
+- [ ] Distributed tracing
+
+### Reliability
+
+- [ ] Fault tolerance
+- [ ] State checkpointing and recovery
+- [ ] Graceful degradation
+
+### Security
+
+- [ ] Sandboxing
+- [ ] Input validation
+- [ ] Resource limits
+
+### Verification
+
+- [ ] Property-based testing
+- [ ] Formal verification of scheduling
+- [ ] Model checking for deadlock freedom
 
 ---
 
 ## Notes
 
-- v0.1.1 is about understanding current performance limits, not adding features
-- Spec sheet should be reproducible on reference hardware
-- Identify bottlenecks before optimization to avoid premature optimization
-- Results will guide v0.2 priorities (fix bottlenecks vs add features)
+- **v0.1.1** completes runtime features designed for v0.1.0 - essential foundation
+- **v0.1.2-v0.1.3** build standard library and performance baselines before language changes
+- **v0.2.0** uses design-first approach (spec/ADR before implementation)
+- **v0.3.0+** deferred until core is stable and well-characterized
+- Performance characterization should inform optimization priorities (measure before optimizing)
