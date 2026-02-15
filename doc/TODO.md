@@ -17,69 +17,20 @@
 
 ### Runtime Features
 
-- [ ] **Actor error propagation**:
-  - [ ] Check `operator()` return value in generated code
-  - [ ] Propagate `ACTOR_ERROR` to exit code 1
-  - [ ] Print error message with actor/task name
-  - [ ] Stop all tasks on first error
-
-- [ ] **Overrun detection and policy**:
-  - [ ] Read `set overrun = drop|slip|backlog` from PDL
-  - [ ] Enhance Timer with `last_latency()`, `missed_count()`, `reset_phase()`
-  - [ ] Generate policy-specific code in task loops:
-    - **drop**: Skip firing on overrun (default)
-    - **slip**: Re-anchor timer phase, execute anyway
-    - **backlog**: Execute multiple firings to catch up
-  - [ ] Test all three policies with integration tests
-
-- [ ] **Statistics collection**:
-  - [ ] Add `TaskStats` struct to pipit.h (ticks, missed, avg/max latency)
-  - [ ] Generate `_stats_<task>` variables in codegen
-  - [ ] Record tick latency after `timer.wait()`
-  - [ ] Record misses on overrun drop
-  - [ ] Emit stats summary at exit when `--stats` flag provided
-
 - [ ] **Expanded CLI flags**:
-  - [ ] Unify CLI parsing in generated `main()`
-  - [ ] `--duration <time>` - Support "10s", "1m", "inf" formats (not just numbers)
-  - [ ] `--threads <N>` - Accept flag, warn if < task count
-  - [ ] `--probe <name>` - Enable named probe
-  - [ ] `--probe-output <file>` - Set probe output file (default stderr)
-  - [ ] `--stats` - Enable statistics collection
-  - [ ] Exit code 2 on unknown flags or invalid parameter values
+  - [ ] `--probe <name>` - Enable named probe (runtime wiring)
+  - [ ] `--probe-output <file>` - Set active probe output stream (default stderr)
 
 - [ ] **Functional probe output**:
-  - [ ] Generate `_probe_<name>_enabled` flags
-  - [ ] Emit actual fprintf when probe enabled (not just comments)
-  - [ ] Support `--probe <name>` to enable at runtime
-  - [ ] Support `--probe-output <file>` to redirect output
-  - [ ] Wrap in `#ifndef NDEBUG` for release builds
+  - [ ] Wire `--probe <name>` to `_probe_<name>_enabled` flags
+  - [ ] Wire `--probe-output <file>` to `_probe_output` `FILE*`
 
 ### Quality & Testing
 
-- [ ] **Error message improvements**:
-  - [ ] Add `hint: Option<String>` field to `Diagnostic`
-  - [ ] Attach hints for common errors:
-    - Type mismatch → suggest conversion actor
-    - Unknown actor → suggest checking -I flag
-    - Feedback without delay → suggest delay(N, init) (already done)
-  - [ ] Update `Display` impl to print hint on next line
-
 - [ ] **End-to-end tests**:
-  - [ ] Test example.pdl compiles and runs (exit code 0)
   - [ ] Test receiver.pdl compiles and runs
-  - [ ] Test exit code 2 on bad CLI flags
-  - [ ] Test each overrun policy (drop, slip, backlog)
   - [ ] Test --stats output format
   - [ ] Test probe functionality
-
-### Documentation
-
-- [ ] **pcc usage guide** (`doc/pcc-usage.md`):
-  - [ ] Compiler flags (-I, --emit, --release, etc.)
-  - [ ] Generated binary flags (--duration, --param, --probe, --stats, --threads)
-  - [ ] Examples of common workflows
-  - [ ] Probe and stats usage
 
 ---
 
