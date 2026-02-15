@@ -20,7 +20,7 @@ use chumsky::span::Span as _;
 use crate::analyze::AnalyzedProgram;
 use crate::ast::*;
 use crate::graph::*;
-use crate::registry::{ActorMeta, Registry, TokenCount};
+use crate::registry::{ActorMeta, PortShape, Registry, TokenCount};
 use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -394,26 +394,66 @@ impl<'a> ScheduleCtx<'a> {
 
     fn production_rate(&self, node: &Node) -> Option<u32> {
         match &node.kind {
-            NodeKind::Actor { name, args, .. } => {
+            NodeKind::Actor {
+                name,
+                args,
+                shape_constraint,
+                ..
+            } => {
                 let meta = self.actor_meta(name)?;
-                self.resolve_token_count(&meta.out_count, meta, args)
+                self.resolve_port_rate(&meta.out_shape, meta, args, shape_constraint.as_ref())
             }
             _ => Some(1),
         }
     }
 
-    fn resolve_token_count(
+    /// Resolve a PortShape to a concrete rate (product of resolved dimensions).
+    fn resolve_port_rate(
         &self,
-        count: &TokenCount,
+        shape: &PortShape,
         actor_meta: &ActorMeta,
         actor_args: &[Arg],
+        shape_constraint: Option<&ShapeConstraint>,
     ) -> Option<u32> {
-        match count {
-            TokenCount::Literal(n) => Some(*n),
-            TokenCount::Symbolic(sym) => {
-                let idx = actor_meta.params.iter().position(|p| p.name == *sym)?;
-                let arg = actor_args.get(idx)?;
-                self.resolve_arg_to_u32(arg)
+        let mut product: u32 = 1;
+        for (i, dim) in shape.dims.iter().enumerate() {
+            let val = match dim {
+                TokenCount::Literal(n) => Some(*n),
+                TokenCount::Symbolic(sym) => {
+                    let from_arg = actor_meta
+                        .params
+                        .iter()
+                        .position(|p| p.name == *sym)
+                        .and_then(|idx| actor_args.get(idx))
+                        .and_then(|arg| self.resolve_arg_to_u32(arg));
+                    if from_arg.is_some() {
+                        from_arg
+                    } else {
+                        shape_constraint
+                            .and_then(|sc| sc.dims.get(i))
+                            .and_then(|sd| self.resolve_shape_dim(sd))
+                    }
+                }
+            };
+            product = product.checked_mul(val?)?;
+        }
+        Some(product)
+    }
+
+    fn resolve_shape_dim(&self, dim: &ShapeDim) -> Option<u32> {
+        match dim {
+            ShapeDim::Literal(n, _) => Some(*n),
+            ShapeDim::ConstRef(ident) => {
+                let entry = self.resolved.consts.get(&ident.name)?;
+                let stmt = &self.program.statements[entry.stmt_index];
+                if let StatementKind::Const(c) = &stmt.kind {
+                    match &c.value {
+                        Value::Scalar(Scalar::Number(n, _)) => Some(*n as u32),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
             }
         }
     }

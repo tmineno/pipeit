@@ -20,7 +20,9 @@ use chumsky::span::Span as _;
 
 use crate::ast::*;
 use crate::graph::*;
-use crate::registry::{ActorMeta, ParamKind, ParamType, PipitType, Registry, TokenCount};
+use crate::registry::{
+    ActorMeta, ParamKind, ParamType, PipitType, PortShape, Registry, TokenCount,
+};
 use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -212,9 +214,14 @@ impl<'a> AnalyzeCtx<'a> {
     /// Get production rate of a node (out_count). Passthrough nodes return 1.
     fn production_rate(&self, node: &Node) -> Option<u32> {
         match &node.kind {
-            NodeKind::Actor { name, args, .. } => {
+            NodeKind::Actor {
+                name,
+                args,
+                shape_constraint,
+                ..
+            } => {
                 let meta = self.actor_meta(name)?;
-                self.resolve_token_count(&meta.out_count, meta, args)
+                self.resolve_port_rate(&meta.out_shape, meta, args, shape_constraint.as_ref())
             }
             _ => Some(1),
         }
@@ -223,27 +230,71 @@ impl<'a> AnalyzeCtx<'a> {
     /// Get consumption rate of a node (in_count). Passthrough nodes return 1.
     fn consumption_rate(&self, node: &Node) -> Option<u32> {
         match &node.kind {
-            NodeKind::Actor { name, args, .. } => {
+            NodeKind::Actor {
+                name,
+                args,
+                shape_constraint,
+                ..
+            } => {
                 let meta = self.actor_meta(name)?;
-                self.resolve_token_count(&meta.in_count, meta, args)
+                self.resolve_port_rate(&meta.in_shape, meta, args, shape_constraint.as_ref())
             }
             _ => Some(1),
         }
     }
 
-    /// Resolve a TokenCount to a concrete u32 value.
-    fn resolve_token_count(
+    /// Resolve a PortShape to a concrete rate (product of resolved dimensions).
+    /// Uses shape constraint from call site to infer symbolic dimensions.
+    /// Falls back to scalar `resolve_token_count` for rank-1 backward compat.
+    fn resolve_port_rate(
         &self,
-        count: &TokenCount,
+        shape: &PortShape,
         actor_meta: &ActorMeta,
         actor_args: &[Arg],
+        shape_constraint: Option<&ShapeConstraint>,
     ) -> Option<u32> {
-        match count {
-            TokenCount::Literal(n) => Some(*n),
-            TokenCount::Symbolic(sym) => {
-                let idx = actor_meta.params.iter().position(|p| p.name == *sym)?;
-                let arg = actor_args.get(idx)?;
-                self.resolve_arg_to_u32(arg)
+        let mut product: u32 = 1;
+        for (i, dim) in shape.dims.iter().enumerate() {
+            let val = match dim {
+                TokenCount::Literal(n) => Some(*n),
+                TokenCount::Symbolic(sym) => {
+                    // 1. Try resolving from explicit actor arguments
+                    let from_arg = actor_meta
+                        .params
+                        .iter()
+                        .position(|p| p.name == *sym)
+                        .and_then(|idx| actor_args.get(idx))
+                        .and_then(|arg| self.resolve_arg_to_u32(arg));
+                    if from_arg.is_some() {
+                        from_arg
+                    } else {
+                        // 2. Try resolving from shape constraint at call site
+                        shape_constraint
+                            .and_then(|sc| sc.dims.get(i))
+                            .and_then(|sd| self.resolve_shape_dim(sd))
+                    }
+                }
+            };
+            product = product.checked_mul(val?)?;
+        }
+        Some(product)
+    }
+
+    /// Resolve a single ShapeDim from a call-site shape constraint.
+    fn resolve_shape_dim(&self, dim: &ShapeDim) -> Option<u32> {
+        match dim {
+            ShapeDim::Literal(n, _) => Some(*n),
+            ShapeDim::ConstRef(ident) => {
+                let entry = self.resolved.consts.get(&ident.name)?;
+                let stmt = &self.program.statements[entry.stmt_index];
+                if let StatementKind::Const(c) = &stmt.kind {
+                    match &c.value {
+                        Value::Scalar(Scalar::Number(n, _)) => Some(*n as u32),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
             }
         }
     }
@@ -1169,6 +1220,56 @@ mod tests {
             "param gain = 1\nclock 1kHz t {\n    constant(0.0) | mul($gain) | stdout()\n}",
             &reg,
         );
+    }
+
+    // ── Phase 8: Shape-aware dimension inference (v0.2.0) ─────────────
+
+    #[test]
+    fn dimension_inference_from_args() {
+        // fft(256): N resolved from positional arg → rate = 256
+        let reg = test_registry();
+        let result = analyze_ok(
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | mag() | stdout()\n}",
+            &reg,
+        );
+        let rv = result
+            .analysis
+            .repetition_vectors
+            .get(&("t".to_string(), "pipeline".to_string()))
+            .expect("rv missing");
+        assert!(!rv.is_empty());
+    }
+
+    #[test]
+    fn dimension_inference_from_shape_constraint() {
+        // fft()[256]: N resolved from shape constraint → rate = 256
+        let reg = test_registry();
+        let result = analyze_ok(
+            "clock 1kHz t {\n    constant(0.0) | fft()[256] | mag() | stdout()\n}",
+            &reg,
+        );
+        let rv = result
+            .analysis
+            .repetition_vectors
+            .get(&("t".to_string(), "pipeline".to_string()))
+            .expect("rv missing");
+        assert!(!rv.is_empty());
+    }
+
+    #[test]
+    fn dimension_inference_from_const_ref_shape() {
+        // fft()[N]: N resolved from const ref in shape constraint
+        let reg = test_registry();
+        let result = analyze_ok(
+            "const N = 256\nclock 1kHz t {\n    constant(0.0) | fft()[N] | mag() | stdout()\n}",
+            &reg,
+        );
+        let rv = result
+            .analysis
+            .repetition_vectors
+            .get(&("t".to_string(), "pipeline".to_string()))
+            .expect("rv missing");
+        assert!(!rv.is_empty());
     }
 
     // ── Integration tests ───────────────────────────────────────────────

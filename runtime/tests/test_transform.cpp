@@ -79,6 +79,7 @@ TEST(c2r_imaginary_only) {
 // ── Test: mag actor ──
 TEST(mag_magnitude) {
     Actor_mag actor;
+    actor.N = 1;
     cfloat in[1] = {cfloat(3.0f, 4.0f)};
     float out[1];
 
@@ -89,6 +90,7 @@ TEST(mag_magnitude) {
 
 TEST(mag_zero) {
     Actor_mag actor;
+    actor.N = 1;
     cfloat in[1] = {cfloat(0.0f, 0.0f)};
     float out[1];
 

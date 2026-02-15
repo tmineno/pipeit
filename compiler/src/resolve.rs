@@ -601,6 +601,48 @@ impl<'a> ResolveCtx<'a> {
                 }
             }
         }
+
+        // Validate shape constraint dimensions (v0.2.0)
+        if let Some(sc) = &call.shape_constraint {
+            self.validate_shape_constraint(sc, scope);
+        }
+    }
+
+    /// Validate that all dimensions in a shape constraint are compile-time
+    /// constants (integer literals or const references). Runtime params are
+    /// forbidden in shape constraints.
+    fn validate_shape_constraint(
+        &mut self,
+        constraint: &crate::ast::ShapeConstraint,
+        scope: &Scope,
+    ) {
+        for dim in &constraint.dims {
+            if let crate::ast::ShapeDim::ConstRef(ident) = dim {
+                // In define body, formal params are allowed as shape dims
+                let in_formal_params = match scope {
+                    Scope::Define { formal_params, .. } => formal_params.contains(&ident.name),
+                    Scope::Task { .. } => false,
+                };
+                if !in_formal_params {
+                    if self.resolved.params.contains_key(&ident.name) {
+                        self.diagnostics.push(Diagnostic {
+                            level: DiagLevel::Error,
+                            span: ident.span,
+                            message: format!(
+                                "runtime param '${}' cannot be used as frame dimension",
+                                ident.name
+                            ),
+                            hint: Some("use const or literal for shape constraints".to_string()),
+                        });
+                    } else if !self.resolved.consts.contains_key(&ident.name) {
+                        self.error(
+                            ident.span,
+                            format!("unknown name '{}' in shape constraint", ident.name),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn validate_switch(
@@ -1279,6 +1321,65 @@ mod tests {
                 .any(|e| e.message.contains("mode 'a'") && e.message.contains("multiple times")),
             "expected error about duplicate mode 'a': {:#?}",
             errs
+        );
+    }
+
+    // ── Shape constraint validation (v0.2.0) ──────────────────────────
+
+    #[test]
+    fn shape_constraint_literal_ok() {
+        let reg = test_registry();
+        let _ = resolve_ok_with("clock 1kHz t {\n    fft()[256]\n}", &reg);
+    }
+
+    #[test]
+    fn shape_constraint_const_ref_ok() {
+        let reg = test_registry();
+        let _ = resolve_ok_with("const N = 256\nclock 1kHz t {\n    fft()[N]\n}", &reg);
+    }
+
+    #[test]
+    fn shape_constraint_param_ref_error() {
+        let reg = test_registry();
+        let result = resolve_source("param N = 256\nclock 1kHz t {\n    fft()[N]\n}", &reg);
+        let errs = errors(&result);
+        assert!(
+            errs.iter().any(|e| e.message.contains("runtime param '$N'")
+                && e.message.contains("frame dimension")),
+            "expected runtime param error, got: {:#?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn shape_constraint_unknown_name_error() {
+        let reg = test_registry();
+        let result = resolve_source("clock 1kHz t {\n    fft()[UNKNOWN]\n}", &reg);
+        let errs = errors(&result);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("unknown name 'UNKNOWN'")
+                    && e.message.contains("shape constraint")),
+            "expected unknown name error, got: {:#?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn shape_constraint_define_formal_param_ok() {
+        let reg = test_registry();
+        let _ = resolve_ok_with(
+            "define my_fft(n) {\n    fft()[n]\n}\nclock 1kHz t {\n    my_fft(256)\n}",
+            &reg,
+        );
+    }
+
+    #[test]
+    fn shape_constraint_multidim_ok() {
+        let reg = test_registry();
+        let _ = resolve_ok_with(
+            "const H = 1080\nconst W = 1920\nclock 1kHz t {\n    stdout()[H, W, 3]\n}",
+            &reg,
         );
     }
 

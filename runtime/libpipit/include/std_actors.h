@@ -135,8 +135,10 @@ ACTOR(c2r, IN(cfloat, 1), OUT(float, 1)) {
 /// @code{.pdl}
 /// mag()
 /// @endcode
-ACTOR(mag, IN(cfloat, 1), OUT(float, 1)) {
-    out[0] = std::abs(in[0]);
+ACTOR(mag, IN(cfloat, SHAPE(N)), OUT(float, SHAPE(N)), PARAM(int, N)) {
+    for (int i = 0; i < N; ++i) {
+        out[i] = std::abs(in[i]);
+    }
     return ACTOR_OK;
 }
 }

@@ -10,8 +10,7 @@
 | `constant` | void | float[1] | Constant signal source |
 | `fft` | float[N] | cfloat[N] | Fast Fourier Transform |
 | `c2r` | cfloat[1] | float[1] | Complex to Real conversion |
-| `mag` | cfloat[1] | float[1] | Complex magnitude |
-| `fir` | float[N] | float[1] | Finite Impulse Response filter |
+| `fir` | float[N] | float[1] | Complex magnitude |
 | `mul` | float[1] | float[1] | Multiplication |
 | `add` | float[2] | float[1] | Addition |
 | `sub` | float[2] | float[1] | Subtraction |
@@ -104,14 +103,14 @@ c2r()
 
 ---
 
-### mag
+### fir
 
 **Complex magnitude** — Computes magnitude of complex signal (same as c2r).
 
 **Signature:**
 
 ```cpp
-ACTOR(mag, IN(cfloat, 1), OUT(float, 1))
+ACTOR(fir, IN(float, N), OUT(float, 1), PARAM(int, N) PARAM(std::span<const float>, coeff))
 ```
 
 **Returns:** ACTOR_OK on success
@@ -120,31 +119,6 @@ ACTOR(mag, IN(cfloat, 1), OUT(float, 1))
 
 ```pdl
 mag()
-```
-
----
-
-### fir
-
-**Finite Impulse Response filter** — Applies FIR filter with given coefficients.
-
-**Signature:**
-
-```cpp
-ACTOR(fir, IN(float, N), OUT(float, 1), PARAM(int, N) PARAM(std::span<const float>, coeff))
-```
-
-**Parameters:**
-
-- `N` - Filter length (must match coefficient array size)
-- `coeff` - Filter coefficients
-
-**Returns:** ACTOR_OK on success
-
-**Example:**
-
-```pdl
-fir([0.1, 0.2, 0.4, 0.2, 0.1])
 ```
 
 ---

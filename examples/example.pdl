@@ -20,7 +20,7 @@ define frontend(n) {
 # Main capture task: 10MHz target rate
 clock 10MHz capture {
     frontend(fft_size) | :raw | c2r() | fir(coeff) | ?filtered -> signal
-    :raw | mag() | stdout()
+    :raw | mag(fft_size) | stdout()
 }
 
 # Post-processing task: 1kHz target rate

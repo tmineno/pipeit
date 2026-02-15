@@ -17,7 +17,9 @@ use std::path::PathBuf;
 use crate::analyze::AnalyzedProgram;
 use crate::ast::*;
 use crate::graph::*;
-use crate::registry::{ActorMeta, ParamKind, ParamType, PipitType, Registry, TokenCount};
+use crate::registry::{
+    ActorMeta, ParamKind, ParamType, PipitType, PortShape, Registry, TokenCount,
+};
 use crate::resolve::{Diagnostic, ResolvedProgram};
 use crate::schedule::*;
 
@@ -587,8 +589,23 @@ impl<'a> CodegenCtx<'a> {
         }
 
         match &node.kind {
-            NodeKind::Actor { name, args, .. } => {
-                self.emit_actor_firing(task_name, sub, sched, node, name, args, ind, edge_bufs);
+            NodeKind::Actor {
+                name,
+                args,
+                shape_constraint,
+                ..
+            } => {
+                self.emit_actor_firing(
+                    task_name,
+                    sub,
+                    sched,
+                    node,
+                    name,
+                    args,
+                    shape_constraint.as_ref(),
+                    ind,
+                    edge_bufs,
+                );
             }
             NodeKind::Fork { .. } => {
                 self.emit_fork(sub, sched, node, ind, edge_bufs);
@@ -618,6 +635,7 @@ impl<'a> CodegenCtx<'a> {
         node: &Node,
         actor_name: &str,
         args: &[Arg],
+        shape_constraint: Option<&ShapeConstraint>,
         indent: &str,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
     ) {
@@ -628,10 +646,10 @@ impl<'a> CodegenCtx<'a> {
         let meta = meta.unwrap();
 
         let in_count = self
-            .resolve_token_count_val(&meta.in_count, meta, args)
+            .resolve_port_rate_val(&meta.in_shape, meta, args, shape_constraint)
             .unwrap_or(0);
         let out_count = self
-            .resolve_token_count_val(&meta.out_count, meta, args)
+            .resolve_port_rate_val(&meta.out_shape, meta, args, shape_constraint)
             .unwrap_or(0);
         let in_cpp = pipit_type_to_cpp(meta.in_type);
         let _out_cpp = pipit_type_to_cpp(meta.out_type);
@@ -714,7 +732,7 @@ impl<'a> CodegenCtx<'a> {
             };
 
         // Construct actor and fire, check return value
-        let params = self.format_actor_params(task_name, meta, args);
+        let params = self.format_actor_params(task_name, meta, args, shape_constraint);
         let call = if params.is_empty() {
             format!("Actor_{}{{}}({}, {})", actor_name, in_ptr, out_ptr)
         } else {
@@ -1436,7 +1454,13 @@ impl<'a> CodegenCtx<'a> {
         "float"
     }
 
-    fn format_actor_params(&self, _task_name: &str, meta: &ActorMeta, args: &[Arg]) -> String {
+    fn format_actor_params(
+        &self,
+        _task_name: &str,
+        meta: &ActorMeta,
+        args: &[Arg],
+        shape_constraint: Option<&ShapeConstraint>,
+    ) -> String {
         let mut parts = Vec::new();
         // Track const array args used for count params so they can auto-fill span params.
         let mut last_array_const: Option<&Arg> = None;
@@ -1462,8 +1486,21 @@ impl<'a> CodegenCtx<'a> {
                         parts.push(self.arg_to_cpp_value(arg, &param.param_type));
                     }
                 }
+            } else if param.kind == ParamKind::Param {
+                // No arg at this index — try to infer dimension param from shape constraint
+                if let Some(val) =
+                    self.resolve_dim_param_from_shape(&param.name, meta, shape_constraint)
+                {
+                    parts.push(val.to_string());
+                } else if let Some(array_arg) = last_array_const {
+                    // Auto-fill span param from prior array const
+                    if matches!(param.param_type, ParamType::SpanFloat | ParamType::SpanChar) {
+                        parts.push(self.arg_to_cpp_value(array_arg, &param.param_type));
+                        last_array_const = None;
+                    }
+                }
             } else if let Some(array_arg) = last_array_const {
-                // No arg at this index — auto-fill span param from prior array const
+                // Auto-fill span param from prior array const (runtime param case)
                 if matches!(param.param_type, ParamType::SpanFloat | ParamType::SpanChar) {
                     parts.push(self.arg_to_cpp_value(array_arg, &param.param_type));
                     last_array_const = None;
@@ -1471,6 +1508,35 @@ impl<'a> CodegenCtx<'a> {
             }
         }
         parts.join(", ")
+    }
+
+    /// Resolve a dimension parameter from shape constraints.
+    /// Returns the inferred value if the param name appears in the actor's
+    /// PortShape dims and can be resolved from the call-site shape constraint.
+    fn resolve_dim_param_from_shape(
+        &self,
+        param_name: &str,
+        meta: &ActorMeta,
+        shape_constraint: Option<&ShapeConstraint>,
+    ) -> Option<u32> {
+        let sc = shape_constraint?;
+        // Check in_shape dims for this param name
+        for (i, dim) in meta.in_shape.dims.iter().enumerate() {
+            if let TokenCount::Symbolic(sym) = dim {
+                if sym == param_name {
+                    return sc.dims.get(i).and_then(|sd| self.resolve_shape_dim(sd));
+                }
+            }
+        }
+        // Check out_shape dims
+        for (i, dim) in meta.out_shape.dims.iter().enumerate() {
+            if let TokenCount::Symbolic(sym) = dim {
+                if sym == param_name {
+                    return sc.dims.get(i).and_then(|sd| self.resolve_shape_dim(sd));
+                }
+            }
+        }
+        None
     }
 
     fn is_const_array_ref(&self, arg: &Arg) -> bool {
@@ -1631,18 +1697,53 @@ impl<'a> CodegenCtx<'a> {
         (bytes / elem_size as u64).max(1) as u32
     }
 
-    fn resolve_token_count_val(
+    /// Resolve a PortShape to a concrete rate (product of resolved dimensions).
+    fn resolve_port_rate_val(
         &self,
-        count: &TokenCount,
+        shape: &PortShape,
         actor_meta: &ActorMeta,
         actor_args: &[Arg],
+        shape_constraint: Option<&ShapeConstraint>,
     ) -> Option<u32> {
-        match count {
-            TokenCount::Literal(n) => Some(*n),
-            TokenCount::Symbolic(sym) => {
-                let idx = actor_meta.params.iter().position(|p| p.name == *sym)?;
-                let arg = actor_args.get(idx)?;
-                self.resolve_arg_to_u32(arg)
+        let mut product: u32 = 1;
+        for (i, dim) in shape.dims.iter().enumerate() {
+            let val = match dim {
+                TokenCount::Literal(n) => Some(*n),
+                TokenCount::Symbolic(sym) => {
+                    let from_arg = actor_meta
+                        .params
+                        .iter()
+                        .position(|p| p.name == *sym)
+                        .and_then(|idx| actor_args.get(idx))
+                        .and_then(|arg| self.resolve_arg_to_u32(arg));
+                    if from_arg.is_some() {
+                        from_arg
+                    } else {
+                        shape_constraint
+                            .and_then(|sc| sc.dims.get(i))
+                            .and_then(|sd| self.resolve_shape_dim(sd))
+                    }
+                }
+            };
+            product = product.checked_mul(val?)?;
+        }
+        Some(product)
+    }
+
+    fn resolve_shape_dim(&self, dim: &ShapeDim) -> Option<u32> {
+        match dim {
+            ShapeDim::Literal(n, _) => Some(*n),
+            ShapeDim::ConstRef(ident) => {
+                let entry = self.resolved.consts.get(&ident.name)?;
+                let stmt = &self.program.statements[entry.stmt_index];
+                if let StatementKind::Const(c) = &stmt.kind {
+                    match &c.value {
+                        Value::Scalar(Scalar::Number(n, _)) => Some(*n as u32),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
             }
         }
     }

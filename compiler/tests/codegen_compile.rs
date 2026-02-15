@@ -812,6 +812,63 @@ fn define_with_probe_and_tap() {
     );
 }
 
+// ── Shape constraints (v0.2.0) ──────────────────────────────────────────
+
+#[test]
+fn shape_constraint_literal() {
+    // fft()[256] — dimension inferred from shape constraint literal
+    assert_inline_compiles(
+        "clock 1kHz t { constant(0.0) | fft()[256] | mag() | stdout() }",
+        "shape_constraint_literal",
+    );
+}
+
+#[test]
+fn shape_constraint_const_ref() {
+    // fft()[N] — dimension inferred from shape constraint const ref
+    assert_inline_compiles(
+        "const N = 256\nclock 1kHz t { constant(0.0) | fft()[N] | mag() | stdout() }",
+        "shape_constraint_const_ref",
+    );
+}
+
+#[test]
+fn shape_constraint_with_arg() {
+    // fft(256) with explicit arg — backward-compat, no shape constraint needed
+    assert_inline_compiles(
+        "clock 1kHz t { constant(0.0) | fft(256) | mag() | stdout() }",
+        "shape_constraint_with_arg",
+    );
+}
+
+#[test]
+fn shape_constraint_infers_param_value() {
+    // fft()[256] — dimension inferred from shape constraint, passed to C++ actor
+    let cpp = generate_inline_cpp(
+        "clock 1kHz t { constant(0.0) | fft()[256] | mag() | stdout() }",
+        "shape_infers_param",
+    );
+    assert!(
+        cpp.contains("Actor_fft{256}"),
+        "expected Actor_fft{{256}} but got:\n{}",
+        cpp
+    );
+}
+
+#[test]
+fn shape_constraint_const_ref_infers_param_value() {
+    // fft()[N] — dimension from const ref inferred and passed to C++ actor
+    let cpp = generate_inline_cpp(
+        "const N = 256\nclock 1kHz t { constant(0.0) | fft()[N] | mag() | stdout() }",
+        "shape_const_ref_infers_param",
+    );
+    assert!(
+        cpp.contains("Actor_fft{256}"),
+        "expected Actor_fft{{256}} but got:\n{}",
+        cpp
+    );
+}
+
 // ── Shared-memory model correctness (regressions) ──────────────────────
 
 #[test]

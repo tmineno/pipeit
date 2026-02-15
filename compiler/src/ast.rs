@@ -184,13 +184,31 @@ pub struct Sink {
     pub span: Span,
 }
 
-// ── actor_call: IDENT '(' args? ')' ──
+// ── actor_call: IDENT '(' args? ')' shape_constraint? ──
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActorCall {
     pub name: Ident,
     pub args: Vec<Arg>,
+    /// Optional shape constraint: `actor(...)[d0, d1, ...]` (v0.2.0).
+    pub shape_constraint: Option<ShapeConstraint>,
     pub span: Span,
+}
+
+/// A compile-time shape constraint on an actor call: `actor(...)[d0, d1, ...]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShapeConstraint {
+    pub dims: Vec<ShapeDim>,
+    pub span: Span,
+}
+
+/// A single dimension in a shape constraint.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ShapeDim {
+    /// Integer literal dimension.
+    Literal(u32, Span),
+    /// Const reference dimension (resolved later).
+    ConstRef(Ident),
 }
 
 // ── arg ──

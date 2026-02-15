@@ -47,6 +47,66 @@ pub enum TokenCount {
     Symbolic(String),
 }
 
+/// Multi-dimensional shape of an actor port (v0.2.0).
+///
+/// Each dimension is a `TokenCount` (literal or symbolic).
+/// The SDF token rate is the product of all dimensions: `|S| = Π di`.
+/// Rank-1 shapes are equivalent to the legacy scalar `TokenCount`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortShape {
+    /// One dimension per rank. Rank-1 for scalar/traditional ports.
+    pub dims: Vec<TokenCount>,
+}
+
+impl PortShape {
+    /// Create a rank-1 shape from a single `TokenCount` (backward compat).
+    pub fn rank1(count: TokenCount) -> Self {
+        PortShape { dims: vec![count] }
+    }
+
+    /// Number of dimensions (rank).
+    pub fn rank(&self) -> usize {
+        self.dims.len()
+    }
+
+    /// True if all dimensions are resolved literals.
+    pub fn is_fully_literal(&self) -> bool {
+        self.dims
+            .iter()
+            .all(|d| matches!(d, TokenCount::Literal(_)))
+    }
+
+    /// Collapse shape to a scalar `TokenCount` for backward compatibility.
+    ///
+    /// - Rank-1: returns the single dimension directly.
+    /// - All-literal: returns `Literal(product)`.
+    /// - Mixed/symbolic: returns the first symbolic dimension (analysis phase
+    ///   handles full multi-dim resolution).
+    pub fn to_scalar_count(&self) -> TokenCount {
+        if self.dims.len() == 1 {
+            return self.dims[0].clone();
+        }
+        if self.is_fully_literal() {
+            let product: u32 = self
+                .dims
+                .iter()
+                .map(|d| match d {
+                    TokenCount::Literal(n) => *n,
+                    _ => unreachable!(),
+                })
+                .product();
+            TokenCount::Literal(product)
+        } else {
+            // Return first symbolic dimension; analysis will resolve the full shape.
+            self.dims
+                .iter()
+                .find(|d| matches!(d, TokenCount::Symbolic(_)))
+                .cloned()
+                .unwrap_or(TokenCount::Literal(0))
+        }
+    }
+}
+
 /// Whether a parameter is compile-time or runtime-swappable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamKind {
@@ -78,8 +138,10 @@ pub struct ActorMeta {
     pub name: String,
     pub in_type: PipitType,
     pub in_count: TokenCount,
+    pub in_shape: PortShape,
     pub out_type: PipitType,
     pub out_count: TokenCount,
+    pub out_shape: PortShape,
     pub params: Vec<ActorParam>,
 }
 
@@ -422,8 +484,8 @@ fn parse_actor_macro(inner: &str, file: &Path, line: usize) -> Result<ActorMeta,
         });
     }
 
-    let (in_type, in_count) = parse_port_spec(fields[1].trim(), "IN", file, line)?;
-    let (out_type, out_count) = parse_port_spec(fields[2].trim(), "OUT", file, line)?;
+    let (in_type, in_count, in_shape) = parse_port_spec(fields[1].trim(), "IN", file, line)?;
+    let (out_type, out_count, out_shape) = parse_port_spec(fields[2].trim(), "OUT", file, line)?;
 
     // Collect remaining fields (params). Fields may be comma-separated (old style)
     // or space-separated within a single field (new style). Handle both.
@@ -445,19 +507,24 @@ fn parse_actor_macro(inner: &str, file: &Path, line: usize) -> Result<ActorMeta,
         name,
         in_type,
         in_count,
+        in_shape,
         out_type,
         out_count,
+        out_shape,
         params,
     })
 }
 
-/// Parse `IN(type, count)` or `OUT(type, count)`.
+/// Parse `IN(type, count_or_shape)` or `OUT(type, count_or_shape)`.
+///
+/// Supports both legacy scalar counts (`IN(float, N)`) and v0.2.0
+/// `SHAPE(...)` notation (`IN(float, SHAPE(H, W, C))`).
 fn parse_port_spec(
     s: &str,
     expected_prefix: &str,
     file: &Path,
     line: usize,
-) -> Result<(PipitType, TokenCount), RegistryError> {
+) -> Result<(PipitType, TokenCount, PortShape), RegistryError> {
     let rest = s
         .strip_prefix(expected_prefix)
         .and_then(|r| r.strip_prefix('('))
@@ -482,9 +549,30 @@ fn parse_port_spec(
     }
 
     let pipit_type = parse_pipit_type(parts[0].trim(), file, line)?;
-    let count = parse_token_count(parts[1].trim());
+    let shape = parse_port_shape(parts[1].trim());
+    let count = shape.to_scalar_count();
 
-    Ok((pipit_type, count))
+    Ok((pipit_type, count, shape))
+}
+
+/// Parse a port count field into a `PortShape`.
+///
+/// Recognizes `SHAPE(d0, d1, ...)` for multi-dimensional shapes,
+/// or falls back to a rank-1 shape from a scalar `TokenCount`.
+fn parse_port_shape(count_str: &str) -> PortShape {
+    let trimmed = count_str.trim();
+    if let Some(inner) = trimmed
+        .strip_prefix("SHAPE(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
+        let dims: Vec<TokenCount> = inner
+            .split(',')
+            .map(|d| parse_token_count(d.trim()))
+            .collect();
+        PortShape { dims }
+    } else {
+        PortShape::rank1(parse_token_count(trimmed))
+    }
 }
 
 /// Parse `PARAM(type, name)` or `RUNTIME_PARAM(type, name)`.
@@ -806,5 +894,116 @@ ACTOR(b, IN(int32, 2), OUT(double, 1)) { return ACTOR_OK; }
         assert_eq!(actors.len(), 2);
         assert_eq!(actors[0].name, "a");
         assert_eq!(actors[1].name, "b");
+    }
+
+    // ── PortShape tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn port_shape_rank1_from_literal() {
+        let shape = PortShape::rank1(TokenCount::Literal(5));
+        assert_eq!(shape.rank(), 1);
+        assert!(shape.is_fully_literal());
+        assert_eq!(shape.to_scalar_count(), TokenCount::Literal(5));
+    }
+
+    #[test]
+    fn port_shape_rank1_from_symbolic() {
+        let shape = PortShape::rank1(TokenCount::Symbolic("N".into()));
+        assert_eq!(shape.rank(), 1);
+        assert!(!shape.is_fully_literal());
+        assert_eq!(shape.to_scalar_count(), TokenCount::Symbolic("N".into()));
+    }
+
+    #[test]
+    fn port_shape_multi_dim_literal_product() {
+        let shape = PortShape {
+            dims: vec![
+                TokenCount::Literal(1080),
+                TokenCount::Literal(1920),
+                TokenCount::Literal(3),
+            ],
+        };
+        assert_eq!(shape.rank(), 3);
+        assert!(shape.is_fully_literal());
+        assert_eq!(
+            shape.to_scalar_count(),
+            TokenCount::Literal(1080 * 1920 * 3)
+        );
+    }
+
+    #[test]
+    fn port_shape_multi_dim_symbolic_fallback() {
+        let shape = PortShape {
+            dims: vec![
+                TokenCount::Symbolic("H".into()),
+                TokenCount::Symbolic("W".into()),
+                TokenCount::Literal(3),
+            ],
+        };
+        assert_eq!(shape.rank(), 3);
+        assert!(!shape.is_fully_literal());
+        assert_eq!(shape.to_scalar_count(), TokenCount::Symbolic("H".into()));
+    }
+
+    // ── SHAPE(...) parsing tests ────────────────────────────────────────
+
+    #[test]
+    fn parse_shape_rank1() {
+        let a = scan_one(
+            "ACTOR(gain, IN(float, SHAPE(N)), OUT(float, SHAPE(N)), PARAM(int, N)) { return ACTOR_OK; }",
+        );
+        assert_eq!(a.in_shape.rank(), 1);
+        assert_eq!(a.in_shape.dims[0], TokenCount::Symbolic("N".into()));
+        assert_eq!(a.out_shape.rank(), 1);
+        assert_eq!(a.out_shape.dims[0], TokenCount::Symbolic("N".into()));
+        // Backward compat: in_count should match
+        assert_eq!(a.in_count, TokenCount::Symbolic("N".into()));
+    }
+
+    #[test]
+    fn parse_shape_rank3() {
+        let a = scan_one(
+            "ACTOR(img, IN(float, SHAPE(H, W, C)), OUT(float, SHAPE(H, W, C)), PARAM(int, H) PARAM(int, W) PARAM(int, C)) { return ACTOR_OK; }",
+        );
+        assert_eq!(a.in_shape.rank(), 3);
+        assert_eq!(a.in_shape.dims[0], TokenCount::Symbolic("H".into()));
+        assert_eq!(a.in_shape.dims[1], TokenCount::Symbolic("W".into()));
+        assert_eq!(a.in_shape.dims[2], TokenCount::Symbolic("C".into()));
+        assert_eq!(a.out_shape.rank(), 3);
+    }
+
+    #[test]
+    fn parse_shape_literal_multi() {
+        let a = scan_one(
+            "ACTOR(block, IN(float, SHAPE(1080, 1920, 3)), OUT(float, 1)) { return ACTOR_OK; }",
+        );
+        assert_eq!(a.in_shape.rank(), 3);
+        assert_eq!(a.in_shape.dims[0], TokenCount::Literal(1080));
+        assert_eq!(a.in_shape.dims[1], TokenCount::Literal(1920));
+        assert_eq!(a.in_shape.dims[2], TokenCount::Literal(3));
+        assert_eq!(a.in_count, TokenCount::Literal(1080 * 1920 * 3));
+        // OUT is plain scalar — should be rank-1
+        assert_eq!(a.out_shape.rank(), 1);
+        assert_eq!(a.out_count, TokenCount::Literal(1));
+    }
+
+    #[test]
+    fn parse_shape_backward_compat() {
+        // Existing IN(float, N) should produce rank-1 shape
+        let a = scan_one(
+            "ACTOR(fft, IN(float, N), OUT(cfloat, N), PARAM(int, N)) { return ACTOR_OK; }",
+        );
+        assert_eq!(a.in_shape.rank(), 1);
+        assert_eq!(a.in_shape.dims[0], TokenCount::Symbolic("N".into()));
+        assert_eq!(a.in_count, TokenCount::Symbolic("N".into()));
+    }
+
+    #[test]
+    fn existing_actors_have_rank1_shapes() {
+        let a = scan_one("ACTOR(mag, IN(cfloat, 1), OUT(float, 1)) { return ACTOR_OK; }");
+        assert_eq!(a.in_shape.rank(), 1);
+        assert_eq!(a.in_shape.dims[0], TokenCount::Literal(1));
+        assert_eq!(a.out_shape.rank(), 1);
+        assert_eq!(a.out_shape.dims[0], TokenCount::Literal(1));
     }
 }

@@ -160,6 +160,23 @@ where
             }
         });
 
+    // ── Shape constraint: '[' shape_dim (',' shape_dim)* ']' ──
+
+    let shape_dim = select! {
+        Token::Number(n) = e => ShapeDim::Literal(n as u32, e.span()),
+    }
+    .or(ident.clone().map(ShapeDim::ConstRef));
+
+    let shape_constraint = shape_dim
+        .separated_by(just(Token::Comma))
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::LBracket), just(Token::RBracket))
+        .map_with(|dims, e| ShapeConstraint {
+            dims,
+            span: e.span(),
+        });
+
     let actor_call = actor_name
         .clone()
         .then(
@@ -167,9 +184,11 @@ where
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::LParen), just(Token::RParen)),
         )
-        .map_with(|(name, args), e| ActorCall {
+        .then(shape_constraint.or_not())
+        .map_with(|((name, args), shape), e| ActorCall {
             name,
             args,
+            shape_constraint: shape,
             span: e.span(),
         });
 
@@ -863,5 +882,124 @@ mod tests {
     fn trailing_comma_in_args_rejected() {
         let (_, errors) = parse_all("clock 1kHz t {\n  foo(1,)\n}");
         assert!(!errors.is_empty());
+    }
+
+    // ── Shape constraints (v0.2.0) ──
+
+    #[test]
+    fn actor_call_with_shape_constraint() {
+        let s = parse_one_stmt("clock 1kHz t {\n  fft()[256]\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        let TaskBody::Pipeline(p) = &t.body else {
+            panic!("expected Pipeline")
+        };
+        let PipeSource::ActorCall(a) = &p.lines[0].source else {
+            panic!("expected ActorCall")
+        };
+        let sc = a
+            .shape_constraint
+            .as_ref()
+            .expect("expected shape constraint");
+        assert_eq!(sc.dims.len(), 1);
+        assert!(matches!(&sc.dims[0], ShapeDim::Literal(256, _)));
+    }
+
+    #[test]
+    fn actor_call_with_multidim_shape() {
+        let s = parse_one_stmt("clock 1kHz t {\n  img_norm()[1080, 1920, 3]\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        let TaskBody::Pipeline(p) = &t.body else {
+            panic!("expected Pipeline")
+        };
+        let PipeSource::ActorCall(a) = &p.lines[0].source else {
+            panic!("expected ActorCall")
+        };
+        let sc = a
+            .shape_constraint
+            .as_ref()
+            .expect("expected shape constraint");
+        assert_eq!(sc.dims.len(), 3);
+        assert!(matches!(&sc.dims[0], ShapeDim::Literal(1080, _)));
+        assert!(matches!(&sc.dims[1], ShapeDim::Literal(1920, _)));
+        assert!(matches!(&sc.dims[2], ShapeDim::Literal(3, _)));
+    }
+
+    #[test]
+    fn actor_call_with_const_ref_shape() {
+        let prog = parse_ok("const N = 256\nclock 1kHz t {\n  fft()[N]\n}");
+        let StatementKind::Task(t) = &prog.statements[1].kind else {
+            panic!("expected Task")
+        };
+        let TaskBody::Pipeline(p) = &t.body else {
+            panic!("expected Pipeline")
+        };
+        let PipeSource::ActorCall(a) = &p.lines[0].source else {
+            panic!("expected ActorCall")
+        };
+        let sc = a
+            .shape_constraint
+            .as_ref()
+            .expect("expected shape constraint");
+        assert_eq!(sc.dims.len(), 1);
+        assert!(matches!(&sc.dims[0], ShapeDim::ConstRef(id) if id.name == "N"));
+    }
+
+    #[test]
+    fn actor_call_without_shape() {
+        let s = parse_one_stmt("clock 1kHz t {\n  fft(256)\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        let TaskBody::Pipeline(p) = &t.body else {
+            panic!("expected Pipeline")
+        };
+        let PipeSource::ActorCall(a) = &p.lines[0].source else {
+            panic!("expected ActorCall")
+        };
+        assert!(a.shape_constraint.is_none());
+    }
+
+    #[test]
+    fn actor_call_with_args_and_shape() {
+        let s = parse_one_stmt("clock 1kHz t {\n  fft(256)[256]\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        let TaskBody::Pipeline(p) = &t.body else {
+            panic!("expected Pipeline")
+        };
+        let PipeSource::ActorCall(a) = &p.lines[0].source else {
+            panic!("expected ActorCall")
+        };
+        assert_eq!(a.args.len(), 1);
+        let sc = a
+            .shape_constraint
+            .as_ref()
+            .expect("expected shape constraint");
+        assert_eq!(sc.dims.len(), 1);
+    }
+
+    #[test]
+    fn shape_constraint_in_pipe_element() {
+        let s = parse_one_stmt("clock 1kHz t {\n  adc(0) | fft()[256] | stdout()\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        let TaskBody::Pipeline(p) = &t.body else {
+            panic!("expected Pipeline")
+        };
+        let PipeElem::ActorCall(a) = &p.lines[0].elements[0] else {
+            panic!("expected ActorCall in pipe element")
+        };
+        let sc = a
+            .shape_constraint
+            .as_ref()
+            .expect("expected shape constraint");
+        assert_eq!(sc.dims.len(), 1);
+        assert!(matches!(&sc.dims[0], ShapeDim::Literal(256, _)));
     }
 }

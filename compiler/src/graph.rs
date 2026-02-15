@@ -36,6 +36,8 @@ pub enum NodeKind {
         name: String,
         call_span: Span,
         args: Vec<Arg>,
+        /// Optional shape constraint from `actor(...)[d0, d1, ...]` (v0.2.0).
+        shape_constraint: Option<ShapeConstraint>,
     },
     /// A fork node created by a tap declaration (`:name`).
     Fork { tap_name: String },
@@ -458,6 +460,7 @@ impl<'a> GraphBuilder<'a> {
                 name: call.name.name.clone(),
                 call_span: call.span,
                 args: call.args.clone(),
+                shape_constraint: call.shape_constraint.clone(),
             },
             call.span,
         );
@@ -702,6 +705,7 @@ fn substitute_actor_call(call: &ActorCall, arg_map: &HashMap<String, Arg>) -> Ac
             .iter()
             .map(|arg| substitute_arg(arg, arg_map))
             .collect(),
+        shape_constraint: call.shape_constraint.clone(),
         span: call.span,
     }
 }
@@ -1215,6 +1219,7 @@ mod tests {
                         name: "a".into(),
                         call_span: sp(0, 1),
                         args: vec![],
+                        shape_constraint: None,
                     },
                     span: sp(0, 1),
                 },
@@ -1224,6 +1229,7 @@ mod tests {
                         name: "b".into(),
                         call_span: sp(2, 3),
                         args: vec![],
+                        shape_constraint: None,
                     },
                     span: sp(2, 3),
                 },
@@ -1233,6 +1239,7 @@ mod tests {
                         name: "c".into(),
                         call_span: sp(4, 5),
                         args: vec![],
+                        shape_constraint: None,
                     },
                     span: sp(4, 5),
                 },
