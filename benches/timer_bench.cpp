@@ -229,6 +229,131 @@ static void run_wakeup_latency() {
     print_stats("wakeup_1kHz", freq, stats);
 }
 
+// ── Jitter with spin-wait ──────────────────────────────────────────────────
+//
+// Compare jitter at 10kHz with different spin thresholds (0, 10µs, 50µs).
+
+static void run_jitter_spin() {
+    printf("\n=== Jitter with Spin-Wait (10kHz, 1000 ticks) ===\n");
+
+    const double freq = 10000.0;
+    const int n_ticks = 1000;
+    int64_t spin_values[] = {0, 10000, 50000}; // 0, 10µs, 50µs in ns
+    const char *spin_labels[] = {"no_spin", "spin_10us", "spin_50us"};
+
+    for (int s = 0; s < 3; ++s) {
+        Timer timer(freq, true, spin_values[s]);
+        std::vector<int64_t> latencies;
+        latencies.reserve(n_ticks);
+        int overruns = 0;
+
+        for (int i = 0; i < n_ticks; ++i) {
+            timer.wait();
+            if (timer.overrun()) {
+                ++overruns;
+            }
+            latencies.push_back(timer.last_latency().count());
+        }
+
+        auto stats = compute_stats(latencies, overruns);
+        print_stats(spin_labels[s], freq, stats);
+    }
+}
+
+// ── Batch vs single comparison ────────────────────────────────────────────
+//
+// Compare wall-clock time for 10,000 total firings:
+//   K=1:  10,000 ticks at 10kHz (no batching)
+//   K=10: 1,000 ticks at 1kHz (10 firings per tick)
+
+static void run_batch_vs_single() {
+    printf("\n=== Batch vs Single Comparison ===\n");
+    printf("Total firings: 10,000 (K=1: 10000 ticks @ 10kHz, K=10: 1000 ticks @ 1kHz)\n");
+
+    // K=1: 10,000 ticks at 10kHz
+    {
+        auto t0 = Clock::now();
+        Timer timer(10000.0, false);
+        int overruns = 0;
+        for (int i = 0; i < 10000; ++i) {
+            timer.wait();
+            if (timer.overrun()) {
+                ++overruns;
+                continue;
+            }
+            // Single firing
+            volatile float x = 1.0f;
+            (void)x;
+        }
+        auto t1 = Clock::now();
+        int64_t elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+        printf("[timer_bench] K=1  (10kHz): %ld ms, overruns=%d\n", elapsed_ms, overruns);
+    }
+
+    // K=10: 1,000 ticks at 1kHz
+    {
+        auto t0 = Clock::now();
+        Timer timer(1000.0, false);
+        int overruns = 0;
+        for (int i = 0; i < 1000; ++i) {
+            timer.wait();
+            if (timer.overrun()) {
+                ++overruns;
+                continue;
+            }
+            // 10 firings per tick
+            for (int k = 0; k < 10; ++k) {
+                volatile float x = 1.0f;
+                (void)x;
+            }
+        }
+        auto t1 = Clock::now();
+        int64_t elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+        printf("[timer_bench] K=10 (1kHz):  %ld ms, overruns=%d\n", elapsed_ms, overruns);
+    }
+}
+
+// ── High-frequency sweep with batching ────────────────────────────────────
+//
+// Jitter + overrun stats at 1MHz, 10MHz, 100MHz with default tick_rate (1MHz).
+
+static void run_freq_sweep_batched() {
+    printf("\n=== High-Frequency Sweep (batched, tick_rate=1MHz) ===\n");
+
+    struct FreqSpec {
+        double freq;
+        int k;
+        int ticks;
+        const char *label;
+    };
+
+    FreqSpec specs[] = {
+        {1000000.0, 1, 1000, "1MHz_K1"},
+        {10000000.0, 10, 1000, "10MHz_K10"},
+        {100000000.0, 100, 1000, "100MHz_K100"},
+    };
+
+    for (auto &spec : specs) {
+        Timer timer(spec.freq / spec.k, true);
+        std::vector<int64_t> latencies;
+        latencies.reserve(spec.ticks);
+        int overruns = 0;
+
+        for (int i = 0; i < spec.ticks; ++i) {
+            timer.wait();
+            if (timer.overrun()) {
+                ++overruns;
+            }
+            latencies.push_back(timer.last_latency().count());
+        }
+
+        auto stats = compute_stats(latencies, overruns);
+        print_stats(spec.label, spec.freq / spec.k, stats);
+        printf("[timer_bench]   k_factor=%d total_firings=%d\n", spec.k,
+               (spec.ticks - overruns) * spec.k);
+    }
+}
+
 // ── Main ────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -239,6 +364,9 @@ int main() {
     run_jitter_histogram();
     run_overrun_recovery();
     run_wakeup_latency();
+    run_jitter_spin();
+    run_batch_vs_single();
+    run_freq_sweep_batched();
 
     printf("\n=== Done ===\n");
     return 0;

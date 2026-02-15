@@ -419,6 +419,119 @@ static void measure_e2e_latency() {
     }
 }
 
+// ── 6. Timer overhead vs work (batched K=10) ────────────────────────────
+
+static void measure_timer_vs_work_batched() {
+    printf("\n=== Timer Overhead vs Work (Batched K=10) ===\n");
+    printf("Timer fires at 1kHz, 10 actor firings per tick (total effective: 10kHz)\n");
+
+    const int TICKS = 1000;
+    const int K = 10;
+    const double FREQ = 1000.0; // 1kHz timer (10kHz / K=10)
+
+    Timer timer(FREQ, false); // No latency measurement
+    std::vector<int64_t> timer_lat;
+    std::vector<int64_t> work_lat;
+    timer_lat.reserve(TICKS);
+    work_lat.reserve(TICKS);
+
+    const int N = 64;
+    float in[N], out[N];
+    fill_float(in, N);
+    Actor_mul actor{2.0f, N};
+
+    for (int i = 0; i < TICKS; ++i) {
+        auto t0 = Clock::now();
+        timer.wait();
+        auto t1 = Clock::now();
+        timer_lat.push_back(std::chrono::duration_cast<Nanos>(t1 - t0).count());
+
+        auto t2 = Clock::now();
+        for (int k = 0; k < K; ++k) {
+            actor(in, out);
+        }
+        auto t3 = Clock::now();
+        work_lat.push_back(std::chrono::duration_cast<Nanos>(t3 - t2).count());
+    }
+
+    auto ts = compute_stats(timer_lat);
+    auto ws = compute_stats(work_lat);
+    print_latency("timer.wait() @1kHz", ts);
+    print_latency("actor_work(mul,64)x10", ws);
+
+    if (ts.avg_ns + ws.avg_ns > 0) {
+        printf("[latency] overhead_ratio: timer / (timer + work) = %.2f%%\n",
+               100.0 * ts.avg_ns / (ts.avg_ns + ws.avg_ns));
+        printf("[latency] per_firing_overhead: timer_avg / K = %.1f ns\n",
+               static_cast<double>(ts.avg_ns) / K);
+    }
+}
+
+// ── 7. Timer overhead at high frequencies (1MHz, 10MHz, 100MHz) ──────────
+
+static void measure_timer_vs_work_freq() {
+    printf("\n=== Timer Overhead vs Work at High Frequencies ===\n");
+
+    struct FreqSpec {
+        double freq_hz;
+        int k;
+        int ticks;
+        const char *label;
+    };
+
+    FreqSpec specs[] = {
+        {1000000.0, 1, 1000, "1MHz_K1"},
+        {10000000.0, 10, 1000, "10MHz_K10"},
+        {100000000.0, 100, 1000, "100MHz_K100"},
+    };
+
+    const int N = 64;
+    float in[N], out[N];
+    fill_float(in, N);
+    Actor_mul actor{2.0f, N};
+
+    for (auto &spec : specs) {
+        printf("\n--- %s (timer @ %.0f Hz, K=%d) ---\n", spec.label, spec.freq_hz / spec.k, spec.k);
+
+        Timer timer(spec.freq_hz / spec.k, true);
+        std::vector<int64_t> timer_lat;
+        std::vector<int64_t> work_lat;
+        timer_lat.reserve(spec.ticks);
+        work_lat.reserve(spec.ticks);
+        int overruns = 0;
+
+        for (int i = 0; i < spec.ticks; ++i) {
+            auto t0 = Clock::now();
+            timer.wait();
+            auto t1 = Clock::now();
+            if (timer.overrun()) {
+                ++overruns;
+            }
+            timer_lat.push_back(std::chrono::duration_cast<Nanos>(t1 - t0).count());
+
+            auto t2 = Clock::now();
+            for (int k = 0; k < spec.k; ++k) {
+                actor(in, out);
+            }
+            auto t3 = Clock::now();
+            work_lat.push_back(std::chrono::duration_cast<Nanos>(t3 - t2).count());
+        }
+
+        auto ts = compute_stats(timer_lat);
+        auto ws = compute_stats(work_lat);
+        print_latency("  timer.wait()", ts);
+        print_latency("  actor_work", ws);
+
+        if (ts.avg_ns + ws.avg_ns > 0) {
+            printf("[latency] overhead_ratio: %.2f%%, overruns=%d/%d\n",
+                   100.0 * ts.avg_ns / (ts.avg_ns + ws.avg_ns), overruns, spec.ticks);
+            printf("[latency] per_firing: timer=%.1f ns, work=%.1f ns\n",
+                   static_cast<double>(ts.avg_ns) / spec.k,
+                   static_cast<double>(ws.avg_ns) / spec.k);
+        }
+    }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────
 
 int main() {
@@ -429,6 +542,8 @@ int main() {
     measure_buffer_vs_compute();
     measure_wakeup_latency();
     measure_e2e_latency();
+    measure_timer_vs_work_batched();
+    measure_timer_vs_work_freq();
 
     printf("\n=== Done ===\n");
     return 0;

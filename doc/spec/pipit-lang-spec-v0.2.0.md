@@ -272,6 +272,112 @@ set overrun = drop
 | `mem` | SIZE | `64MB` | 共有メモリプールの最大サイズ |
 | `scheduler` | IDENT | `static` | スケジューリングアルゴリズム (`round_robin`, `static`) |
 | `overrun` | IDENT | `drop` | オーバーラン時のポリシー（§5.4.3 参照） |
+| `tick_rate` | FREQ | `1MHz` | OSタイマーのウェイク周波数。K = ceil(タスク周波数 / tick_rate)。高周波タスクのバッチ処理に使用 |
+| `timer_spin` | NUMBER | `0` | デッドライン前のスピンウェイト時間（ナノ秒）。CPU使用量と引き換えにタイマー精度を向上 |
+
+#### `tick_rate` — K ファクタバッチ処理
+
+`tick_rate` は OS タイマーのウェイク周波数を制御する。タスクの target rate が `tick_rate` を超える場合、コンパイラは `K = ceil(タスク周波数 / tick_rate)` を計算し、1回の OS ウェイクにつき K 回のアクター発火をバッチ実行する。
+
+##### K=1（デフォルト: tick_rate ≥ タスク周波数）
+
+```
+set tick_rate = 1MHz    # デフォルト
+clock 10kHz task { ... }  # K = ceil(10kHz / 1MHz) = 1
+
+Time ──►
+        ├── 100µs ──┤── 100µs ──┤── 100µs ──┤── 100µs ──┤
+OS wake ▼           ▼           ▼           ▼           ▼
+        ┌──┐        ┌──┐        ┌──┐        ┌──┐        ┌──┐
+        │A1│ sleep  │A2│ sleep  │A3│ sleep  │A4│ sleep  │A5│
+        └──┘        └──┘        └──┘        └──┘        └──┘
+        ◄──►
+        ~19ns
+        (actor work)
+
+→ 1 tick = 1 firing。OS は 10,000 回/秒ウェイクする。
+  フレームワークオーバーヘッド（sleep/wake遷移）が毎回発生。
+```
+
+##### K=10（tick_rate = 1kHz、タスク周波数 = 10kHz）
+
+```
+set tick_rate = 1kHz
+clock 10kHz task { ... }  # K = ceil(10kHz / 1kHz) = 10
+
+Time ──►
+        ├────────────── 1ms ──────────────┤────────── 1ms ──────
+OS wake ▼                                 ▼
+        ┌──┬──┬──┬──┬──┬──┬──┬──┬──┬──┐  ┌──┬──┬──┬──┬──┬──┬──
+        │A1│A2│A3│A4│A5│A6│A7│A8│A9│A10│ │A1│A2│A3│A4│A5│A6│A7
+        └──┴──┴──┴──┴──┴──┴──┴──┴──┴──┘  └──┴──┴──┴──┴──┴──┴──
+        ◄─────── ~190ns ──────────────►
+        (10 firings in burst)           sleep ~~~~~~~~~~~
+
+→ 1 tick = 10 firings。OS は 1,000 回/秒ウェイクする。
+  sleep/wake オーバーヘッドが 10 発火に分散され、
+  1発火あたりのフレームワークコストが約 1/10 に低下。
+  トレードオフ: 10 発火がバースト実行されるため、
+  最悪応答時間が K × period（= 1ms）に増加。
+```
+
+**使用例:**
+
+```
+set tick_rate = 1kHz    # 1kHz でウェイク
+clock 10kHz fast { adc(0) | fir(coeff) -> signal }   # K=10
+clock 100Hz slow { @signal | stdout() }               # K=1（100Hz < 1kHz）
+```
+
+#### `timer_spin` — ハイブリッドスリープ/スピンウェイト
+
+`timer_spin` はデッドライン直前のスピンウェイト時間（ナノ秒）を指定する。OS の `sleep_until()` にはジッタ（数十〜数百 µs）があるため、スピンウェイトにより最終区間の精度を向上させる。
+
+##### timer_spin = 0（デフォルト: スピンなし）
+
+```
+set timer_spin = 0
+clock 10kHz task { ... }
+
+        ├─────────────── 100µs period ─────────────────┤
+        │                                               │
+        │◄──────── OS sleep_until(deadline) ──────────►│
+        │                                     ▲         │
+        │                              actual wake-up   │
+        │                              (jitter ~76µs)   │
+        ▼                                     │         ▼
+   ─────┼─────────────────────────────────────┼─────────┼─────
+        deadline(N)                    wake    ▼    deadline(N+1)
+                                              ┌──┐
+                                              │A │ actor work
+                                              └──┘
+                                              ◄►
+                                           latency
+                                           ~76µs avg
+```
+
+##### timer_spin = 50000（50µs スピン）
+
+```
+set timer_spin = 50000    # 50µs = 50,000ns
+clock 10kHz task { ... }
+
+        ├─────────────── 100µs period ─────────────────┤
+        │                                               │
+        │◄── OS sleep_until ──►│◄── busy spin ───────►│
+        │  (deadline - 50µs)   │   while(now<deadline) │
+        │                      │    ┊  ┊  ┊  ┊  ┊  ┊  │
+        ▼                      ▼    ┊  ┊  ┊  ┊  ┊  ┊  ▼
+   ─────┼──────────────────────┼────┊──┊──┊──┊──┊──┊──┼─────
+        deadline(N)       spin_start ╰──╯  ╰──╯  ╰──╯ deadline(N+1)
+                                                  ▲
+                                          spin narrows wake
+                                          jitter (env-dependent)
+                                                  │
+                                                  ┌──┐
+                                                  │A │
+                                                  └──┘
+```
 
 ### 5.2 定数定義
 
@@ -340,11 +446,11 @@ clock <freq> <name> { <task_body> }
 
 各タスクはスケジューラにより独立したスレッドとして実行される。`clock freq` はタスクの **target rate** であり、ランタイムはこの周波数に基づくタイマーで**ティック**を生成する。
 
-1ティックあたり K イテレーションを実行する (K ≥ 1)。K の値は以下により決定される。
+1ティックあたり K イテレーションを実行する (K ≥ 1)。現行実装での K は次式で決定される。
 
-- デフォルトでは K = 1
-- コンパイラが target rate と1イテレーションの推定処理時間から K > 1 が必要と判断した場合、K を自動調整してよい
-- 高い target rate（例: 10MHz）の場合、コンパイラは複数イテレーションをバッチ化して1回のティックで実行するスケジュールを生成する
+- `K = ceil(clock_freq / tick_rate)`（§5.1）
+- `clock_freq <= tick_rate` の場合は `K = 1`
+- `tick_rate` 省略時はデフォルト `1MHz` を用いる
 
 #### 5.4.3 オーバーラン処理
 

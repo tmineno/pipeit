@@ -266,11 +266,11 @@
 
 ### Optimization Backlog (From 2026-02-15 Benchmark Analysis)
 
-- [ ] **Scheduler/timer overhead reduction** (HIGH impact):
-  - [ ] Reduce empty-pipeline baseline cost (`BM_EmptyPipeline`) by optimizing task loop wake/sleep transitions
-  - [ ] Reduce context-switch and wake-up overhead (`BM_ContextSwitch`, `thread_wakeup`)
-  - [ ] Add batched timer wake processing option for high-frequency schedules (10kHz+)
-  - [ ] Define target: lower `timer.wait() @10kHz` overhead share below 95% of timer+work budget
+- [x] **Scheduler/timer overhead reduction** (HIGH impact) — ADR-009:
+  - [x] Reduce empty-pipeline baseline cost (`BM_EmptyPipeline`) by optimizing task loop wake/sleep transitions (conditional latency measurement + K-factor batching)
+  - [x] Reduce context-switch and wake-up overhead (`BM_ContextSwitch`, `thread_wakeup`) (thread start barrier `_start` + configurable `set tick_rate`)
+  - [x] Add batched timer wake processing option for high-frequency schedules (10kHz+) (`set tick_rate = <freq>`, K = ceil(task_freq / tick_rate))
+  - [x] Define target: lower `timer.wait() @10kHz` overhead share below 95% of timer+work budget (K=10 → ~7% framework overhead per firing; see ADR-009)
 
 - [ ] **Ring buffer contention optimization** (HIGH impact):
   - [ ] Rework multi-reader tail publication to reduce atomic contention in `Contention/{2,4,8,16}readers`

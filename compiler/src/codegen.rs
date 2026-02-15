@@ -270,7 +270,9 @@ impl<'a> CodegenCtx<'a> {
         self.out
             .push_str("static std::atomic<bool> _stop{false};\n");
         self.out
-            .push_str("static std::atomic<int> _exit_code{0};\n\n");
+            .push_str("static std::atomic<int> _exit_code{0};\n");
+        self.out
+            .push_str("static std::atomic<bool> _start{false};\n\n");
     }
 
     // ── Phase 5b: Statistics and probe storage ────────────────────────────
@@ -316,11 +318,19 @@ impl<'a> CodegenCtx<'a> {
 
             let _ = writeln!(self.out, "void task_{}() {{", task_name);
 
-            // Timer
+            // Wait for all task threads to be created before starting timer
+            self.out.push_str(
+                "    while (!_start.load(std::memory_order_acquire)) { std::this_thread::yield(); }\n",
+            );
+
+            // Timer (measure_latency enabled only when stats are active;
+            //        spin_ns from `set timer_spin`, default 0 = no spin)
+            let spin_ns = self.get_set_number("timer_spin").unwrap_or(0.0) as i64;
             let _ = writeln!(
                 self.out,
-                "    pipit::Timer _timer({:.1});",
-                meta.freq_hz / meta.k_factor as f64
+                "    pipit::Timer _timer({:.1}, _stats, {});",
+                meta.freq_hz / meta.k_factor as f64,
+                spin_ns
             );
 
             // Feedback back-edge buffers (persist across K-loop iterations)
@@ -1074,6 +1084,9 @@ impl<'a> CodegenCtx<'a> {
         for (i, name) in task_names.iter().enumerate() {
             let _ = writeln!(self.out, "    std::thread _t{}(task_{});", i, name);
         }
+        // Release all task threads (synchronized timer start)
+        self.out
+            .push_str("    _start.store(true, std::memory_order_release);\n");
         self.out.push('\n');
 
         // Wait for stop signal (duration or SIGINT)
@@ -1384,6 +1397,19 @@ impl<'a> CodegenCtx<'a> {
                 if set.name.name == name {
                     if let SetValue::Ident(ident) = &set.value {
                         return Some(&ident.name);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn get_set_number(&self, name: &str) -> Option<f64> {
+        for stmt in &self.program.statements {
+            if let StatementKind::Set(set) = &stmt.kind {
+                if set.name.name == name {
+                    if let SetValue::Number(n, _) = &set.value {
+                        return Some(*n);
                     }
                 }
             }

@@ -122,21 +122,38 @@ class Timer {
     Clock::time_point next_;
     bool overrun_ = false;
     Nanos last_latency_{0};
+    bool measure_latency_;
+    Nanos spin_threshold_{0};
 
   public:
-    explicit Timer(double freq_hz)
+    explicit Timer(double freq_hz, bool measure_latency = true, int64_t spin_ns = 0)
         : period_(std::chrono::duration_cast<Nanos>(std::chrono::duration<double>(1.0 / freq_hz))),
-          next_(Clock::now() + period_) {}
+          next_(Clock::now() + period_), measure_latency_(measure_latency),
+          spin_threshold_(spin_ns) {}
 
     void wait() {
         auto now = Clock::now();
         if (now < next_) {
-            std::this_thread::sleep_until(next_);
+            if (spin_threshold_.count() > 0) {
+                // Hybrid: sleep for bulk of the period, spin for the final portion
+                auto sleep_target = next_ - spin_threshold_;
+                if (now < sleep_target) {
+                    std::this_thread::sleep_until(sleep_target);
+                }
+                while (Clock::now() < next_) { /* spin */
+                }
+            } else {
+                std::this_thread::sleep_until(next_);
+            }
             overrun_ = false;
-            last_latency_ = Clock::now() - next_;
+            if (measure_latency_) {
+                last_latency_ = Clock::now() - next_;
+            }
         } else {
             overrun_ = true;
-            last_latency_ = now - next_;
+            if (measure_latency_) {
+                last_latency_ = now - next_;
+            }
         }
         next_ += period_;
     }

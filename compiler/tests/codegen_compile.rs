@@ -746,6 +746,15 @@ fn k_factor_high_freq() {
     );
 }
 
+#[test]
+fn k_factor_custom_tick_rate() {
+    // set tick_rate = 1kHz with 10kHz task → K = 10
+    assert_inline_compiles(
+        "set tick_rate = 1kHz\nclock 10kHz t { constant(0.0) | mul(1.0) | stdout() }",
+        "k_factor_custom_tick_rate",
+    );
+}
+
 // ── Multi-task with threads ────────────────────────────────────────────
 
 #[test]

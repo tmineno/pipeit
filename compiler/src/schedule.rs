@@ -139,6 +139,22 @@ impl<'a> ScheduleCtx<'a> {
         }
     }
 
+    // ── Helpers ──────────────────────────────────────────────────────────
+
+    /// Read a `set` directive with a `Freq` value (e.g., `set tick_rate = 1kHz`).
+    fn get_set_freq(&self, name: &str) -> Option<f64> {
+        for stmt in &self.program.statements {
+            if let StatementKind::Set(set) = &stmt.kind {
+                if set.name.name == name {
+                    if let SetValue::Freq(f, _) = &set.value {
+                        return Some(*f);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     // ── Task scheduling ─────────────────────────────────────────────────
 
     fn schedule_all_tasks(&mut self) {
@@ -199,7 +215,8 @@ impl<'a> ScheduleCtx<'a> {
             }
         };
 
-        let k = compute_k_factor(freq_hz);
+        let tick_rate_hz = self.get_set_freq("tick_rate").unwrap_or(1_000_000.0);
+        let k = compute_k_factor(freq_hz, tick_rate_hz);
 
         self.task_schedules.insert(
             task_name.to_string(),
@@ -498,13 +515,12 @@ fn find_node(sub: &Subgraph, id: NodeId) -> Option<&Node> {
 }
 
 /// K factor: iterations per tick (compile-time heuristic).
-/// freq < 1 MHz → K = 1; freq ≥ 1 MHz → K = ceil(freq / 1 MHz).
-fn compute_k_factor(freq_hz: f64) -> u32 {
-    const TICK_RATE_HZ: f64 = 1_000_000.0;
-    if freq_hz <= TICK_RATE_HZ {
+/// K = ceil(freq / tick_rate). Default tick_rate = 1 MHz.
+fn compute_k_factor(freq_hz: f64, tick_rate_hz: f64) -> u32 {
+    if freq_hz <= tick_rate_hz {
         1
     } else {
-        (freq_hz / TICK_RATE_HZ).ceil() as u32
+        (freq_hz / tick_rate_hz).ceil() as u32
     }
 }
 
@@ -732,6 +748,39 @@ mod tests {
     fn k_factor_1mhz_boundary() {
         let reg = test_registry();
         let result = schedule_ok("clock 1MHz t {\n    constant(0.0) | stdout()\n}", &reg);
+        let meta = result.schedule.tasks.get("t").unwrap();
+        assert_eq!(meta.k_factor, 1);
+    }
+
+    #[test]
+    fn k_factor_custom_tick_rate() {
+        let reg = test_registry();
+        // set tick_rate = 1kHz with a 10kHz task → K = ceil(10000/1000) = 10
+        let result = schedule_ok(
+            "set tick_rate = 1kHz\nclock 10kHz t {\n    constant(0.0) | stdout()\n}",
+            &reg,
+        );
+        let meta = result.schedule.tasks.get("t").unwrap();
+        assert_eq!(meta.k_factor, 10);
+    }
+
+    #[test]
+    fn k_factor_custom_tick_rate_below_threshold() {
+        let reg = test_registry();
+        // set tick_rate = 1kHz with a 500Hz task → K = 1 (freq <= tick_rate)
+        let result = schedule_ok(
+            "set tick_rate = 1kHz\nclock 500Hz t {\n    constant(0.0) | stdout()\n}",
+            &reg,
+        );
+        let meta = result.schedule.tasks.get("t").unwrap();
+        assert_eq!(meta.k_factor, 1);
+    }
+
+    #[test]
+    fn k_factor_default_tick_rate_unchanged() {
+        let reg = test_registry();
+        // No set tick_rate → default 1MHz, 10kHz task → K=1
+        let result = schedule_ok("clock 10kHz t {\n    constant(0.0) | stdout()\n}", &reg);
         let meta = result.schedule.tasks.get("t").unwrap();
         assert_eq!(meta.k_factor, 1);
     }
