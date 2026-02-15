@@ -15,14 +15,20 @@ static void BM_RingBuffer_Write(benchmark::State &state) {
     for (int i = 0; i < 64; ++i)
         data[i] = static_cast<float>(i);
 
+    // Pre-consume to make room
+    float dummy[64];
+    size_t write_count = 0;
     for (auto _ : state) {
         if (!rb.write(data, 64)) {
-            rb.reset(); // Reset when full
+            // Buffer full, read to make space
+            rb.read(dummy, 64);
+        } else {
+            ++write_count;
         }
     }
 
-    state.SetItemsProcessed(state.iterations() * 64);
-    state.SetBytesProcessed(state.iterations() * 64 * sizeof(float));
+    state.SetItemsProcessed(write_count * 64);
+    state.SetBytesProcessed(write_count * 64 * sizeof(float));
 }
 BENCHMARK(BM_RingBuffer_Write);
 
@@ -120,7 +126,7 @@ static void BM_TaskStats_Record(benchmark::State &state) {
     TaskStats stats;
 
     for (auto _ : state) {
-        stats.record_tick(1000); // 1000ns latency
+        stats.record_tick(std::chrono::nanoseconds(1000)); // 1000ns latency
         stats.record_miss();
         benchmark::DoNotOptimize(stats.avg_latency_ns());
     }

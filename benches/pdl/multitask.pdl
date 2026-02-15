@@ -1,0 +1,10 @@
+# Multi-task benchmark - shared buffer communication
+# Tests inter-task ring buffer performance
+
+clock 10kHz producer {
+    adc(0) | mul(2.0) -> data
+}
+
+clock 5kHz consumer {
+    @data | mul(0.5) | delay(1, 0.0) | stdout()
+}

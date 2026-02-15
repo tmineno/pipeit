@@ -1,0 +1,14 @@
+# Complex pipeline benchmark - realistic workload
+# Multiple tasks, shared buffers, taps, processing chain
+
+const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]
+param gain = 1.0
+
+clock 100kHz capture {
+    adc(0) | mul($gain) | :raw | fir(coeff) -> signal
+    :raw | mul(0.5) | stdout()
+}
+
+clock 10kHz decimate {
+    @signal | decimate(10) | stdout()
+}
