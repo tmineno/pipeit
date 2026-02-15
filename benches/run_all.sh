@@ -126,7 +126,7 @@ run_section() {
 if should_run "compiler"; then
     echo -e "${GREEN}[1/11] Compiler benchmarks (Criterion)${NC}"
     if cargo bench --manifest-path "$PROJECT_ROOT/compiler/Cargo.toml" \
-         -- --output-format bencher 2>&1 | tee "$OUTPUT_DIR/compiler_bench.txt"; then
+         --bench compiler_bench -- --output-format bencher 2>&1 | tee "$OUTPUT_DIR/compiler_bench.txt"; then
         run_section "compiler" "pass"
     else
         run_section "compiler" "fail"
