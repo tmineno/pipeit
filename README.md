@@ -34,11 +34,14 @@ clock 1kHz drain {
 # Build the compiler
 cd compiler && cargo build --release
 
-# Compile a pipeline
-cargo run -- ../examples/gain.pdl -I ../examples/actors.h --emit cpp > gain.cpp
+# Compile a pipeline to C++
+cargo run -- ../examples/gain.pdl -I ../examples/actors.h --emit cpp -o gain.cpp
 
-# Build the executable
+# Build the executable manually
 c++ -std=c++20 -O2 gain.cpp -I ../runtime/libpipit/include -I ../examples -lpthread -o gain
+
+# Or compile directly to executable (one step)
+cargo run -- ../examples/gain.pdl -I ../examples/actors.h -o gain
 
 # Run with duration and stats
 ./gain --duration 10s --stats

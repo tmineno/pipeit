@@ -5,25 +5,48 @@
 ## Compiler Usage
 
 ```
-pcc <source.pdl> -I <actors.h> [--emit <format>] [--release]
+pcc <source.pdl> -I <actors.h> [options]
 ```
 
 **Flags:**
 
 | Flag | Description |
 |------|-------------|
-| `-I <path>` | Actor header file (C++ with `ACTOR` macros) |
-| `--emit cpp` | Emit generated C++ source to stdout |
-| `--emit schedule` | Emit computed PASS schedule |
-| `--emit graph-dot` | Emit Graphviz DOT dataflow graph |
-| `--emit timing-chart` | Emit Mermaid Gantt timing chart |
+| `-I <path>` | Actor header file (C++ with `ACTOR` macros) — repeatable |
+| `--actor-path <dir>` | Search directory for actor headers — repeatable |
+| `-o, --output <path>` | Output file path (default: `a.out` for exe, `-` for other formats) |
+| `--emit <format>` | Output stage: `exe` (default), `cpp`, `schedule`, `graph-dot`, `timing-chart` |
 | `--release` | Strip probe instrumentation for zero-cost production builds |
+| `--cc <compiler>` | C++ compiler command (default: `c++`) |
+| `--cflags <flags>` | Additional C++ compiler flags (overrides default `-O2`) |
+| `--verbose` | Print compiler phases and timing |
 
-**Example:**
+**Compiler Exit Codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Compilation error (parse error, type error, analysis failure) |
+| 2 | Usage error (invalid arguments) |
+| 3 | System error (I/O failure, missing files) |
+
+**Examples:**
 
 ```bash
-pcc examples/gain.pdl -I examples/actors.h --emit cpp > gain.cpp
-c++ -std=c++20 -O2 gain.cpp -I runtime/libpipit/include -I examples -lpthread -o gain
+# Generate C++ source to stdout
+pcc examples/gain.pdl -I examples/actors.h --emit cpp -o -
+
+# Generate C++ to file
+pcc examples/gain.pdl -I examples/actors.h --emit cpp -o gain.cpp
+
+# Compile directly to executable (default)
+pcc examples/gain.pdl -I examples/actors.h -o gain
+
+# Use actor search path for automatic header discovery
+pcc examples/gain.pdl --actor-path examples -o gain
+
+# Release build with custom compiler flags
+pcc examples/gain.pdl -I examples/actors.h --release --cflags "-O3 -march=native" -o gain
 ```
 
 ## Generated Binary Usage
@@ -45,13 +68,26 @@ The generated executable accepts runtime flags:
 | `--probe-output <path>` | Redirect probe output to file (default: stderr) |
 | `--threads <n>` | Thread count hint (informational in v0.1) |
 
-**Exit codes:**
+**Exit Codes:**
 
 | Code | Meaning |
 |------|---------|
-| 0 | Normal exit |
+| 0 | Normal exit (duration reached or SIGINT) |
 | 1 | Runtime error (actor returned `ACTOR_ERROR`) |
-| 2 | Startup error (unknown flag, bad param, invalid probe name) |
+| 2 | Startup error (unknown flag, invalid param, missing argument) |
+
+**Error Messages:**
+
+Startup errors include helpful context:
+
+```
+startup error: --param requires name=value
+startup error: unknown param 'xyz'
+startup error: --duration requires a value
+startup error: invalid --duration '10x' (use <sec>, <sec>s, <min>m, or inf)
+startup error: --threads requires a positive integer
+startup error: unknown option '--bad-flag'
+```
 
 **Examples:**
 

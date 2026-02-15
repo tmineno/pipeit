@@ -10,6 +10,7 @@ Based on [pipit-lang-spec-v0.1.0](spec/pipit-lang-spec-v0.1.0.md).
 - [x] Set up build system and project structure → `compiler/` (Rust) + `runtime/` (C++)
 - [x] CI pipeline: format → lint → typecheck → test → `.github/workflows/ci.yml`
 - [x] Create `doc/adr/` for architecture decisions
+- [x] Document shared buffer multi-reader semantics ([ADR-006](adr/006-shared-buffer-multi-reader-ring.md))
 
 ## Lexer (§2)
 
@@ -106,7 +107,10 @@ Based on [pipit-lang-spec-v0.1.0](spec/pipit-lang-spec-v0.1.0.md).
 
 ## Runtime Library — `libpipit`
 
-- [x] Ring buffer (shared memory, lock-free SPSC)
+- [x] Ring buffer (shared memory, lock-free SPSC with multi-reader support)
+  - [x] Multi-reader FIFO with independent read cursors ([ADR-006](adr/006-shared-buffer-multi-reader-ring.md))
+  - [x] Per-reader tail tracking for capacity calculation
+  - [x] Status-checking read/write API for fail-fast semantics
 - [ ] Scheduler: `static` and `round_robin` strategies
 - [x] Timer / tick generator (OS timer abstraction)
 - [x] Overrun policies: drop, slip, backlog (Timer: `last_latency`, `missed_count`, `reset_phase`)
@@ -117,10 +121,23 @@ Based on [pipit-lang-spec-v0.1.0](spec/pipit-lang-spec-v0.1.0.md).
 
 ## CLI & Integration (§9)
 
-- [x] CLI flags: `--duration`, `--threads`, `--param`, `--probe`, `--probe-output`, `--stats`
-- [x] Exit codes: 0 (normal), 1 (runtime error), 2 (startup error)
-- [x] End-to-end test: spec §11.2 `example.pdl` compiles and runs
-- [x] End-to-end test: spec §11.3 `receiver.pdl` compiles and runs
+- [x] Compiler CLI:
+  - [x] `-o/--output` for explicit output file specification
+  - [x] `--actor-path` for automatic actor header discovery
+  - [x] `--verbose` for phase timing and diagnostics
+  - [x] `--cc` and `--cflags` for C++ compiler customization
+  - [x] Exit codes: 0 (success), 1 (compile error), 2 (usage error), 3 (system error)
+- [x] Generated binary CLI:
+  - [x] Runtime flags: `--duration`, `--threads`, `--param`, `--probe`, `--probe-output`, `--stats`
+  - [x] Exit codes: 0 (normal), 1 (runtime error), 2 (startup error)
+  - [x] Improved error messages with "startup error:" prefix and context
+  - [x] Robust duration parsing with time suffixes (`10s`, `1m`, `inf`)
+  - [x] Input validation for all flags (missing args, invalid values)
+- [x] End-to-end tests:
+  - [x] Spec §11.2 `example.pdl` compiles and runs
+  - [x] Spec §11.3 `receiver.pdl` compiles and runs
+  - [x] Overrun policy tests (drop/slip/backlog)
+  - [x] CLI flag tests (exit codes, stats output, duration suffixes)
 - [x] Error message quality review (match spec §7 examples, hints in Diagnostic)
 
 ## Visualization
