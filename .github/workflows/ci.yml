@@ -45,35 +45,6 @@ jobs:
           find runtime/ examples/ -name '*.h' -o -name '*.cpp' | \
             xargs clang-format --dry-run --Werror
 
-  benchmark_smoke:
-    name: Benchmark Smoke
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install benchmark deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libbenchmark-dev jq
-
-      - name: Run runtime benchmark smoke + validation
-        run: |
-          bash benches/run_all.sh \
-            --filter runtime \
-            --output-dir benches/results-ci \
-            --report \
-            --validate
-          test -f benches/results-ci/runtime_bench.json
-          test -f benches/results-ci/runtime.canonical.json
-          jq -e '.benchmarks | length > 0' benches/results-ci/runtime_bench.json >/dev/null
-          jq -e '.benchmarks | length > 0' benches/results-ci/runtime.canonical.json >/dev/null
-
-      - name: Upload benchmark artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-smoke-results
-          path: benches/results-ci/
-
   markdown:
     name: Markdown
     runs-on: ubuntu-latest

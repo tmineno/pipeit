@@ -24,7 +24,7 @@ Comprehensive benchmark suite for performance characterization (v0.2.1).
 
 # Compare current canonical outputs against a baseline directory
 ./run_all.sh --filter runtime --validate \
-  --compare-baseline-dir ./baselines/nightly \
+  --compare-baseline-dir /path/to/baselines \
   --compare-threshold-pct 5
 ```
 
@@ -302,7 +302,7 @@ Compare current canonical results against a baseline directory:
 
 ```bash
 ./compare_canonical_results.sh \
-  --baseline-dir ./baselines/nightly \
+  --baseline-dir /path/to/baselines \
   --current-dir ./results \
   --threshold-pct 5 \
   --output ./results/baseline_comparison.md
@@ -315,16 +315,9 @@ Compare current canonical results against a baseline directory:
   --filter runtime \
   --output-dir ./results \
   --validate \
-  --compare-baseline-dir ./baselines/nightly \
+  --compare-baseline-dir /path/to/baselines \
   --compare-allow-missing-baseline
 ```
-
-### CI Integration
-
-- `CI` workflow (`.github/workflows/ci.yml`) runs a benchmark smoke lane
-  (`runtime`) with canonical validation.
-- `Benchmark Nightly` workflow (`.github/workflows/bench-nightly.yml`) runs the
-  `perf` lane with canonical validation and baseline comparison.
 
 ### Canonicalization Utility
 

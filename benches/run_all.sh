@@ -23,7 +23,7 @@
 #   ./run_all.sh --report           # Generate human-readable Markdown report
 #   ./run_all.sh --report --report-bench actor_bench --report-bench thread_bench
 #   ./run_all.sh --validate         # Validate canonical JSON outputs
-#   ./run_all.sh --compare-baseline-dir ./benches/baselines/nightly
+#   ./run_all.sh --compare-baseline-dir /path/to/baselines
 
 set -e
 
