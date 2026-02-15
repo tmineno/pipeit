@@ -14,7 +14,7 @@ param gain = 1.0
 
 # Sub-pipeline definition
 define frontend(n) {
-    adc(0) | mul($gain) | fft(n)
+    constant(0.0) | mul($gain) | fft(n)
 }
 
 # Main capture task: 10MHz target rate

@@ -52,7 +52,12 @@ fn assert_pdl_file_compiles(pdl_name: &str) {
 
     let root = project_root();
     let pdl_path = root.join("examples").join(pdl_name);
-    let actors_h = root.join("examples").join("actors.h");
+    let std_actors_h = root
+        .join("runtime")
+        .join("libpipit")
+        .join("include")
+        .join("std_actors.h");
+    let example_actors_h = root.join("examples").join("example_actors.h");
     let runtime_include = root.join("runtime").join("libpipit").join("include");
 
     assert!(pdl_path.exists(), "missing {}", pdl_path.display());
@@ -63,7 +68,9 @@ fn assert_pdl_file_compiles(pdl_name: &str) {
     let gen = Command::new(&pcc)
         .arg(pdl_path.to_str().unwrap())
         .arg("-I")
-        .arg(actors_h.to_str().unwrap())
+        .arg(std_actors_h.to_str().unwrap())
+        .arg("-I")
+        .arg(example_actors_h.to_str().unwrap())
         .arg("--emit")
         .arg("cpp")
         .arg("-o")
@@ -102,7 +109,11 @@ fn assert_inline_compiles(pdl_source: &str, test_name: &str) {
     };
 
     let root = project_root();
-    let actors_h = root.join("examples").join("actors.h");
+    let std_actors_h = root
+        .join("runtime")
+        .join("libpipit")
+        .join("include")
+        .join("std_actors.h");
     let runtime_include = root.join("runtime").join("libpipit").join("include");
 
     // Write PDL to temp file
@@ -117,7 +128,7 @@ fn assert_inline_compiles(pdl_source: &str, test_name: &str) {
     let gen = Command::new(&pcc)
         .arg(pdl_file.to_str().unwrap())
         .arg("-I")
-        .arg(actors_h.to_str().unwrap())
+        .arg(std_actors_h.to_str().unwrap())
         .arg("--emit")
         .arg("cpp")
         .arg("-o")
@@ -150,7 +161,11 @@ fn assert_inline_compiles(pdl_source: &str, test_name: &str) {
 /// Run pcc on inline PDL source and return generated C++ source.
 fn generate_inline_cpp(pdl_source: &str, test_name: &str) -> String {
     let root = project_root();
-    let actors_h = root.join("examples").join("actors.h");
+    let std_actors_h = root
+        .join("runtime")
+        .join("libpipit")
+        .join("include")
+        .join("std_actors.h");
 
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp_dir = std::env::temp_dir();
@@ -163,7 +178,7 @@ fn generate_inline_cpp(pdl_source: &str, test_name: &str) -> String {
     let gen = Command::new(&pcc)
         .arg(pdl_file.to_str().unwrap())
         .arg("-I")
-        .arg(actors_h.to_str().unwrap())
+        .arg(std_actors_h.to_str().unwrap())
         .arg("--emit")
         .arg("cpp")
         .arg("-o")
@@ -259,14 +274,14 @@ fn example_file_feedback() {
 #[test]
 fn source_only() {
     // Source actor (void input) piped to sink
-    assert_inline_compiles("clock 1kHz t { adc(0) | stdout() }", "source_only");
+    assert_inline_compiles("clock 1kHz t { constant(0.0) | stdout() }", "source_only");
 }
 
 #[test]
 fn sink_with_void_output() {
     // Ensure void output actors produce nullptr for out pointer
     assert_inline_compiles(
-        "clock 1kHz t { adc(0) | mul(1.0) | stdout() }",
+        "clock 1kHz t { constant(0.0) | mul(1.0) | stdout() }",
         "sink_void_output",
     );
 }
@@ -276,7 +291,7 @@ fn sink_with_void_output() {
 #[test]
 fn linear_chain_three_actors() {
     assert_inline_compiles(
-        "clock 1kHz t { adc(0) | mul(2.0) | mul(0.5) | stdout() }",
+        "clock 1kHz t { constant(0.0) | mul(2.0) | mul(0.5) | stdout() }",
         "linear_chain_3",
     );
 }
@@ -286,7 +301,7 @@ fn linear_chain_three_actors() {
 #[test]
 fn const_scalar() {
     assert_inline_compiles(
-        "const fft_size = 256\nclock 1kHz t { adc(0) | fft(fft_size) | c2r() | stdout() }",
+        "const fft_size = 256\nclock 1kHz t { constant(0.0) | fft(fft_size) | c2r() | stdout() }",
         "const_scalar",
     );
 }
@@ -296,7 +311,7 @@ fn const_scalar() {
 #[test]
 fn const_array() {
     assert_inline_compiles(
-        "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\nclock 1kHz t { adc(0) | fir(5, coeff) | stdout() }",
+        "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\nclock 1kHz t { constant(0.0) | fir(5, coeff) | stdout() }",
         "const_array",
     );
 }
@@ -306,7 +321,7 @@ fn const_array() {
 #[test]
 fn runtime_param() {
     assert_inline_compiles(
-        "param gain = 2.5\nclock 1kHz t { adc(0) | mul($gain) | stdout() }",
+        "param gain = 2.5\nclock 1kHz t { constant(0.0) | mul($gain) | stdout() }",
         "runtime_param",
     );
 }
@@ -315,7 +330,7 @@ fn runtime_param() {
 fn runtime_param_integer_default() {
     // Param with integer default, consumed by float actor
     assert_inline_compiles(
-        "param gain = 1\nclock 1kHz t { adc(0) | mul($gain) | stdout() }",
+        "param gain = 1\nclock 1kHz t { constant(0.0) | mul($gain) | stdout() }",
         "runtime_param_int",
     );
 }
@@ -325,7 +340,7 @@ fn runtime_param_integer_default() {
 #[test]
 fn fork_two_consumers() {
     assert_inline_compiles(
-        "clock 1kHz t {\n  adc(0) | :raw | stdout()\n  :raw | stdout()\n}",
+        "clock 1kHz t {\n  constant(0.0) | :raw | stdout()\n  :raw | stdout()\n}",
         "fork_two_consumers",
     );
 }
@@ -333,7 +348,7 @@ fn fork_two_consumers() {
 #[test]
 fn fork_three_consumers() {
     assert_inline_compiles(
-        "clock 1kHz t {\n  adc(0) | :sig | stdout()\n  :sig | mul(2.0) | stdout()\n  :sig | mul(0.5) | stdout()\n}",
+        "clock 1kHz t {\n  constant(0.0) | :sig | stdout()\n  :sig | mul(2.0) | stdout()\n  :sig | mul(0.5) | stdout()\n}",
         "fork_three_consumers",
     );
 }
@@ -343,7 +358,7 @@ fn fork_three_consumers() {
 #[test]
 fn probe_passthrough() {
     assert_inline_compiles(
-        "clock 1kHz t { adc(0) | mul(1.0) | ?debug | stdout() }",
+        "clock 1kHz t { constant(0.0) | mul(1.0) | ?debug | stdout() }",
         "probe_passthrough",
     );
 }
@@ -354,7 +369,7 @@ fn probe_passthrough() {
 fn complex_type_chain() {
     // fft produces cfloat, mag consumes cfloat → float
     assert_inline_compiles(
-        "clock 1kHz t { adc(0) | fft(256) | mag() | stdout() }",
+        "clock 1kHz t { constant(0.0) | fft(256) | mag() | stdout() }",
         "complex_type_chain",
     );
 }
@@ -362,7 +377,7 @@ fn complex_type_chain() {
 #[test]
 fn complex_c2r() {
     assert_inline_compiles(
-        "clock 1kHz t { adc(0) | fft(256) | c2r() | stdout() }",
+        "clock 1kHz t { constant(0.0) | fft(256) | c2r() | stdout() }",
         "complex_c2r",
     );
 }
@@ -372,7 +387,7 @@ fn complex_c2r() {
 #[test]
 fn decimation_actor() {
     assert_inline_compiles(
-        "clock 1kHz t { adc(0) | decimate(4) | stdout() }",
+        "clock 1kHz t { constant(0.0) | decimate(4) | stdout() }",
         "decimation",
     );
 }
@@ -383,7 +398,7 @@ fn decimation_actor() {
 fn multi_input_add() {
     // add() takes 2 float inputs — uses tap ref as second input
     assert_inline_compiles(
-        "clock 1kHz t {\n  adc(0) | :a | add(:a) | stdout()\n}",
+        "clock 1kHz t {\n  constant(0.0) | :a | add(:a) | stdout()\n}",
         "multi_input_add",
     );
 }
@@ -393,7 +408,7 @@ fn multi_input_add() {
 #[test]
 fn feedback_with_delay() {
     assert_inline_compiles(
-        "clock 1kHz t {\n  adc(0) | add(:fb) | :out | delay(1, 0.0) | :fb\n  :out | stdout()\n}",
+        "clock 1kHz t {\n  constant(0.0) | add(:fb) | :out | delay(1, 0.0) | :fb\n  :out | stdout()\n}",
         "feedback_delay",
     );
 }
@@ -403,7 +418,7 @@ fn feedback_with_delay() {
 #[test]
 fn define_simple() {
     assert_inline_compiles(
-        "define amplify() { mul(2.0) | mul(0.5) }\nclock 1kHz t { adc(0) | amplify() | stdout() }",
+        "define amplify() { mul(2.0) | mul(0.5) }\nclock 1kHz t { constant(0.0) | amplify() | stdout() }",
         "define_simple",
     );
 }
@@ -411,7 +426,7 @@ fn define_simple() {
 #[test]
 fn define_with_params() {
     assert_inline_compiles(
-        "define amp(g) { mul(g) }\nclock 1kHz t { adc(0) | amp(3.0) | stdout() }",
+        "define amp(g) { mul(g) }\nclock 1kHz t { constant(0.0) | amp(3.0) | stdout() }",
         "define_with_params",
     );
 }
@@ -421,7 +436,7 @@ fn define_with_params() {
 #[test]
 fn inter_task_buffer() {
     assert_inline_compiles(
-        "clock 1kHz producer { adc(0) -> sig }\nclock 1kHz consumer { @sig | stdout() }",
+        "clock 1kHz producer { constant(0.0) -> sig }\nclock 1kHz consumer { @sig | stdout() }",
         "inter_task_buffer",
     );
 }
@@ -430,7 +445,7 @@ fn inter_task_buffer() {
 fn inter_task_buffer_rate_mismatch() {
     // Producer and consumer at different rates
     assert_inline_compiles(
-        "clock 10kHz fast { adc(0) -> sig }\nclock 1kHz slow { @sig | decimate(10) | stdout() }",
+        "clock 10kHz fast { constant(0.0) -> sig }\nclock 1kHz slow { @sig | decimate(10) | stdout() }",
         "inter_task_rate_mismatch",
     );
 }
@@ -442,9 +457,9 @@ fn modal_switch() {
     assert_inline_compiles(
         concat!(
             "clock 1kHz t {\n",
-            "  control { adc(0) | correlate() | detect() -> ctrl }\n",
-            "  mode sync { adc(0) | sync_process() | stdout() }\n",
-            "  mode data { adc(0) | fir(4, [0.25, 0.25, 0.25, 0.25]) | stdout() }\n",
+            "  control { constant(0.0) | threshold(0.5) -> ctrl }\n",
+            "  mode sync { constant(0.0) | fir(4, [0.25, 0.25, 0.25, 0.25]) | stdout() }\n",
+            "  mode data { constant(0.0) | fir(4, [0.25, 0.25, 0.25, 0.25]) | stdout() }\n",
             "  switch(ctrl, sync, data)\n",
             "}\n",
         ),
@@ -457,13 +472,264 @@ fn modal_switch_default() {
     assert_inline_compiles(
         concat!(
             "clock 1kHz t {\n",
-            "  control { adc(0) | correlate() | detect() -> ctrl }\n",
-            "  mode idle { adc(0) | stdout() }\n",
-            "  mode active { adc(0) | mul(2.0) | stdout() }\n",
+            "  control { constant(0.0) | threshold(0.5) -> ctrl }\n",
+            "  mode idle { constant(0.0) | stdout() }\n",
+            "  mode active { constant(0.0) | mul(2.0) | stdout() }\n",
             "  switch(ctrl, idle, active) default idle\n",
             "}\n",
         ),
         "modal_switch_default",
+    );
+}
+
+// ── Core stdlib actors ─────────────────────────────────────────────────
+
+#[test]
+fn actor_constant() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(1.0) | stdout() }",
+        "actor_constant",
+    );
+}
+
+#[test]
+fn actor_mul() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(2.0) | mul(3.0) | stdout() }",
+        "actor_mul",
+    );
+}
+
+#[test]
+fn actor_add() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(1.0) | :a | add(:a) | stdout() }",
+        "actor_add",
+    );
+}
+
+#[test]
+fn actor_fft() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(0.0) | delay(4, 0.0) | fft(4) | c2r() | stdout() }",
+        "actor_fft",
+    );
+}
+
+#[test]
+fn actor_c2r() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(0.0) | delay(4, 0.0) | fft(4) | c2r() | stdout() }",
+        "actor_c2r",
+    );
+}
+
+#[test]
+fn actor_mag() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(0.0) | delay(4, 0.0) | fft(4) | mag() | stdout() }",
+        "actor_mag",
+    );
+}
+
+#[test]
+fn actor_fir() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(0.0) | delay(3, 0.0) | fir(3, [0.33, 0.33, 0.34]) | stdout() }",
+        "actor_fir",
+    );
+}
+
+#[test]
+fn actor_delay() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(0.0) | delay(5, 1.0) | stdout() }",
+        "actor_delay",
+    );
+}
+
+#[test]
+fn actor_decimate() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(0.0) | delay(10, 0.0) | decimate(10) | stdout() }",
+        "actor_decimate",
+    );
+}
+
+#[test]
+fn actor_stdout() {
+    assert_inline_compiles("clock 1kHz t { constant(0.0) | stdout() }", "actor_stdout");
+}
+
+// ── New stdlib actors (Phase 2) ────────────────────────────────────────
+
+#[test]
+fn actor_sub() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(5.0) | :a | sub(:a) | stdout() }",
+        "actor_sub",
+    );
+}
+
+#[test]
+fn actor_div() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(10.0) | :a | div(:a) | stdout() }",
+        "actor_div",
+    );
+}
+
+#[test]
+fn actor_abs() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(-5.0) | abs() | stdout() }",
+        "actor_abs",
+    );
+}
+
+#[test]
+fn actor_sqrt() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(16.0) | sqrt() | stdout() }",
+        "actor_sqrt",
+    );
+}
+
+#[test]
+fn actor_threshold() {
+    assert_inline_compiles(
+        "clock 1kHz t { control { constant(0.7) | threshold(0.5) -> ctrl } mode a { constant(0.0) | stdout() } mode b { constant(1.0) | stdout() } switch(ctrl, a, b) default a }",
+        "actor_threshold",
+    );
+}
+
+#[test]
+fn actor_mean() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(0.0) | delay(5, 0.0) | mean(5) | stdout() }",
+        "actor_mean",
+    );
+}
+
+#[test]
+fn actor_rms() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(0.0) | delay(5, 0.0) | rms(5) | stdout() }",
+        "actor_rms",
+    );
+}
+
+#[test]
+fn actor_min() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(0.0) | delay(5, 0.0) | min(5) | stdout() }",
+        "actor_min",
+    );
+}
+
+#[test]
+fn actor_max() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(0.0) | delay(5, 0.0) | max(5) | stdout() }",
+        "actor_max",
+    );
+}
+
+#[test]
+fn actor_stderr() {
+    assert_inline_compiles("clock 1kHz t { constant(0.0) | stderr() }", "actor_stderr");
+}
+
+#[test]
+fn actor_stdin() {
+    assert_inline_compiles("clock 1kHz t { stdin() | stdout() }", "actor_stdin");
+}
+
+#[test]
+fn actor_stdout_fmt_default() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(0.0) | stdout_fmt(\"default\") }",
+        "actor_stdout_fmt_default",
+    );
+}
+
+#[test]
+fn actor_stdout_fmt_hex() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(0.0) | stdout_fmt(\"hex\") }",
+        "actor_stdout_fmt_hex",
+    );
+}
+
+#[test]
+fn actor_stdout_fmt_scientific() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(0.0) | stdout_fmt(\"scientific\") }",
+        "actor_stdout_fmt_scientific",
+    );
+}
+
+#[test]
+fn actor_binread_float() {
+    assert_inline_compiles(
+        "clock 1kHz t { binread(\"test.bin\", \"float\") | stdout() }",
+        "actor_binread_float",
+    );
+}
+
+#[test]
+fn actor_binread_int16() {
+    assert_inline_compiles(
+        "clock 1kHz t { binread(\"test.bin\", \"int16\") | stdout() }",
+        "actor_binread_int16",
+    );
+}
+
+#[test]
+fn actor_binread_int32() {
+    assert_inline_compiles(
+        "clock 1kHz t { binread(\"test.bin\", \"int32\") | stdout() }",
+        "actor_binread_int32",
+    );
+}
+
+#[test]
+fn actor_binread_cfloat() {
+    assert_inline_compiles(
+        "clock 1kHz t { binread(\"test.bin\", \"cfloat\") | stdout() }",
+        "actor_binread_cfloat",
+    );
+}
+
+#[test]
+fn actor_binwrite_float() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(0.0) | binwrite(\"test.bin\", \"float\") }",
+        "actor_binwrite_float",
+    );
+}
+
+#[test]
+fn actor_binwrite_int16() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(0.0) | binwrite(\"test.bin\", \"int16\") }",
+        "actor_binwrite_int16",
+    );
+}
+
+#[test]
+fn actor_binwrite_int32() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(0.0) | binwrite(\"test.bin\", \"int32\") }",
+        "actor_binwrite_int32",
+    );
+}
+
+#[test]
+fn actor_binwrite_cfloat() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(0.0) | binwrite(\"test.bin\", \"cfloat\") }",
+        "actor_binwrite_cfloat",
     );
 }
 
@@ -473,7 +739,7 @@ fn modal_switch_default() {
 fn k_factor_high_freq() {
     // 10 MHz → K = 10 iterations per tick
     assert_inline_compiles(
-        "clock 10MHz t { adc(0) | mul(1.0) | stdout() }",
+        "clock 10MHz t { constant(0.0) | mul(1.0) | stdout() }",
         "k_factor_high_freq",
     );
 }
@@ -484,7 +750,7 @@ fn k_factor_high_freq() {
 fn multi_task_threads() {
     assert_inline_compiles(
         concat!(
-            "clock 48kHz capture { adc(0) | mul(1.0) -> sig }\n",
+            "clock 48kHz capture { constant(0.0) | mul(1.0) -> sig }\n",
             "clock 1kHz process { @sig | decimate(48) | stdout() }\n",
         ),
         "multi_task_threads",
@@ -495,7 +761,7 @@ fn multi_task_threads() {
 fn three_tasks() {
     assert_inline_compiles(
         concat!(
-            "clock 1kHz a { adc(0) -> buf1 }\n",
+            "clock 1kHz a { constant(0.0) -> buf1 }\n",
             "clock 1kHz b { @buf1 | mul(2.0) -> buf2 }\n",
             "clock 1kHz c { @buf2 | stdout() }\n",
         ),
@@ -513,7 +779,7 @@ fn const_param_fork_probe() {
             "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
             "param gain = 1.0\n",
             "clock 48kHz t {\n",
-            "  adc(0) | mul($gain) | :raw | fir(5, coeff) | ?debug | stdout()\n",
+            "  constant(0.0) | mul($gain) | :raw | fir(5, coeff) | ?debug | stdout()\n",
             "  :raw | stdout()\n",
             "}\n",
         ),
@@ -527,7 +793,7 @@ fn fork_into_different_types() {
     assert_inline_compiles(
         concat!(
             "clock 1kHz t {\n",
-            "  adc(0) | fft(256) | :spectrum | c2r() | stdout()\n",
+            "  constant(0.0) | fft(256) | :spectrum | c2r() | stdout()\n",
             "  :spectrum | mag() | stdout()\n",
             "}\n",
         ),
@@ -540,7 +806,7 @@ fn define_with_probe_and_tap() {
     assert_inline_compiles(
         concat!(
             "define process() { mul(2.0) | ?check | mul(0.5) }\n",
-            "clock 1kHz t { adc(0) | :in | process() | stdout()\n:in | stdout() }\n",
+            "clock 1kHz t { constant(0.0) | :in | process() | stdout()\n:in | stdout() }\n",
         ),
         "define_probe_tap",
     );
@@ -552,7 +818,7 @@ fn define_with_probe_and_tap() {
 fn shared_buffer_multi_reader_has_independent_reader_indices() {
     let cpp = generate_inline_cpp(
         concat!(
-            "clock 1kHz w { adc(0) -> sig }\n",
+            "clock 1kHz w { constant(0.0) -> sig }\n",
             "clock 1kHz r1 { @sig | stdout() }\n",
             "clock 1kHz r2 { @sig | stdout() }\n",
         ),
@@ -583,7 +849,7 @@ fn shared_buffer_multi_reader_has_independent_reader_indices() {
 #[test]
 fn overrun_policy_drop() {
     assert_inline_compiles(
-        "set overrun = drop\nclock 1kHz t { adc(0) | stdout() }",
+        "set overrun = drop\nclock 1kHz t { constant(0.0) | stdout() }",
         "overrun_drop",
     );
 }
@@ -592,7 +858,7 @@ fn overrun_policy_drop() {
 fn shared_buffer_io_checks_status_and_stops_on_failure() {
     let cpp = generate_inline_cpp(
         concat!(
-            "clock 1kHz w { adc(0) -> sig }\n",
+            "clock 1kHz w { constant(0.0) -> sig }\n",
             "clock 1kHz r { @sig | stdout() }\n",
         ),
         "shared_io_status_checks",
@@ -618,7 +884,7 @@ fn shared_buffer_io_checks_status_and_stops_on_failure() {
 #[test]
 fn overrun_policy_slip() {
     assert_inline_compiles(
-        "set overrun = slip\nclock 1kHz t { adc(0) | stdout() }",
+        "set overrun = slip\nclock 1kHz t { constant(0.0) | stdout() }",
         "overrun_slip",
     );
 }
@@ -627,7 +893,7 @@ fn overrun_policy_slip() {
 fn shared_buffer_io_uses_pointer_offsets_in_repetition_loops() {
     let cpp = generate_inline_cpp(
         concat!(
-            "clock 1MHz w { adc(0) | fft(256) | c2r() | fir(5, [0.1, 0.2, 0.4, 0.2, 0.1]) -> sig }\n",
+            "clock 1MHz w { constant(0.0) | fft(256) | c2r() | fir(5, [0.1, 0.2, 0.4, 0.2, 0.1]) -> sig }\n",
             "clock 1kHz r { @sig | decimate(10000) | stdout() }\n",
         ),
         "shared_io_offsets",
@@ -648,7 +914,7 @@ fn shared_buffer_io_uses_pointer_offsets_in_repetition_loops() {
 #[test]
 fn overrun_policy_backlog() {
     assert_inline_compiles(
-        "set overrun = backlog\nclock 1kHz t { adc(0) | stdout() }",
+        "set overrun = backlog\nclock 1kHz t { constant(0.0) | stdout() }",
         "overrun_backlog",
     );
 }
@@ -663,7 +929,12 @@ fn compile_and_run_pdl(pdl_name: &str, run_args: &[&str]) -> Option<(i32, String
     let cxx = find_cxx_compiler()?;
     let root = project_root();
     let pdl_path = root.join("examples").join(pdl_name);
-    let actors_h = root.join("examples").join("actors.h");
+    let std_actors_h = root
+        .join("runtime")
+        .join("libpipit")
+        .join("include")
+        .join("std_actors.h");
+    let example_actors_h = root.join("examples").join("example_actors.h");
     let runtime_include = root.join("runtime").join("libpipit").join("include");
 
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -675,7 +946,9 @@ fn compile_and_run_pdl(pdl_name: &str, run_args: &[&str]) -> Option<(i32, String
     let gen = Command::new(&pcc)
         .arg(pdl_path.to_str().unwrap())
         .arg("-I")
-        .arg(actors_h.to_str().unwrap())
+        .arg(std_actors_h.to_str().unwrap())
+        .arg("-I")
+        .arg(example_actors_h.to_str().unwrap())
         .arg("--emit")
         .arg("cpp")
         .arg("-o")
@@ -743,7 +1016,11 @@ fn compile_and_run_inline(
 ) -> Option<(i32, String, String)> {
     let cxx = find_cxx_compiler()?;
     let root = project_root();
-    let actors_h = root.join("examples").join("actors.h");
+    let std_actors_h = root
+        .join("runtime")
+        .join("libpipit")
+        .join("include")
+        .join("std_actors.h");
     let runtime_include = root.join("runtime").join("libpipit").join("include");
 
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -757,7 +1034,7 @@ fn compile_and_run_inline(
     let gen = Command::new(&pcc)
         .arg(pdl_file.to_str().unwrap())
         .arg("-I")
-        .arg(actors_h.to_str().unwrap())
+        .arg(std_actors_h.to_str().unwrap())
         .arg("--emit")
         .arg("cpp")
         .arg("-o")
@@ -879,7 +1156,7 @@ fn stats_flag_produces_output() {
 fn duration_with_suffix() {
     // Test --duration with 's' suffix
     if let Some((code, _stdout, stderr)) = compile_and_run_inline(
-        "clock 1kHz t { adc(0) | stdout() }",
+        "clock 1kHz t { constant(0.0) | stdout() }",
         "duration_suffix",
         &["--duration", "0.01s"],
     ) {

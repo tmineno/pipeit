@@ -558,7 +558,7 @@ mod tests {
 
     #[test]
     fn task_simple_pipeline() {
-        let s = parse_one_stmt("clock 48kHz audio {\n  adc(0) | fir(c)\n}");
+        let s = parse_one_stmt("clock 48kHz audio {\n  constant(0.0) | fir(c)\n}");
         let StatementKind::Task(t) = &s.kind else {
             panic!("expected Task")
         };
@@ -568,7 +568,9 @@ mod tests {
             panic!("expected Pipeline")
         };
         assert_eq!(p.lines.len(), 1);
-        assert!(matches!(&p.lines[0].source, PipeSource::ActorCall(a) if a.name.name == "adc"));
+        assert!(
+            matches!(&p.lines[0].source, PipeSource::ActorCall(a) if a.name.name == "constant")
+        );
     }
 
     // ── pipe_expr variations ──

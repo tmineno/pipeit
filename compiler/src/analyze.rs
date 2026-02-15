@@ -909,12 +909,17 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_registry() -> Registry {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .join("examples/actors.h");
+            .to_path_buf();
+        let std_actors = root.join("runtime/libpipit/include/std_actors.h");
+        let example_actors = root.join("examples/example_actors.h");
         let mut reg = Registry::new();
-        reg.load_header(&path).expect("failed to load actors.h");
+        reg.load_header(&std_actors)
+            .expect("failed to load std_actors.h");
+        reg.load_header(&example_actors)
+            .expect("failed to load example_actors.h");
         reg
     }
 
@@ -982,7 +987,7 @@ mod tests {
         let reg = test_registry();
         // adc(void→float) | fft(float→cfloat) | mag(cfloat→float) | stdout(float→void)
         analyze_ok(
-            "clock 1kHz t {\n    adc(0) | fft(256) | mag() | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | mag() | stdout()\n}",
             &reg,
         );
     }
@@ -992,7 +997,7 @@ mod tests {
         let reg = test_registry();
         // fft outputs cfloat, but fir expects float → type mismatch
         let result = analyze_source(
-            "clock 1kHz t {\n    adc(0) | fft(256) | fir(5) | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | fir(5) | stdout()\n}",
             &reg,
         );
         assert!(
@@ -1006,7 +1011,7 @@ mod tests {
     fn type_check_void_source_ok() {
         let reg = test_registry();
         // adc has void input, should not flag type error
-        analyze_ok("clock 1kHz t {\n    adc(0) | stdout()\n}", &reg);
+        analyze_ok("clock 1kHz t {\n    constant(0.0) | stdout()\n}", &reg);
     }
 
     #[test]
@@ -1014,7 +1019,7 @@ mod tests {
         let reg = test_registry();
         // Fork passes float through
         analyze_ok(
-            "clock 1kHz t {\n    adc(0) | :raw | stdout()\n    :raw | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | :raw | stdout()\n    :raw | stdout()\n}",
             &reg,
         );
     }
@@ -1023,7 +1028,10 @@ mod tests {
     fn type_check_through_probe() {
         let reg = test_registry();
         // Probe passes float through
-        analyze_ok("clock 1kHz t {\n    adc(0) | ?mon | stdout()\n}", &reg);
+        analyze_ok(
+            "clock 1kHz t {\n    constant(0.0) | ?mon | stdout()\n}",
+            &reg,
+        );
     }
 
     // ── Phase 2: SDF balance equation tests ─────────────────────────────
@@ -1031,7 +1039,7 @@ mod tests {
     #[test]
     fn balance_uniform_rate() {
         let reg = test_registry();
-        let result = analyze_ok("clock 1kHz t {\n    adc(0) | stdout()\n}", &reg);
+        let result = analyze_ok("clock 1kHz t {\n    constant(0.0) | stdout()\n}", &reg);
         let rv = result
             .analysis
             .repetition_vectors
@@ -1046,10 +1054,10 @@ mod tests {
     #[test]
     fn balance_decimation() {
         let reg = test_registry();
-        // adc(0) | fft(256) | c2r() | stdout()
+        // constant(0.0) | fft(256) | c2r() | stdout()
         // fft: IN(float,256), OUT(cfloat,256). c2r: IN(cfloat,1), OUT(float,1)
         let result = analyze_ok(
-            "clock 1kHz t {\n    adc(0) | fft(256) | c2r() | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | c2r() | stdout()\n}",
             &reg,
         );
         let rv = result
@@ -1068,7 +1076,7 @@ mod tests {
         let result = analyze_ok(
             concat!(
                 "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
-                "clock 1kHz t {\n    adc(0) | fir(coeff) | stdout()\n}",
+                "clock 1kHz t {\n    constant(0.0) | fir(coeff) | stdout()\n}",
             ),
             &reg,
         );
@@ -1087,10 +1095,10 @@ mod tests {
         let reg = test_registry();
         // Fork creates a branch: adc | :raw | stdout + :raw | mag() needs cfloat input...
         // Actually mag expects cfloat, adc outputs float. Let's use a valid chain:
-        // adc(0) | :raw | stdout()
+        // constant(0.0) | :raw | stdout()
         // :raw | stdout()
         let result = analyze_ok(
-            "clock 1kHz t {\n    adc(0) | :raw | stdout()\n    :raw | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | :raw | stdout()\n    :raw | stdout()\n}",
             &reg,
         );
         let rv = result
@@ -1110,7 +1118,7 @@ mod tests {
         analyze_ok(
             concat!(
                 "clock 1kHz t {\n",
-                "    adc(0) | add(:fb) | :out | stdout()\n",
+                "    constant(0.0) | add(:fb) | :out | stdout()\n",
                 "    :out | delay(1, 0.0) | :fb\n",
                 "}",
             ),
@@ -1127,7 +1135,7 @@ mod tests {
             concat!(
                 "param gain = 1.0\n",
                 "clock 1kHz t {\n",
-                "    adc(0) | add(:fb) | :out | stdout()\n",
+                "    constant(0.0) | add(:fb) | :out | stdout()\n",
                 "    :out | mul($gain) | :fb\n",
                 "}",
             ),
@@ -1147,7 +1155,7 @@ mod tests {
         let reg = test_registry();
         // param gain = 1.0 (float), mul has RUNTIME_PARAM(float, gain) → match
         analyze_ok(
-            "param gain = 1.0\nclock 1kHz t {\n    adc(0) | mul($gain) | stdout()\n}",
+            "param gain = 1.0\nclock 1kHz t {\n    constant(0.0) | mul($gain) | stdout()\n}",
             &reg,
         );
     }
@@ -1158,7 +1166,7 @@ mod tests {
         // param gain = 1 (int), mul has RUNTIME_PARAM(float, gain)
         // Int → Float promotion is allowed
         analyze_ok(
-            "param gain = 1\nclock 1kHz t {\n    adc(0) | mul($gain) | stdout()\n}",
+            "param gain = 1\nclock 1kHz t {\n    constant(0.0) | mul($gain) | stdout()\n}",
             &reg,
         );
     }
@@ -1218,10 +1226,10 @@ mod tests {
             concat!(
                 "clock 1kHz t {\n",
                 "    control {\n",
-                "        adc(0) | detect() -> ctrl\n",
+                "        constant(0.0) | detect() -> ctrl\n",
                 "    }\n",
-                "    mode a {\n        adc(0) | stdout()\n    }\n",
-                "    mode b {\n        adc(0) | stdout()\n    }\n",
+                "    mode a {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode b {\n        constant(0.0) | stdout()\n    }\n",
                 "    switch(ctrl, a, b) default a\n",
                 "}",
             ),
@@ -1246,10 +1254,10 @@ mod tests {
                 "const coeff = [1.0]\n",
                 "clock 1kHz t {\n",
                 "    control {\n",
-                "        adc(0) | fir(coeff) -> ctrl\n",
+                "        constant(0.0) | fir(coeff) -> ctrl\n",
                 "    }\n",
-                "    mode a {\n        adc(0) | stdout()\n    }\n",
-                "    mode b {\n        adc(0) | stdout()\n    }\n",
+                "    mode a {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode b {\n        constant(0.0) | stdout()\n    }\n",
                 "    switch(ctrl, a, b) default a\n",
                 "}",
             ),

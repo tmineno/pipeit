@@ -17,9 +17,9 @@ const bp_coeff = [0.05, -0.1, 0.3, -0.1, 0.05]
 
 param agc_gain = 1.0
 
-# Reusable front-end: ADC → FFT → complex-to-real
-define frontend(ch, n) {
-    adc(ch) | fft(n) | c2r()
+# Reusable front-end: constant source → FFT → complex-to-real
+define frontend(n) {
+    constant(0.0) | fft(n) | c2r()
 }
 
 # ── Fast capture: 10 MHz ─────────────────────────────────────────────
@@ -34,12 +34,12 @@ define frontend(ch, n) {
 
 clock 10MHz capture {
     # ch0: fork after fft (cfloat) for spectrum monitor, then c2r for float path
-    adc(0) | fft(256) | :spec0 | c2r() | fir(lp_coeff) | add(:fb) | mul($agc_gain) | :agc | ?agc_out -> filtered
+    constant(0.0) | fft(256) | :spec0 | c2r() | fir(lp_coeff) | add(:fb) | mul($agc_gain) | :agc | ?agc_out -> filtered
     :agc | delay(1, 0.0) | :fb
     :spec0 | mag() | stdout()
 
     # ch1: frontend outputs float, both fork paths use float FIR
-    frontend(1, 256) | :raw1 | fir(bp_coeff) | ?bp_out -> narrow
+    frontend(256) | :raw1 | fir(bp_coeff) | ?bp_out -> narrow
     :raw1 | fir(lp_coeff) -> wideband
 }
 
@@ -62,15 +62,15 @@ clock 1kHz analysis {
 
 clock 10MHz monitor {
     control {
-        adc(0) | correlate() | detect() -> ctl
+        constant(0.0) | correlate() | detect() -> ctl
     }
 
     mode sync {
-        adc(0) | fir(lp_coeff) | ?sync_probe -> sync_buf
+        constant(0.0) | fir(lp_coeff) | ?sync_probe -> sync_buf
     }
 
     mode data {
-        adc(0) | fft(256) | c2r() | fir(bp_coeff) | ?data_probe -> data_buf
+        constant(0.0) | fft(256) | c2r() | fir(bp_coeff) | ?data_probe -> data_buf
     }
 
     switch(ctl, sync, data) default sync

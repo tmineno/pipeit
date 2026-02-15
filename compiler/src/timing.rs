@@ -248,12 +248,17 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_registry() -> Registry {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .join("examples/actors.h");
+            .to_path_buf();
+        let std_actors = root.join("runtime/libpipit/include/std_actors.h");
+        let example_actors = root.join("examples/example_actors.h");
         let mut reg = Registry::new();
-        reg.load_header(&path).expect("failed to load actors.h");
+        reg.load_header(&std_actors)
+            .expect("failed to load std_actors.h");
+        reg.load_header(&example_actors)
+            .expect("failed to load example_actors.h");
         reg
     }
 
@@ -352,7 +357,7 @@ mod tests {
     #[test]
     fn spec_first_line_is_gantt() {
         let reg = test_registry();
-        let chart = build_and_emit("clock 1kHz t {\n    adc(0) | stdout()\n}", &reg);
+        let chart = build_and_emit("clock 1kHz t {\n    constant(0.0) | stdout()\n}", &reg);
         let first_line = chart.lines().next().unwrap();
         assert_eq!(first_line, "gantt", "first line must be 'gantt'");
     }
@@ -360,7 +365,7 @@ mod tests {
     #[test]
     fn spec_dateformat_x_present() {
         let reg = test_registry();
-        let chart = build_and_emit("clock 1kHz t {\n    adc(0) | stdout()\n}", &reg);
+        let chart = build_and_emit("clock 1kHz t {\n    constant(0.0) | stdout()\n}", &reg);
         assert!(
             chart.lines().any(|l| l.trim() == "dateFormat x"),
             "must contain 'dateFormat x' declaration"
@@ -370,7 +375,7 @@ mod tests {
     #[test]
     fn spec_title_present() {
         let reg = test_registry();
-        let chart = build_and_emit("clock 1kHz t {\n    adc(0) | stdout()\n}", &reg);
+        let chart = build_and_emit("clock 1kHz t {\n    constant(0.0) | stdout()\n}", &reg);
         assert!(
             chart.lines().any(|l| l.trim().starts_with("title ")),
             "must contain a 'title' declaration"
@@ -380,7 +385,7 @@ mod tests {
     #[test]
     fn spec_axis_format_numeric() {
         let reg = test_registry();
-        let chart = build_and_emit("clock 1kHz t {\n    adc(0) | stdout()\n}", &reg);
+        let chart = build_and_emit("clock 1kHz t {\n    constant(0.0) | stdout()\n}", &reg);
         assert!(
             chart.lines().any(|l| l.trim() == "axisFormat %Q"),
             "must contain 'axisFormat %Q' for numeric cycle axis"
@@ -390,7 +395,7 @@ mod tests {
     #[test]
     fn spec_section_header_syntax() {
         let reg = test_registry();
-        let chart = build_and_emit("clock 1kHz t {\n    adc(0) | stdout()\n}", &reg);
+        let chart = build_and_emit("clock 1kHz t {\n    constant(0.0) | stdout()\n}", &reg);
         let sections: Vec<&str> = chart
             .lines()
             .filter(|l| l.trim().starts_with("section "))
@@ -417,7 +422,7 @@ mod tests {
         // Our format: "<label> x<count> :<id>, <start>, <end>"
         let reg = test_registry();
         let chart = build_and_emit(
-            "clock 1kHz t {\n    adc(0) | fft(256) | c2r() | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | c2r() | stdout()\n}",
             &reg,
         );
         let task_lines: Vec<&str> = chart
@@ -474,7 +479,7 @@ mod tests {
         let reg = test_registry();
         // Test with fork (was previously `:name`), probe, buffer read/write
         let chart = build_and_emit(
-            "clock 1kHz t {\n    adc(0) | :raw | stdout()\n    :raw | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | :raw | stdout()\n    :raw | stdout()\n}",
             &reg,
         );
         let task_lines: Vec<&str> = chart
@@ -495,7 +500,7 @@ mod tests {
     fn spec_task_ids_unique() {
         let reg = test_registry();
         let chart = build_and_emit(
-            "clock 1kHz t {\n    adc(0) | fft(256) | c2r() | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | c2r() | stdout()\n}",
             &reg,
         );
         let ids: Vec<String> = chart
@@ -515,7 +520,7 @@ mod tests {
     fn spec_start_end_non_negative_integers() {
         let reg = test_registry();
         let chart = build_and_emit(
-            "clock 1kHz t {\n    adc(0) | fft(256) | c2r() | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | c2r() | stdout()\n}",
             &reg,
         );
         for line in chart.lines() {
@@ -538,7 +543,7 @@ mod tests {
     #[test]
     fn asap_first_node_starts_at_zero() {
         let reg = test_registry();
-        let chart = build_and_emit("clock 1kHz t {\n    adc(0) | stdout()\n}", &reg);
+        let chart = build_and_emit("clock 1kHz t {\n    constant(0.0) | stdout()\n}", &reg);
         let first_task = chart.lines().find_map(parse_task_line).unwrap();
         assert_eq!(first_task.2, 0, "first node must start at time 0");
     }
@@ -547,7 +552,7 @@ mod tests {
     fn asap_dependent_starts_after_predecessor() {
         // In a linear chain adc | stdout, stdout starts after adc ends
         let reg = test_registry();
-        let chart = build_and_emit("clock 1kHz t {\n    adc(0) | stdout()\n}", &reg);
+        let chart = build_and_emit("clock 1kHz t {\n    constant(0.0) | stdout()\n}", &reg);
         let tasks: Vec<_> = chart.lines().filter_map(parse_task_line).collect();
         assert_eq!(tasks.len(), 2);
         let adc = &tasks[0];
@@ -568,7 +573,7 @@ mod tests {
             concat!(
                 "const lp_coeff = [0.25, 0.5, 0.25]\n",
                 "clock 1kHz analyzer {\n",
-                "    adc(0) | :sig | fir(lp_coeff) | stdout()\n",
+                "    constant(0.0) | :sig | fir(lp_coeff) | stdout()\n",
                 "    :sig | fft(64) | mag() | stdout()\n",
                 "}",
             ),
@@ -598,7 +603,7 @@ mod tests {
         // adc | fft | c2r | stdout — strictly sequential
         let reg = test_registry();
         let chart = build_and_emit(
-            "clock 1kHz t {\n    adc(0) | fft(256) | c2r() | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | c2r() | stdout()\n}",
             &reg,
         );
         let tasks: Vec<_> = chart.lines().filter_map(parse_task_line).collect();
@@ -624,7 +629,7 @@ mod tests {
         // and their downstream actors start after their respective predecessors
         let reg = test_registry();
         let chart = build_and_emit(
-            "clock 1kHz t {\n    adc(0) | :raw | stdout()\n    :raw | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | :raw | stdout()\n    :raw | stdout()\n}",
             &reg,
         );
         let tasks: Vec<_> = chart.lines().filter_map(parse_task_line).collect();
@@ -657,7 +662,10 @@ mod tests {
     #[test]
     fn probes_omitted_from_output() {
         let reg = test_registry();
-        let chart = build_and_emit("clock 1kHz t {\n    adc(0) | ?mon | stdout()\n}", &reg);
+        let chart = build_and_emit(
+            "clock 1kHz t {\n    constant(0.0) | ?mon | stdout()\n}",
+            &reg,
+        );
         let task_labels: Vec<String> = chart
             .lines()
             .filter_map(|l| parse_task_line(l).map(|(label, _, _, _)| label))
@@ -673,7 +681,10 @@ mod tests {
     fn probe_does_not_affect_timing() {
         // adc | ?mon | stdout — probe is zero-duration, stdout starts at adc's end
         let reg = test_registry();
-        let chart = build_and_emit("clock 1kHz t {\n    adc(0) | ?mon | stdout()\n}", &reg);
+        let chart = build_and_emit(
+            "clock 1kHz t {\n    constant(0.0) | ?mon | stdout()\n}",
+            &reg,
+        );
         let tasks: Vec<_> = chart.lines().filter_map(parse_task_line).collect();
         assert_eq!(tasks.len(), 2, "should have only adc and stdout (no probe)");
         let adc = &tasks[0];
@@ -692,7 +703,7 @@ mod tests {
     fn fork_label_mermaid_safe() {
         let reg = test_registry();
         let chart = build_and_emit(
-            "clock 1kHz t {\n    adc(0) | :raw | stdout()\n    :raw | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | :raw | stdout()\n    :raw | stdout()\n}",
             &reg,
         );
         assert!(
@@ -706,7 +717,7 @@ mod tests {
         let reg = test_registry();
         let chart = build_and_emit(
             concat!(
-                "clock 1kHz a {\n    adc(0) -> sig\n}\n",
+                "clock 1kHz a {\n    constant(0.0) -> sig\n}\n",
                 "clock 1kHz b {\n    @sig | stdout()\n}",
             ),
             &reg,
@@ -731,9 +742,9 @@ mod tests {
         let chart = build_and_emit(
             concat!(
                 "clock 1kHz t {\n",
-                "    control {\n        adc(0) | detect() -> ctrl\n    }\n",
-                "    mode sync {\n        adc(0) | stdout()\n    }\n",
-                "    mode data {\n        adc(0) | stdout()\n    }\n",
+                "    control {\n        constant(0.0) | detect() -> ctrl\n    }\n",
+                "    mode sync {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode data {\n        constant(0.0) | stdout()\n    }\n",
                 "    switch(ctrl, sync, data) default sync\n",
                 "}",
             ),
@@ -760,9 +771,9 @@ mod tests {
         let chart = build_and_emit(
             concat!(
                 "clock 1kHz t {\n",
-                "    control {\n        adc(0) | detect() -> ctrl\n    }\n",
-                "    mode sync {\n        adc(0) | stdout()\n    }\n",
-                "    mode data {\n        adc(0) | stdout()\n    }\n",
+                "    control {\n        constant(0.0) | detect() -> ctrl\n    }\n",
+                "    mode sync {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode data {\n        constant(0.0) | stdout()\n    }\n",
                 "    switch(ctrl, sync, data) default sync\n",
                 "}",
             ),
@@ -792,7 +803,7 @@ mod tests {
     #[test]
     fn freq_mhz_formatting() {
         let reg = test_registry();
-        let chart = build_and_emit("clock 10MHz t {\n    adc(0) | stdout()\n}", &reg);
+        let chart = build_and_emit("clock 10MHz t {\n    constant(0.0) | stdout()\n}", &reg);
         assert!(chart.contains("10MHz"), "should format as MHz");
         assert!(chart.contains("K=10"), "K factor should be 10 for 10MHz");
     }
@@ -814,8 +825,8 @@ mod tests {
     fn deterministic_output() {
         let reg = test_registry();
         let source = concat!(
-            "clock 1kHz a {\n    adc(0) | stdout()\n}\n",
-            "clock 1kHz b {\n    adc(0) | stdout()\n}\n",
+            "clock 1kHz a {\n    constant(0.0) | stdout()\n}\n",
+            "clock 1kHz b {\n    constant(0.0) | stdout()\n}\n",
         );
         let chart1 = build_and_emit(source, &reg);
         let chart2 = build_and_emit(source, &reg);
@@ -838,7 +849,7 @@ mod tests {
             concat!(
                 "param alpha = 0.5\n",
                 "clock 1kHz t {\n",
-                "    adc(0) | add(:fb) | mul($alpha) | :out | stdout()\n",
+                "    constant(0.0) | add(:fb) | mul($alpha) | :out | stdout()\n",
                 "    :out | delay(1, 0.0) | :fb\n",
                 "}",
             ),

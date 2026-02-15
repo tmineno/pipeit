@@ -11,17 +11,17 @@ clock 10MHz receiver {
     # control subgraph: runs continuously across all modes
     # correlate -> detect supplies ctrl value
     control {
-        adc(0) | correlate() | detect() -> ctrl
+        constant(0.0) | correlate() | detect() -> ctrl
     }
 
     # mode 0: sync mode — acquire frame synchronization
     mode sync {
-        adc(0) | fir(sync_coeff) | ?sync_out -> sync_result
+        constant(0.0) | fir(sync_coeff) | ?sync_out -> sync_result
     }
 
     # mode 1: data mode — OFDM demodulation
     mode data {
-        adc(0) | fft(256) | c2r() | fir(data_coeff) | ?data_out -> payload
+        constant(0.0) | fft(256) | c2r() | fir(data_coeff) | ?data_out -> payload
     }
 
     # ctrl=0 -> sync, ctrl=1 -> data

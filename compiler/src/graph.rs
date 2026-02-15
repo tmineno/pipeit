@@ -824,12 +824,17 @@ mod tests {
     }
 
     fn test_registry() -> Registry {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .join("examples/actors.h");
+            .to_path_buf();
+        let std_actors = root.join("runtime/libpipit/include/std_actors.h");
+        let example_actors = root.join("examples/example_actors.h");
         let mut reg = Registry::new();
-        reg.load_header(&path).expect("failed to load actors.h");
+        reg.load_header(&std_actors)
+            .expect("failed to load std_actors.h");
+        reg.load_header(&example_actors)
+            .expect("failed to load example_actors.h");
         reg
     }
 
@@ -849,7 +854,7 @@ mod tests {
     #[test]
     fn single_actor_pipeline() {
         let reg = test_registry();
-        let graph = build_ok("clock 1kHz t {\n    adc(0) | fft(256)\n}", &reg);
+        let graph = build_ok("clock 1kHz t {\n    constant(0.0) | fft(256)\n}", &reg);
         let sub = get_pipeline_subgraph(&graph, "t");
         assert_eq!(sub.nodes.len(), 2);
         assert_eq!(sub.edges.len(), 1);
@@ -858,7 +863,10 @@ mod tests {
     #[test]
     fn three_actor_chain() {
         let reg = test_registry();
-        let graph = build_ok("clock 1kHz t {\n    adc(0) | fft(256) | mag()\n}", &reg);
+        let graph = build_ok(
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | mag()\n}",
+            &reg,
+        );
         let sub = get_pipeline_subgraph(&graph, "t");
         assert_eq!(sub.nodes.len(), 3);
         assert_eq!(sub.edges.len(), 2);
@@ -867,7 +875,7 @@ mod tests {
     #[test]
     fn source_only_pipeline() {
         let reg = test_registry();
-        let graph = build_ok("clock 1kHz t {\n    adc(0)\n}", &reg);
+        let graph = build_ok("clock 1kHz t {\n    constant(0.0)\n}", &reg);
         let sub = get_pipeline_subgraph(&graph, "t");
         assert_eq!(sub.nodes.len(), 1);
         assert_eq!(sub.edges.len(), 0);
@@ -879,7 +887,7 @@ mod tests {
     fn tap_creates_fork_node() {
         let reg = test_registry();
         let graph = build_ok(
-            "clock 1kHz t {\n    adc(0) | :raw | stdout()\n    :raw | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | :raw | stdout()\n    :raw | stdout()\n}",
             &reg,
         );
         let sub = get_pipeline_subgraph(&graph, "t");
@@ -891,7 +899,7 @@ mod tests {
     fn tap_consumed_creates_output_edge() {
         let reg = test_registry();
         let graph = build_ok(
-            "clock 1kHz t {\n    adc(0) | :raw | stdout()\n    :raw | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | :raw | stdout()\n    :raw | stdout()\n}",
             &reg,
         );
         let sub = get_pipeline_subgraph(&graph, "t");
@@ -913,7 +921,7 @@ mod tests {
         let graph = build_ok(
             concat!(
                 "clock 1kHz t {\n",
-                "    adc(0) | :raw | stdout()\n",
+                "    constant(0.0) | :raw | stdout()\n",
                 "    :raw | mag() | stdout()\n",
                 "    :raw | stdout()\n",
                 "}"
@@ -936,7 +944,7 @@ mod tests {
     #[test]
     fn buffer_write_creates_node() {
         let reg = test_registry();
-        let graph = build_ok("clock 1kHz t {\n    adc(0) -> sig\n}", &reg);
+        let graph = build_ok("clock 1kHz t {\n    constant(0.0) -> sig\n}", &reg);
         let sub = get_pipeline_subgraph(&graph, "t");
         let writes = count_nodes_of_kind(
             sub,
@@ -949,7 +957,7 @@ mod tests {
     fn buffer_read_creates_node() {
         let reg = test_registry();
         let graph = build_ok(
-            "clock 1kHz a {\n    adc(0) -> sig\n}\nclock 1kHz b {\n    @sig | stdout()\n}",
+            "clock 1kHz a {\n    constant(0.0) -> sig\n}\nclock 1kHz b {\n    @sig | stdout()\n}",
             &reg,
         );
         let sub = get_pipeline_subgraph(&graph, "b");
@@ -964,7 +972,7 @@ mod tests {
     fn inter_task_edge_linked() {
         let reg = test_registry();
         let graph = build_ok(
-            "clock 1kHz a {\n    adc(0) -> sig\n}\nclock 1kHz b {\n    @sig | stdout()\n}",
+            "clock 1kHz a {\n    constant(0.0) -> sig\n}\nclock 1kHz b {\n    @sig | stdout()\n}",
             &reg,
         );
         assert_eq!(graph.inter_task_edges.len(), 1);
@@ -979,7 +987,10 @@ mod tests {
     #[test]
     fn probe_creates_passthrough_node() {
         let reg = test_registry();
-        let graph = build_ok("clock 1kHz t {\n    adc(0) | ?mon | stdout()\n}", &reg);
+        let graph = build_ok(
+            "clock 1kHz t {\n    constant(0.0) | ?mon | stdout()\n}",
+            &reg,
+        );
         let sub = get_pipeline_subgraph(&graph, "t");
         let probes = count_nodes_of_kind(
             sub,
@@ -997,7 +1008,7 @@ mod tests {
     fn define_inlined_as_actors() {
         let reg = test_registry();
         let graph = build_ok(
-            "define foo() {\n    adc(0) | mag()\n}\nclock 1kHz t {\n    foo() | stdout()\n}",
+            "define foo() {\n    constant(0.0) | mag()\n}\nclock 1kHz t {\n    foo() | stdout()\n}",
             &reg,
         );
         let sub = get_pipeline_subgraph(&graph, "t");
@@ -1016,7 +1027,7 @@ mod tests {
                 _ => unreachable!(),
             })
             .collect();
-        assert!(names.contains(&"adc"));
+        assert!(names.contains(&"constant"));
         assert!(names.contains(&"mag"));
         assert!(names.contains(&"stdout"));
     }
@@ -1025,7 +1036,7 @@ mod tests {
     fn define_with_args_substituted() {
         let reg = test_registry();
         let graph = build_ok(
-            "define foo(n) {\n    fft(n)\n}\nclock 1kHz t {\n    adc(0) | foo(256)\n}",
+            "define foo(n) {\n    fft(n)\n}\nclock 1kHz t {\n    constant(0.0) | foo(256)\n}",
             &reg,
         );
         let sub = get_pipeline_subgraph(&graph, "t");
@@ -1055,7 +1066,7 @@ mod tests {
             concat!(
                 "define inner() {\n    mag()\n}\n",
                 "define outer() {\n    inner() | stdout()\n}\n",
-                "clock 1kHz t {\n    adc(0) | outer()\n}",
+                "clock 1kHz t {\n    constant(0.0) | outer()\n}",
             ),
             &reg,
         );
@@ -1111,9 +1122,9 @@ mod tests {
         let graph = build_ok(
             concat!(
                 "clock 1kHz t {\n",
-                "    control {\n        adc(0) | detect() -> ctrl\n    }\n",
-                "    mode sync {\n        adc(0) | stdout()\n    }\n",
-                "    mode data {\n        adc(0) | stdout()\n    }\n",
+                "    control {\n        constant(0.0) | detect() -> ctrl\n    }\n",
+                "    mode sync {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode data {\n        constant(0.0) | stdout()\n    }\n",
                 "    switch(ctrl, sync, data) default sync\n",
                 "}",
             ),
@@ -1135,9 +1146,9 @@ mod tests {
         let graph = build_ok(
             concat!(
                 "clock 1kHz t {\n",
-                "    control {\n        adc(0) | detect() -> ctrl\n    }\n",
-                "    mode sync {\n        adc(0) | stdout()\n    }\n",
-                "    mode data {\n        adc(0) | fft(256) | stdout()\n    }\n",
+                "    control {\n        constant(0.0) | detect() -> ctrl\n    }\n",
+                "    mode sync {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode data {\n        constant(0.0) | fft(256) | stdout()\n    }\n",
                 "    switch(ctrl, sync, data) default sync\n",
                 "}",
             ),
@@ -1161,9 +1172,9 @@ mod tests {
         let graph = build_ok(
             concat!(
                 "clock 1kHz t {\n",
-                "    control {\n        adc(0) | detect() -> ctrl\n    }\n",
-                "    mode a {\n        adc(0) | stdout()\n    }\n",
-                "    mode b {\n        adc(0) | stdout()\n    }\n",
+                "    control {\n        constant(0.0) | detect() -> ctrl\n    }\n",
+                "    mode a {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode b {\n        constant(0.0) | stdout()\n    }\n",
                 "    switch(ctrl, a, b) default a\n",
                 "}",
             ),
@@ -1180,7 +1191,10 @@ mod tests {
     #[test]
     fn no_cycle_linear() {
         let reg = test_registry();
-        let graph = build_ok("clock 1kHz t {\n    adc(0) | fft(256) | stdout()\n}", &reg);
+        let graph = build_ok(
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | stdout()\n}",
+            &reg,
+        );
         assert!(graph.cycles.is_empty());
     }
 
@@ -1357,7 +1371,7 @@ mod tests {
         let graph = build_ok(
             concat!(
                 "define mid() {\n    fft(256) | mag()\n}\n",
-                "clock 1kHz t {\n    adc(0) | mid() | stdout()\n}",
+                "clock 1kHz t {\n    constant(0.0) | mid() | stdout()\n}",
             ),
             &reg,
         );
@@ -1371,7 +1385,7 @@ mod tests {
         let adc = sub
             .nodes
             .iter()
-            .find(|n| matches!(&n.kind, NodeKind::Actor { name, .. } if name == "adc"))
+            .find(|n| matches!(&n.kind, NodeKind::Actor { name, .. } if name == "constant"))
             .unwrap();
         let fft = sub
             .nodes
@@ -1422,7 +1436,7 @@ mod tests {
         let graph = build_ok(
             concat!(
                 "clock 1kHz t {\n",
-                "    adc(0) | add(:fb) | :out | stdout()\n",
+                "    constant(0.0) | add(:fb) | :out | stdout()\n",
                 "    :out | delay(1, 0.0) | :fb\n",
                 "}",
             ),
@@ -1466,9 +1480,9 @@ mod tests {
         let graph = build_ok(
             concat!(
                 "clock 1kHz t {\n",
-                "    adc(0) | add(:fb) | :out | stdout()\n",
+                "    constant(0.0) | add(:fb) | :out | stdout()\n",
                 "    :out | delay(1, 0.0) | :fb\n",
-                "    adc(0) | :sig | add(:fwd) | stdout()\n",
+                "    constant(0.0) | :sig | add(:fwd) | stdout()\n",
                 "    :sig | delay(1, 0.0) | :fwd\n",
                 "}",
             ),
@@ -1517,8 +1531,8 @@ mod tests {
         let graph = build_ok(
             concat!(
                 "clock 1kHz t {\n",
-                "    adc(0) | add(:fb1, :fw2) | :out | stdout()\n",
-                "    adc(0) | delay(1, 0.0) | :fw2\n",
+                "    constant(0.0) | add(:fb1, :fw2) | :out | stdout()\n",
+                "    constant(0.0) | delay(1, 0.0) | :fw2\n",
                 "    :out | delay(1, 0.0) | :fb1\n",
                 "}",
             ),
@@ -1552,7 +1566,7 @@ mod tests {
         let graph = build_ok(
             concat!(
                 "define proc() {\n",
-                "    adc(0) | :sig | mag() | stdout()\n",
+                "    constant(0.0) | :sig | mag() | stdout()\n",
                 "    :sig | stdout()\n",
                 "}\n",
                 "clock 1kHz t {\n    proc()\n}",

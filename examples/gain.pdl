@@ -10,5 +10,5 @@ define amplify() {
 }
 
 clock 48kHz audio {
-    adc(0) | amplify() | stdout()
+    constant(0.0) | amplify() | stdout()
 }

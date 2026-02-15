@@ -6,6 +6,6 @@
 const lp_coeff = [0.25, 0.5, 0.25]
 
 clock 1kHz analyzer {
-    adc(0) | :sig | fir(lp_coeff) | stdout()
+    constant(0.0) | :sig | fir(lp_coeff) | stdout()
     :sig | fft(64) | mag() | stdout()
 }

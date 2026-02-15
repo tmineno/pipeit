@@ -839,14 +839,19 @@ mod tests {
             .collect()
     }
 
-    /// Build a test registry from examples/actors.h.
+    /// Build a test registry from runtime/libpipit/include/std_actors.h.
     fn test_registry() -> Registry {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .join("examples/actors.h");
+            .to_path_buf();
+        let std_actors = root.join("runtime/libpipit/include/std_actors.h");
+        let example_actors = root.join("examples/example_actors.h");
         let mut reg = Registry::new();
-        reg.load_header(&path).expect("failed to load actors.h");
+        reg.load_header(&std_actors)
+            .expect("failed to load std_actors.h");
+        reg.load_header(&example_actors)
+            .expect("failed to load example_actors.h");
         reg
     }
 
@@ -868,7 +873,7 @@ mod tests {
     #[test]
     fn global_defines_collected() {
         let reg = test_registry();
-        let r = resolve_ok_with("define foo(n) {\n    adc(n)\n}", &reg);
+        let r = resolve_ok_with("define foo(n) {\n    constant(n)\n}", &reg);
         assert!(r.defines.contains_key("foo"));
         assert_eq!(r.defines["foo"].param_names, vec!["n"]);
     }
@@ -876,7 +881,7 @@ mod tests {
     #[test]
     fn global_tasks_collected() {
         let reg = test_registry();
-        let r = resolve_ok_with("clock 1kHz t {\n    adc(0)\n}", &reg);
+        let r = resolve_ok_with("clock 1kHz t {\n    constant(0.0)\n}", &reg);
         assert!(r.tasks.contains_key("t"));
     }
 
@@ -902,7 +907,7 @@ mod tests {
     fn duplicate_task_error() {
         let reg = test_registry();
         let result = resolve_source(
-            "clock 1kHz t {\n    adc(0)\n}\nclock 2kHz t {\n    adc(0)\n}",
+            "clock 1kHz t {\n    constant(0.0)\n}\nclock 2kHz t {\n    constant(0.0)\n}",
             &reg,
         );
         let errs = errors(&result);
@@ -924,7 +929,7 @@ mod tests {
     #[test]
     fn actor_resolved_from_registry() {
         let reg = test_registry();
-        let r = resolve_ok_with("clock 1kHz t {\n    adc(0)\n}", &reg);
+        let r = resolve_ok_with("clock 1kHz t {\n    constant(0.0)\n}", &reg);
         assert!(r
             .call_resolutions
             .values()
@@ -946,7 +951,7 @@ mod tests {
     fn define_call_resolved() {
         let reg = test_registry();
         let r = resolve_ok_with(
-            "define foo() {\n    adc(0)\n}\nclock 1kHz t {\n    foo()\n}",
+            "define foo() {\n    constant(0.0)\n}\nclock 1kHz t {\n    foo()\n}",
             &reg,
         );
         assert!(r
@@ -959,7 +964,7 @@ mod tests {
     fn define_shadows_actor_warning() {
         let reg = test_registry();
         let result = resolve_source(
-            "define adc() {\n    mag()\n}\nclock 1kHz t {\n    adc()\n}",
+            "define constant() {\n    mag()\n}\nclock 1kHz t {\n    constant()\n}",
             &reg,
         );
         // No errors, but should have a warning
@@ -1021,7 +1026,7 @@ mod tests {
     fn buffer_write_and_read() {
         let reg = test_registry();
         let r = resolve_ok_with(
-            "clock 1kHz a {\n    adc(0) -> sig\n}\nclock 1kHz b {\n    @sig | stdout()\n}",
+            "clock 1kHz a {\n    constant(0.0) -> sig\n}\nclock 1kHz b {\n    @sig | stdout()\n}",
             &reg,
         );
         assert!(r.buffers.contains_key("sig"));
@@ -1043,7 +1048,7 @@ mod tests {
     fn multiple_writers_error() {
         let reg = test_registry();
         let result = resolve_source(
-            "clock 1kHz a {\n    adc(0) -> sig\n}\nclock 1kHz b {\n    adc(0) -> sig\n}",
+            "clock 1kHz a {\n    constant(0.0) -> sig\n}\nclock 1kHz b {\n    constant(0.0) -> sig\n}",
             &reg,
         );
         let errs = errors(&result);
@@ -1057,7 +1062,7 @@ mod tests {
     fn tap_declare_and_consume() {
         let reg = test_registry();
         let _ = resolve_ok_with(
-            "clock 1kHz t {\n    adc(0) | :raw | stdout()\n    :raw | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | :raw | stdout()\n    :raw | stdout()\n}",
             &reg,
         );
     }
@@ -1075,7 +1080,7 @@ mod tests {
     fn tap_duplicate_error() {
         let reg = test_registry();
         let result = resolve_source(
-            "clock 1kHz t {\n    adc(0) | :raw | stdout()\n    adc(0) | :raw | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | :raw | stdout()\n    constant(0.0) | :raw | stdout()\n}",
             &reg,
         );
         let errs = errors(&result);
@@ -1090,7 +1095,10 @@ mod tests {
     #[test]
     fn tap_unused_error() {
         let reg = test_registry();
-        let result = resolve_source("clock 1kHz t {\n    adc(0) | :orphan | stdout()\n}", &reg);
+        let result = resolve_source(
+            "clock 1kHz t {\n    constant(0.0) | :orphan | stdout()\n}",
+            &reg,
+        );
         let errs = errors(&result);
         assert_eq!(errs.len(), 1);
         assert!(errs[0].message.contains("declared but never consumed"));
@@ -1105,7 +1113,7 @@ mod tests {
         let _ = resolve_ok_with(
             concat!(
                 "clock 1kHz t {\n",
-                "    adc(0) | add(:fb) | :out | stdout()\n",
+                "    constant(0.0) | add(:fb) | :out | stdout()\n",
                 "    :out | delay(1, 0.0) | :fb\n",
                 "}",
             ),
@@ -1134,8 +1142,8 @@ mod tests {
         let result = resolve_source(
             concat!(
                 "clock 1kHz t {\n",
-                "    adc(0) | add(:fb) | stdout()\n",
-                "    adc(0) | delay(1, 0.0) | :fb\n",
+                "    constant(0.0) | add(:fb) | stdout()\n",
+                "    constant(0.0) | delay(1, 0.0) | :fb\n",
                 "}",
             ),
             &reg,
@@ -1158,9 +1166,9 @@ mod tests {
         let _ = resolve_ok_with(
             concat!(
                 "clock 1kHz t {\n",
-                "    control {\n        adc(0) | detect() -> ctrl\n    }\n",
-                "    mode sync {\n        adc(0) | stdout()\n    }\n",
-                "    mode data {\n        adc(0) | stdout()\n    }\n",
+                "    control {\n        constant(0.0) | detect() -> ctrl\n    }\n",
+                "    mode sync {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode data {\n        constant(0.0) | stdout()\n    }\n",
                 "    switch(ctrl, sync, data) default sync\n",
                 "}"
             ),
@@ -1174,8 +1182,8 @@ mod tests {
         let result = resolve_source(
             concat!(
                 "clock 1kHz t {\n",
-                "    control {\n        adc(0) | detect() -> ctrl\n    }\n",
-                "    mode sync {\n        adc(0) | stdout()\n    }\n",
+                "    control {\n        constant(0.0) | detect() -> ctrl\n    }\n",
+                "    mode sync {\n        constant(0.0) | stdout()\n    }\n",
                 "    switch(ctrl, sync, missing) default sync\n",
                 "}"
             ),
@@ -1194,9 +1202,9 @@ mod tests {
             concat!(
                 "param sel = 0\n",
                 "clock 1kHz t {\n",
-                "    control {\n        adc(0) | stdout()\n    }\n",
-                "    mode a {\n        adc(0) | stdout()\n    }\n",
-                "    mode b {\n        adc(0) | stdout()\n    }\n",
+                "    control {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode a {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode b {\n        constant(0.0) | stdout()\n    }\n",
                 "    switch($sel, a, b) default a\n",
                 "}"
             ),
@@ -1210,9 +1218,9 @@ mod tests {
         let result = resolve_source(
             concat!(
                 "clock 1kHz t {\n",
-                "    control {\n        adc(0) | stdout()\n    }\n",
-                "    mode a {\n        adc(0) | stdout()\n    }\n",
-                "    mode b {\n        adc(0) | stdout()\n    }\n",
+                "    control {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode a {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode b {\n        constant(0.0) | stdout()\n    }\n",
                 "    switch($missing, a, b) default a\n",
                 "}"
             ),
@@ -1233,10 +1241,10 @@ mod tests {
         let result = resolve_source(
             concat!(
                 "clock 1kHz t {\n",
-                "    control {\n        adc(0) | detect() -> ctrl\n    }\n",
-                "    mode a {\n        adc(0) | stdout()\n    }\n",
-                "    mode b {\n        adc(0) | stdout()\n    }\n",
-                "    mode c {\n        adc(0) | stdout()\n    }\n",
+                "    control {\n        constant(0.0) | detect() -> ctrl\n    }\n",
+                "    mode a {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode b {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode c {\n        constant(0.0) | stdout()\n    }\n",
                 "    switch(ctrl, a, b) default a\n",
                 "}"
             ),
@@ -1257,9 +1265,9 @@ mod tests {
         let result = resolve_source(
             concat!(
                 "clock 1kHz t {\n",
-                "    control {\n        adc(0) | detect() -> ctrl\n    }\n",
-                "    mode a {\n        adc(0) | stdout()\n    }\n",
-                "    mode b {\n        adc(0) | stdout()\n    }\n",
+                "    control {\n        constant(0.0) | detect() -> ctrl\n    }\n",
+                "    mode a {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode b {\n        constant(0.0) | stdout()\n    }\n",
                 "    switch(ctrl, a, b, a) default a\n",
                 "}"
             ),

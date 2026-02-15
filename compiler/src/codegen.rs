@@ -1736,12 +1736,17 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_registry() -> Registry {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .join("examples/actors.h");
+            .to_path_buf();
+        let std_actors = root.join("runtime/libpipit/include/std_actors.h");
+        let example_actors = root.join("examples/example_actors.h");
         let mut reg = Registry::new();
-        reg.load_header(&path).expect("failed to load actors.h");
+        reg.load_header(&std_actors)
+            .expect("failed to load std_actors.h");
+        reg.load_header(&example_actors)
+            .expect("failed to load example_actors.h");
         reg
     }
 
@@ -1836,7 +1841,7 @@ mod tests {
     fn const_array_emission() {
         let reg = test_registry();
         let cpp = codegen_ok(
-            "const coeff = [0.1, 0.2, 0.4]\nclock 1kHz t { adc(0) | fir(coeff) | stdout() }",
+            "const coeff = [0.1, 0.2, 0.4]\nclock 1kHz t { constant(0.0) | fir(coeff) | stdout() }",
             &reg,
         );
         assert!(
@@ -1850,7 +1855,7 @@ mod tests {
     fn const_scalar_emission() {
         let reg = test_registry();
         let cpp = codegen_ok(
-            "const fft_size = 256\nclock 1kHz t { adc(0) | fft(fft_size) | c2r() | stdout() }",
+            "const fft_size = 256\nclock 1kHz t { constant(0.0) | fft(fft_size) | c2r() | stdout() }",
             &reg,
         );
         assert!(
@@ -1866,7 +1871,7 @@ mod tests {
     fn param_storage_emission() {
         let reg = test_registry();
         let cpp = codegen_ok(
-            "param gain = 2.5\nclock 1kHz t { adc(0) | mul($gain) | stdout() }",
+            "param gain = 2.5\nclock 1kHz t { constant(0.0) | mul($gain) | stdout() }",
             &reg,
         );
         assert!(
@@ -1881,8 +1886,12 @@ mod tests {
     #[test]
     fn source_actor_firing() {
         let reg = test_registry();
-        let cpp = codegen_ok("clock 1kHz t { adc(0) | stdout() }", &reg);
-        assert!(cpp.contains("Actor_adc"), "should fire adc actor: {}", cpp);
+        let cpp = codegen_ok("clock 1kHz t { constant(0.0) | stdout() }", &reg);
+        assert!(
+            cpp.contains("Actor_constant"),
+            "should fire constant actor: {}",
+            cpp
+        );
         assert!(
             cpp.contains("Actor_stdout"),
             "should fire stdout actor: {}",
@@ -1894,7 +1903,7 @@ mod tests {
     fn transform_actor_firing() {
         let reg = test_registry();
         let cpp = codegen_ok(
-            "clock 1kHz t { adc(0) | fft(256) | c2r() | stdout() }",
+            "clock 1kHz t { constant(0.0) | fft(256) | c2r() | stdout() }",
             &reg,
         );
         assert!(cpp.contains("Actor_fft"), "should fire fft actor: {}", cpp);
@@ -1906,7 +1915,7 @@ mod tests {
     #[test]
     fn task_function_structure() {
         let reg = test_registry();
-        let cpp = codegen_ok("clock 1kHz t { adc(0) | stdout() }", &reg);
+        let cpp = codegen_ok("clock 1kHz t { constant(0.0) | stdout() }", &reg);
         assert!(
             cpp.contains("void task_t()"),
             "should emit task function: {}",
@@ -1923,7 +1932,7 @@ mod tests {
     #[test]
     fn k_factor_loop() {
         let reg = test_registry();
-        let cpp = codegen_ok("clock 10MHz t { adc(0) | stdout() }", &reg);
+        let cpp = codegen_ok("clock 10MHz t { constant(0.0) | stdout() }", &reg);
         assert!(
             cpp.contains("for (int _k = 0; _k < 10; ++_k)"),
             "should have K-loop: {}",
@@ -1937,7 +1946,7 @@ mod tests {
     fn fork_zero_copy() {
         let reg = test_registry();
         let cpp = codegen_ok(
-            "clock 1kHz t { adc(0) | :raw | stdout()\n:raw | stdout() }",
+            "clock 1kHz t { constant(0.0) | :raw | stdout()\n:raw | stdout() }",
             &reg,
         );
         // Fork should NOT use memcpy — downstream actors share the upstream buffer
@@ -1957,7 +1966,7 @@ mod tests {
         let cpp = codegen_ok(
             concat!(
                 "set mem = 64MB\n",
-                "clock 1kHz a { adc(0) -> sig }\n",
+                "clock 1kHz a { constant(0.0) -> sig }\n",
                 "clock 1kHz b { @sig | stdout() }\n",
             ),
             &reg,
@@ -1978,7 +1987,7 @@ mod tests {
         let cpp = codegen_ok(
             concat!(
                 "set mem = 64MB\n",
-                "clock 1kHz a { adc(0) -> sig }\n",
+                "clock 1kHz a { constant(0.0) -> sig }\n",
                 "clock 1kHz b { @sig | stdout() }\n",
             ),
             &reg,

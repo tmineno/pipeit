@@ -17,6 +17,6 @@ set overrun = drop
 param alpha = 0.5
 
 clock 1kHz iir {
-    adc(0) | add(:fb) | mul($alpha) | :out | ?tap | stdout()
+    constant(0.0) | add(:fb) | mul($alpha) | :out | ?tap | stdout()
     :out | delay(1, 0.0) | :fb
 }

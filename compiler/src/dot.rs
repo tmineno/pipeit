@@ -303,12 +303,17 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_registry() -> Registry {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .join("examples/actors.h");
+            .to_path_buf();
+        let std_actors = root.join("runtime/libpipit/include/std_actors.h");
+        let example_actors = root.join("examples/example_actors.h");
         let mut reg = Registry::new();
-        reg.load_header(&path).expect("failed to load actors.h");
+        reg.load_header(&std_actors)
+            .expect("failed to load std_actors.h");
+        reg.load_header(&example_actors)
+            .expect("failed to load example_actors.h");
         reg
     }
 
@@ -344,7 +349,10 @@ mod tests {
     #[test]
     fn valid_dot_structure() {
         let reg = test_registry();
-        let dot = build_and_emit("clock 1kHz t {\n    adc(0) | fft(256) | stdout()\n}", &reg);
+        let dot = build_and_emit(
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | stdout()\n}",
+            &reg,
+        );
         assert!(dot.starts_with("digraph pipit {"));
         assert!(dot.trim_end().ends_with('}'));
         assert!(dot.contains("subgraph cluster_t {"));
@@ -356,7 +364,7 @@ mod tests {
         let reg = test_registry();
         // Pipeline with tap, probe, and buffer write
         let dot = build_and_emit(
-            "clock 1kHz t {\n    adc(0) | :tap1 | fir(coeff) | ?p -> buf\n    :tap1 | stdout()\n}\nconst coeff = [1.0]",
+            "clock 1kHz t {\n    constant(0.0) | :tap1 | fir(coeff) | ?p -> buf\n    :tap1 | stdout()\n}\nconst coeff = [1.0]",
             &reg,
         );
         assert!(dot.contains("shape=box"), "missing actor box shape");
@@ -373,7 +381,7 @@ mod tests {
         let reg = test_registry();
         // fir -> ?p -> ->buf  should become fir->->buf (bypass) + fir->?p (tap)
         let dot = build_and_emit(
-            "clock 1kHz t {\n    adc(0) | fir(coeff) | ?p -> buf\n}\nconst coeff = [1.0]",
+            "clock 1kHz t {\n    constant(0.0) | fir(coeff) | ?p -> buf\n}\nconst coeff = [1.0]",
             &reg,
         );
         // Probe node is still declared
@@ -409,13 +417,13 @@ mod tests {
             concat!(
                 "clock 1kHz recv {\n",
                 "    control {\n",
-                "        adc(0) | detect() -> ctrl\n",
+                "        constant(0.0) | detect() -> ctrl\n",
                 "    }\n",
                 "    mode sync {\n",
-                "        adc(0) | fir(sync_coeff) -> out\n",
+                "        constant(0.0) | fir(sync_coeff) -> out\n",
                 "    }\n",
                 "    mode data {\n",
-                "        adc(0) | fft(256) -> out2\n",
+                "        constant(0.0) | fft(256) -> out2\n",
                 "    }\n",
                 "    switch(ctrl, sync, data) default sync\n",
                 "}\n",
@@ -450,7 +458,7 @@ mod tests {
         let dot = build_and_emit(
             concat!(
                 "clock 1kHz writer {\n",
-                "    adc(0) | fft(256) -> sig\n",
+                "    constant(0.0) | fft(256) -> sig\n",
                 "}\n",
                 "clock 1kHz reader {\n",
                 "    @sig | stdout()\n",
@@ -471,8 +479,8 @@ mod tests {
         let reg = test_registry();
         let dot = build_and_emit(
             concat!(
-                "clock 1kHz a {\n    adc(0) | fft(256) | stdout()\n}\n",
-                "clock 1kHz b {\n    adc(0) | fft(256) | stdout()\n}\n",
+                "clock 1kHz a {\n    constant(0.0) | fft(256) | stdout()\n}\n",
+                "clock 1kHz b {\n    constant(0.0) | fft(256) | stdout()\n}\n",
             ),
             &reg,
         );
@@ -501,8 +509,8 @@ mod tests {
     fn deterministic_output() {
         let reg = test_registry();
         let source = concat!(
-            "clock 1kHz a {\n    adc(0) | fft(256) | stdout()\n}\n",
-            "clock 1kHz b {\n    adc(0) | stdout()\n}\n",
+            "clock 1kHz a {\n    constant(0.0) | fft(256) | stdout()\n}\n",
+            "clock 1kHz b {\n    constant(0.0) | stdout()\n}\n",
         );
         let dot1 = build_and_emit(source, &reg);
         let dot2 = build_and_emit(source, &reg);

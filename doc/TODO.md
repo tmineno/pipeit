@@ -48,32 +48,47 @@
 
 **Goal**: Provide well-tested, documented actors for common signal processing tasks. Prioritize simple, high-value actors before complex ones.
 
-### Phase 1: Essential I/O & Math (Simple, High Value)
+### Phase 1: Essential I/O & Math (Simple, High Value) ✅ COMPLETE
 
-- [ ] **File I/O** (MEDIUM complexity):
-  - [ ] `binread(path, dtype)` - Binary file reader (int16, int32, float, cfloat)
-  - [ ] `binwrite(path, dtype)` - Binary file writer
-  - [ ] Error handling for file operations (ACTOR_ERROR on failure)
-  - [ ] Unit tests with known input/output files
+- [x] **File I/O** (MEDIUM complexity):
+  - [x] `binread(path, dtype)` - Binary file reader (int16, int32, float, cfloat)
+  - [x] `binwrite(path, dtype)` - Binary file writer
+  - [x] Error handling for file operations (ACTOR_ERROR on failure)
+  - [x] Unit tests with known input/output files
 
-- [ ] **Standard I/O** (LOW complexity):
-  - [ ] Enhance `stdout()` with format options (hex, scientific notation)
-  - [ ] `stderr()` - Write to stderr for error reporting
-  - [ ] `stdin()` - Read from stdin (interactive pipelines)
+- [x] **Standard I/O** (LOW complexity):
+  - [x] Enhance `stdout()` with format options (hex, scientific notation) → `stdout_fmt(format)`
+  - [x] `stderr()` - Write to stderr for error reporting
+  - [x] `stdin()` - Read from stdin (interactive pipelines)
 
-- [ ] **Basic arithmetic** (LOW complexity):
-  - [ ] `sub()` - Subtraction
-  - [ ] `div()` - Division
-  - [ ] `abs()` - Absolute value
-  - [ ] `sqrt()` - Square root
-  - [ ] Unit tests for each (edge cases: zero, negative, inf, NaN)
+- [x] **Basic arithmetic** (LOW complexity):
+  - [x] `sub()` - Subtraction
+  - [x] `div()` - Division
+  - [x] `abs()` - Absolute value
+  - [x] `sqrt()` - Square root
+  - [x] Unit tests for each (edge cases: zero, negative, inf, NaN)
 
-- [ ] **Basic statistics** (LOW-MEDIUM complexity):
-  - [ ] `mean(N)` - Running mean over N samples
-  - [ ] `rms()` - RMS (verify existing implementation)
-  - [ ] `min(N)` - Minimum over window
-  - [ ] `max(N)` - Maximum over window
-  - [ ] Unit tests with known sequences
+- [x] **Basic statistics** (LOW-MEDIUM complexity):
+  - [x] `mean(N)` - Running mean over N samples
+  - [x] `rms(N)` - RMS over N samples
+  - [x] `min(N)` - Minimum over window
+  - [x] `max(N)` - Maximum over window
+  - [x] Unit tests with known sequences
+
+**Phase 1 Summary:**
+
+- 25 standard actors implemented in `runtime/libpipit/include/std_actors.h`
+- 85 integration tests + 58 C++ runtime tests (143 total for stdlib)
+- All actors have both compilation and runtime test coverage
+
+### Documentation (Deferred)
+
+- [ ] **Documentation generation**:
+  - [ ] Set up Doxygen for `runtime/libpipit/include/std_actors.h`
+  - [ ] Convert existing comments to Doxygen format
+  - [ ] Create Doxyfile configuration
+  - [ ] Add documentation generation script/target
+  - [ ] Generate HTML reference manual from code comments
 
 ### Phase 2: Signal Processing Basics (Medium Complexity)
 

@@ -767,7 +767,7 @@ ACTOR(real, IN(float, 1), OUT(float, 1)) { return ACTOR_OK; }
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .join("examples/actors.h");
+            .join("examples/example_actors.h");
         if !path.exists() {
             // Skip if examples not available (CI without full checkout)
             return;
@@ -775,32 +775,24 @@ ACTOR(real, IN(float, 1), OUT(float, 1)) { return ACTOR_OK; }
 
         let mut reg = Registry::new();
         let count = reg.load_header(&path).unwrap();
-        assert_eq!(count, 14, "expected 14 actors in examples/actors.h");
-        assert_eq!(reg.len(), 14);
+        assert_eq!(count, 4, "expected 4 actors in examples/example_actors.h");
+        assert_eq!(reg.len(), 4);
 
-        // Spot-check a few actors
-        let adc = reg.lookup("adc").expect("adc not found");
-        assert_eq!(adc.in_type, PipitType::Void);
-        assert_eq!(adc.in_count, TokenCount::Literal(0));
-        assert_eq!(adc.out_type, PipitType::Float);
-        assert_eq!(adc.out_count, TokenCount::Literal(1));
-        assert_eq!(adc.params.len(), 1);
-        assert_eq!(adc.params[0].name, "channel");
+        // Spot-check a few example actors
+        let correlate = reg.lookup("correlate").expect("correlate not found");
+        assert_eq!(correlate.in_type, PipitType::Float);
+        assert_eq!(correlate.in_count, TokenCount::Literal(64));
+        assert_eq!(correlate.out_type, PipitType::Float);
 
-        let fft = reg.lookup("fft").expect("fft not found");
-        assert_eq!(fft.in_type, PipitType::Float);
-        assert_eq!(fft.in_count, TokenCount::Symbolic("N".to_string()));
-        assert_eq!(fft.out_type, PipitType::Cfloat);
-
-        let mul = reg.lookup("mul").expect("mul not found");
-        assert_eq!(mul.params.len(), 1);
-        assert_eq!(mul.params[0].kind, ParamKind::RuntimeParam);
+        let detect = reg.lookup("detect").expect("detect not found");
+        assert_eq!(detect.out_type, PipitType::Int32);
 
         let csvwrite = reg.lookup("csvwrite").expect("csvwrite not found");
         assert_eq!(csvwrite.params[0].param_type, ParamType::SpanChar);
 
-        let stdout = reg.lookup("stdout").expect("stdout not found");
-        assert!(stdout.params.is_empty());
+        let sync_process = reg.lookup("sync_process").expect("sync_process not found");
+        assert_eq!(sync_process.in_type, PipitType::Float);
+        assert_eq!(sync_process.in_count, TokenCount::Literal(256));
     }
 
     #[test]

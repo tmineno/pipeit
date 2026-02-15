@@ -523,12 +523,17 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_registry() -> Registry {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .join("examples/actors.h");
+            .to_path_buf();
+        let std_actors = root.join("runtime/libpipit/include/std_actors.h");
+        let example_actors = root.join("examples/example_actors.h");
         let mut reg = Registry::new();
-        reg.load_header(&path).expect("failed to load actors.h");
+        reg.load_header(&std_actors)
+            .expect("failed to load std_actors.h");
+        reg.load_header(&example_actors)
+            .expect("failed to load example_actors.h");
         reg
     }
 
@@ -608,7 +613,7 @@ mod tests {
     #[test]
     fn linear_pipeline_order() {
         let reg = test_registry();
-        let result = schedule_ok("clock 1kHz t {\n    adc(0) | stdout()\n}", &reg);
+        let result = schedule_ok("clock 1kHz t {\n    constant(0.0) | stdout()\n}", &reg);
         let meta = result.schedule.tasks.get("t").expect("task 't'");
         let sched = get_pipeline_schedule(meta);
         assert_eq!(sched.firings.len(), 2);
@@ -620,7 +625,7 @@ mod tests {
         // adc must fire before fft, fft before c2r, c2r before stdout
         let reg = test_registry();
         let result = schedule_ok(
-            "clock 1kHz t {\n    adc(0) | fft(256) | c2r() | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | c2r() | stdout()\n}",
             &reg,
         );
         let meta = result.schedule.tasks.get("t").unwrap();
@@ -637,7 +642,7 @@ mod tests {
     fn decimation_repetition_counts() {
         let reg = test_registry();
         let result = schedule_ok(
-            "clock 1kHz t {\n    adc(0) | fft(256) | c2r() | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | c2r() | stdout()\n}",
             &reg,
         );
         let meta = result.schedule.tasks.get("t").unwrap();
@@ -653,7 +658,7 @@ mod tests {
     #[test]
     fn k_factor_high_freq() {
         let reg = test_registry();
-        let result = schedule_ok("clock 10MHz t {\n    adc(0) | stdout()\n}", &reg);
+        let result = schedule_ok("clock 10MHz t {\n    constant(0.0) | stdout()\n}", &reg);
         let meta = result.schedule.tasks.get("t").unwrap();
         assert_eq!(meta.k_factor, 10);
     }
@@ -661,7 +666,7 @@ mod tests {
     #[test]
     fn k_factor_low_freq() {
         let reg = test_registry();
-        let result = schedule_ok("clock 1kHz t {\n    adc(0) | stdout()\n}", &reg);
+        let result = schedule_ok("clock 1kHz t {\n    constant(0.0) | stdout()\n}", &reg);
         let meta = result.schedule.tasks.get("t").unwrap();
         assert_eq!(meta.k_factor, 1);
     }
@@ -669,7 +674,7 @@ mod tests {
     #[test]
     fn k_factor_1mhz_boundary() {
         let reg = test_registry();
-        let result = schedule_ok("clock 1MHz t {\n    adc(0) | stdout()\n}", &reg);
+        let result = schedule_ok("clock 1MHz t {\n    constant(0.0) | stdout()\n}", &reg);
         let meta = result.schedule.tasks.get("t").unwrap();
         assert_eq!(meta.k_factor, 1);
     }
@@ -683,7 +688,7 @@ mod tests {
             concat!(
                 "param alpha = 0.5\n",
                 "clock 1kHz t {\n",
-                "    adc(0) | add(:fb) | mul($alpha) | :out | stdout()\n",
+                "    constant(0.0) | add(:fb) | mul($alpha) | :out | stdout()\n",
                 "    :out | delay(1, 0.0) | :fb\n",
                 "}",
             ),
@@ -703,9 +708,9 @@ mod tests {
         let result = schedule_ok(
             concat!(
                 "clock 1kHz t {\n",
-                "    control {\n        adc(0) | detect() -> ctrl\n    }\n",
-                "    mode sync {\n        adc(0) | stdout()\n    }\n",
-                "    mode data {\n        adc(0) | fft(256) | c2r() | stdout()\n    }\n",
+                "    control {\n        constant(0.0) | detect() -> ctrl\n    }\n",
+                "    mode sync {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode data {\n        constant(0.0) | fft(256) | c2r() | stdout()\n    }\n",
                 "    switch(ctrl, sync, data) default sync\n",
                 "}",
             ),
@@ -727,7 +732,7 @@ mod tests {
     fn edge_buffer_sizes() {
         let reg = test_registry();
         let result = schedule_ok(
-            "clock 1kHz t {\n    adc(0) | fft(256) | c2r() | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | c2r() | stdout()\n}",
             &reg,
         );
         let meta = result.schedule.tasks.get("t").unwrap();
@@ -747,7 +752,7 @@ mod tests {
     fn fork_topology() {
         let reg = test_registry();
         let result = schedule_ok(
-            "clock 1kHz t {\n    adc(0) | :raw | stdout()\n    :raw | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | :raw | stdout()\n    :raw | stdout()\n}",
             &reg,
         );
         let meta = result.schedule.tasks.get("t").unwrap();
@@ -761,7 +766,7 @@ mod tests {
     #[test]
     fn display_output() {
         let reg = test_registry();
-        let result = schedule_ok("clock 1kHz t {\n    adc(0) | stdout()\n}", &reg);
+        let result = schedule_ok("clock 1kHz t {\n    constant(0.0) | stdout()\n}", &reg);
         let output = format!("{}", result.schedule);
         assert!(output.contains("task 't'"));
         assert!(output.contains("K=1"));
