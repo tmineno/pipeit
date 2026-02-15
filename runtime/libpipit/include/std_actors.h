@@ -27,9 +27,11 @@
 /// @code{.pdl}
 /// clock 1kHz t { constant(1.0) | stdout() }
 /// @endcode
-ACTOR(constant, IN(void, 0), OUT(float, 1), RUNTIME_PARAM(float, value)) {
+ACTOR(constant, IN(void, 0), OUT(float, N), RUNTIME_PARAM(float, value) PARAM(int, N)) {
     (void)in;
-    out[0] = value;
+    for (int i = 0; i < N; ++i) {
+        out[i] = value;
+    }
     return ACTOR_OK;
 }
 }
@@ -118,8 +120,10 @@ ACTOR(fft, IN(float, N), OUT(cfloat, N), PARAM(int, N)) {
 /// @code{.pdl}
 /// c2r()
 /// @endcode
-ACTOR(c2r, IN(cfloat, 1), OUT(float, 1)) {
-    out[0] = std::abs(in[0]);
+ACTOR(c2r, IN(cfloat, N), OUT(float, N), PARAM(int, N)) {
+    for (int i = 0; i < N; ++i) {
+        out[i] = std::abs(in[i]);
+    }
     return ACTOR_OK;
 }
 }
@@ -183,8 +187,10 @@ ACTOR(fir, IN(float, N), OUT(float, 1), PARAM(int, N) PARAM(std::span<const floa
 /// mul($gain)
 /// mul(2.5)
 /// @endcode
-ACTOR(mul, IN(float, 1), OUT(float, 1), RUNTIME_PARAM(float, gain)) {
-    out[0] = in[0] * gain;
+ACTOR(mul, IN(float, N), OUT(float, N), RUNTIME_PARAM(float, gain) PARAM(int, N)) {
+    for (int i = 0; i < N; ++i) {
+        out[i] = in[i] * gain;
+    }
     return ACTOR_OK;
 }
 }

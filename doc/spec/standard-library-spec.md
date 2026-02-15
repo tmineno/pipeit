@@ -7,11 +7,11 @@
 
 | Actor | Input | Output | Description |
 |-------|-------|--------|-------------|
-| `constant` | void | float[1] | Constant signal source |
+| `constant` | void | float[N] | Constant signal source |
 | `fft` | float[N] | cfloat[N] | Fast Fourier Transform |
-| `c2r` | cfloat[1] | float[1] | Complex to Real conversion |
+| `c2r` | cfloat[N] | float[N] | Complex to Real conversion |
 | `fir` | float[N] | float[1] | Complex magnitude |
-| `mul` | float[1] | float[1] | Multiplication |
+| `mul` | float[N] | float[N] | Multiplication |
 | `add` | float[2] | float[1] | Addition |
 | `sub` | float[2] | float[1] | Subtraction |
 | `div` | float[2] | float[1] | Division |
@@ -40,7 +40,7 @@
 **Signature:**
 
 ```cpp
-ACTOR(constant, IN(void, 0), OUT(float, 1), RUNTIME_PARAM(float, value))
+ACTOR(constant, IN(void, 0), OUT(float, N), RUNTIME_PARAM(float, value) PARAM(int, N))
 ```
 
 **Parameters:**
@@ -90,7 +90,7 @@ fft(256)
 **Signature:**
 
 ```cpp
-ACTOR(c2r, IN(cfloat, 1), OUT(float, 1))
+ACTOR(c2r, IN(cfloat, N), OUT(float, N), PARAM(int, N))
 ```
 
 **Returns:** ACTOR_OK on success
@@ -132,7 +132,7 @@ mag()
 **Signature:**
 
 ```cpp
-ACTOR(mul, IN(float, 1), OUT(float, 1), RUNTIME_PARAM(float, gain))
+ACTOR(mul, IN(float, N), OUT(float, N), RUNTIME_PARAM(float, gain) PARAM(int, N))
 ```
 
 **Parameters:**
