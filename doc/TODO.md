@@ -89,86 +89,68 @@
   - [x] Generate `doc/spec/standard-library-spec.md` from `std_actors.h`
   - [x] Add `gen-stdlib-doc` pre-commit hook (triggers on `std_actors.h` changes)
 
-### Phase 2: Signal Processing Basics (Medium Complexity)
+---
 
-- [ ] **Simple filters** (MEDIUM complexity):
-  - [ ] `lpf(cutoff, order)` - Low-pass filter (Butterworth)
-  - [ ] `hpf(cutoff, order)` - High-pass filter
-  - [ ] `notch(freq, q)` - Notch filter
-  - [ ] Test with known signal characteristics
+## v0.2.0 - Frame Dimension Inference & Vectorization Alignment
 
-- [ ] **Basic transforms** (MEDIUM-HIGH complexity):
-  - [ ] `ifft(N)` - Inverse FFT
-  - [ ] `rfft(N)` - Real FFT (optimize for real input)
-  - [ ] Validate against reference implementations (e.g., FFTW)
+**Goal**: Align compiler/runtime architecture with `doc/spec/pipit-lang-spec-v0.2.0.md` shape inference plan before adding more medium/high complexity actors.
 
-- [ ] **Windowing** (LOW-MEDIUM complexity):
-  - [ ] `window(N, type)` - Window functions (hann, hamming, blackman)
-  - [ ] Test window properties (energy, side lobe levels)
+### Spec & Scope Lock
 
-### Phase 3: Advanced Signal Processing (High Complexity)
+- [ ] **Freeze v0.2.0 shape model** (`doc/spec/pipit-lang-spec-v0.2.0.md`):
+  - [ ] Confirm shape semantics: `rate = product(shape)` with flat runtime buffers
+  - [ ] Confirm backward compatibility: `IN(T, N)` / `OUT(T, N)` as rank-1 shorthand
+  - [ ] Confirm call-site shape constraint syntax: `actor(...)[d0, d1, ...]`
+  - [ ] Confirm compile-time-only dimension policy (literal/const only; no runtime param)
+  - [ ] Create ADR for accepted v0.2.0 constraints and non-goals
 
-- [ ] **WAV file I/O** (MEDIUM-HIGH complexity):
-  - [ ] `wavread(path)` - WAV file reader (streaming, 16/24/32-bit PCM)
-  - [ ] `wavwrite(path)` - WAV file writer (configurable sample rate, channels)
-  - [ ] Handle WAV header parsing, endianness
+### Compiler Alignment (Current Impl Gap Closure)
 
-- [ ] **Advanced filters** (HIGH complexity):
-  - [ ] `iir(b_coeff, a_coeff)` - IIR filter (biquad sections)
-  - [ ] `bpf(low, high, order)` - Band-pass filter
-  - [ ] Numerical stability testing
+- [ ] **Registry metadata evolution** (`compiler/src/registry.rs`):
+  - [ ] Introduce shape-aware port metadata (transition from scalar-only token count)
+  - [ ] Support `SHAPE(...)` parsing in `IN/OUT` scanner
+  - [ ] Preserve compatibility with existing actor headers using scalar count form
 
-- [ ] **Resampling** (HIGH complexity):
-  - [ ] `resample(M, N)` - Rational resampling (upsample M, downsample N)
-  - [ ] `interp(N)` - Interpolation (zero-insert + LPF)
-  - [ ] `downsample(N)` - Downsampling (LPF + decimate)
+- [ ] **Parser/AST updates for shape constraints**:
+  - [ ] Extend actor-call grammar to accept optional shape constraints
+  - [ ] Store shape constraint AST on actor call nodes
+  - [ ] Restrict shape constraint elements to compile-time integers / const refs
 
-- [ ] **Advanced transforms** (HIGH complexity):
-  - [ ] `dct(N)` - Discrete Cosine Transform
-  - [ ] `hilbert(N)` - Hilbert transform (analytic signal)
-  - [ ] `stft(N, hop)` - Short-Time Fourier Transform
-  - [ ] `istft(N, hop)` - Inverse STFT
+- [ ] **Analyze/Schedule updates** (`compiler/src/analyze.rs`, `compiler/src/schedule.rs`):
+  - [ ] Add dimension inference/unification pass
+  - [ ] Resolve symbolic dimensions before SDF balance solving
+  - [ ] Emit explicit errors for unresolved, conflicting, or ambiguous dimensions
+  - [ ] Keep existing multi-input per-edge consumption semantics with divisibility checks
 
-- [ ] **Advanced statistics** (MEDIUM complexity):
-  - [ ] `var(N)` - Variance
-  - [ ] `std(N)` - Standard deviation
-  - [ ] `xcorr(N)` - Cross-correlation
-  - [ ] `acorr(N)` - Auto-correlation
-  - [ ] `convolve(N, kernel)` - Convolution
+- [ ] **Codegen updates** (`compiler/src/codegen.rs`):
+  - [ ] Use resolved shape product for buffer sizes and actor call strides
+  - [ ] Ensure generated C++ remains flat-buffer ABI compatible
+  - [ ] Keep old actor declarations compiling without source changes
 
-- [ ] **Control flow** (MEDIUM complexity):
-  - [ ] `gate(threshold)` - Pass/block based on signal level
-  - [ ] `clipper(min, max)` - Hard clipping
-  - [ ] `limiter(threshold)` - Soft limiting
-  - [ ] `agc(target, attack, release)` - Automatic Gain Control
+### Diagnostics & Tests
 
-### Infrastructure & Documentation
+- [ ] **Diagnostics**:
+  - [ ] Add dedicated error messages for:
+    - [ ] unresolved frame dimension
+    - [ ] conflicting explicit/inferred shape
+    - [ ] runtime param used as shape dimension
+    - [ ] invalid shape rank for actor signature
 
-- [ ] **Testing infrastructure**:
-  - [ ] Per-actor unit test framework
-  - [ ] Test harness for actor correctness
-  - [ ] Edge case testing (zero, infinity, NaN)
-  - [ ] Performance tests (measure ns/firing)
+- [ ] **Test coverage**:
+  - [ ] Add parser tests for `actor()[...]` syntax
+  - [ ] Add registry tests for `SHAPE(...)` port declarations
+  - [ ] Add analysis tests for dimension inference success/failure cases
+  - [ ] Add codegen compile tests covering inferred vs explicit shape constraints
+  - [ ] Add migration tests proving v0.1-style programs remain unchanged
 
-- [ ] **Actor documentation**:
-  - [ ] API reference template
-  - [ ] Usage examples for each actor
-  - [ ] Performance characteristics
-  - [ ] Known limitations
-
-- [ ] **Example pipelines**:
-  - [ ] Audio effects (basic filters, gain)
-  - [ ] SDR examples (if filters/transforms complete)
-  - [ ] Simple sensor processing
-
-- [ ] **Actor header organization**:
-  - [ ] Split `actors.h` into categories: `io.h`, `filters.h`, `math.h`, etc.
-  - [ ] Maintain `actors.h` as umbrella include
-  - [ ] Consider `--actor-path` for automatic discovery
+- [ ] **Done criteria for v0.2.0**:
+  - [ ] `doc/spec/pipit-lang-spec-v0.2.0.md` and implementation behavior match
+  - [ ] No regression in existing examples/tests
+  - [ ] New shape diagnostics included in usage docs
 
 ---
 
-## v0.1.3 - Performance Characterization & Spec Sheet
+## v0.2.1 - Performance Characterization & Spec Sheet
 
 **Goal**: Establish comprehensive performance baselines and identify bottlenecks. Measure what exists before optimizing.
 
@@ -272,7 +254,88 @@
 
 ---
 
-## v0.2.0 - Language Evolution (Type Inference)
+## v0.2.2 - Standard Actor Library (Continuation)
+
+### Phase 2: Signal Processing Basics (Medium Complexity)
+
+- [ ] **Simple filters** (MEDIUM complexity):
+  - [ ] `lpf(cutoff, order)` - Low-pass filter (Butterworth)
+  - [ ] `hpf(cutoff, order)` - High-pass filter
+  - [ ] `notch(freq, q)` - Notch filter
+  - [ ] Test with known signal characteristics
+
+- [ ] **Basic transforms** (MEDIUM-HIGH complexity):
+  - [ ] `ifft(N)` - Inverse FFT
+  - [ ] `rfft(N)` - Real FFT (optimize for real input)
+  - [ ] Validate against reference implementations (e.g., FFTW)
+
+- [ ] **Windowing** (LOW-MEDIUM complexity):
+  - [ ] `window(N, type)` - Window functions (hann, hamming, blackman)
+  - [ ] Test window properties (energy, side lobe levels)
+
+### Phase 3: Advanced Signal Processing (High Complexity)
+
+- [ ] **WAV file I/O** (MEDIUM-HIGH complexity):
+  - [ ] `wavread(path)` - WAV file reader (streaming, 16/24/32-bit PCM)
+  - [ ] `wavwrite(path)` - WAV file writer (configurable sample rate, channels)
+  - [ ] Handle WAV header parsing, endianness
+
+- [ ] **Advanced filters** (HIGH complexity):
+  - [ ] `iir(b_coeff, a_coeff)` - IIR filter (biquad sections)
+  - [ ] `bpf(low, high, order)` - Band-pass filter
+  - [ ] Numerical stability testing
+
+- [ ] **Resampling** (HIGH complexity):
+  - [ ] `resample(M, N)` - Rational resampling (upsample M, downsample N)
+  - [ ] `interp(N)` - Interpolation (zero-insert + LPF)
+  - [ ] `downsample(N)` - Downsampling (LPF + decimate)
+
+- [ ] **Advanced transforms** (HIGH complexity):
+  - [ ] `dct(N)` - Discrete Cosine Transform
+  - [ ] `hilbert(N)` - Hilbert transform (analytic signal)
+  - [ ] `stft(N, hop)` - Short-Time Fourier Transform
+  - [ ] `istft(N, hop)` - Inverse STFT
+
+- [ ] **Advanced statistics** (MEDIUM complexity):
+  - [ ] `var(N)` - Variance
+  - [ ] `std(N)` - Standard deviation
+  - [ ] `xcorr(N)` - Cross-correlation
+  - [ ] `acorr(N)` - Auto-correlation
+  - [ ] `convolve(N, kernel)` - Convolution
+
+- [ ] **Control flow** (MEDIUM complexity):
+  - [ ] `gate(threshold)` - Pass/block based on signal level
+  - [ ] `clipper(min, max)` - Hard clipping
+  - [ ] `limiter(threshold)` - Soft limiting
+  - [ ] `agc(target, attack, release)` - Automatic Gain Control
+
+### Infrastructure & Documentation
+
+- [ ] **Testing infrastructure**:
+  - [ ] Per-actor unit test framework
+  - [ ] Test harness for actor correctness
+  - [ ] Edge case testing (zero, infinity, NaN)
+  - [ ] Performance tests (measure ns/firing)
+
+- [ ] **Actor documentation**:
+  - [ ] API reference template
+  - [ ] Usage examples for each actor
+  - [ ] Performance characteristics
+  - [ ] Known limitations
+
+- [ ] **Example pipelines**:
+  - [ ] Audio effects (basic filters, gain)
+  - [ ] SDR examples (if filters/transforms complete)
+  - [ ] Simple sensor processing
+
+- [ ] **Actor header organization**:
+  - [ ] Split `actors.h` into categories: `io.h`, `filters.h`, `math.h`, etc.
+  - [ ] Maintain `actors.h` as umbrella include
+  - [ ] Consider `--actor-path` for automatic discovery
+
+---
+
+## v0.3.0 - Language Evolution (Type Inference)
 
 **Goal**: Improve PDL ergonomics and type system based on real usage experience. Design-first approach.
 
@@ -326,7 +389,7 @@
 
 ---
 
-## v0.2.x - Ecosystem & Quality of Life
+## v0.3.x - Ecosystem & Quality of Life
 
 **Goal**: Make Pipit easier to use and deploy in real projects.
 
@@ -346,7 +409,7 @@
 
 ---
 
-## v0.3.0 - Advanced Features (Future)
+## v0.4.0 - Advanced Features (Future)
 
 **Goal**: Compiler optimizations, real-time scheduling, heterogeneous execution.
 
@@ -378,7 +441,7 @@
 
 ---
 
-## v0.4.0 - Production Hardening (Future)
+## v0.5.0 - Production Hardening (Future)
 
 **Goal**: Observability, reliability, security, verification for production deployments.
 
@@ -411,7 +474,9 @@
 ## Notes
 
 - **v0.1.1** completes runtime features designed for v0.1.0 - essential foundation
-- **v0.1.2-v0.1.3** build standard library and performance baselines before language changes
-- **v0.2.0** uses design-first approach (spec/ADR before implementation)
-- **v0.3.0+** deferred until core is stable and well-characterized
+- **v0.1.2** closes the first standard-library milestone (Phase 1 + docs)
+- **v0.2.0** aligns implementation with frame-dimension/vectorization plan before more actor expansion
+- **v0.2.1-v0.2.2** continue stdlib expansion and performance baselining
+- **v0.3.0** keeps language evolution as design-first (spec/ADR before implementation)
+- **v0.4.0+** deferred until core is stable and well-characterized
 - Performance characterization should inform optimization priorities (measure before optimizing)
