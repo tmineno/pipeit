@@ -164,4 +164,7 @@ Based on [pipit-lang-spec-v0.1.0](spec/pipit-lang-spec-v0.1.0.md).
 - [x] Runtime error propagation matches spec (§7.2, actor ACTOR_ERROR → exit code 1)
 - [x] `--release` build strips probes to zero cost (`#ifndef NDEBUG`)
 - [x] Documentation: `pcc` usage guide (`doc/pcc-usage-guide.md`)
-- [ ] Performance: compile-time benchmarks on non-trivial graphs
+- [x] Performance: compile-time benchmarks on non-trivial graphs
+  - [x] Compiler benchmarks (parse, full pipeline, codegen) - `compiler/benches/compiler_bench.rs`
+  - [x] Runtime benchmarks (RingBuffer, Timer, TaskStats) - `benches/runtime_bench.cpp`
+  - [x] Baseline metrics: simple (3.5µs), medium (6.6µs), complex (11µs) parse times
