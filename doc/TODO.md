@@ -1,171 +1,260 @@
-# Pipit Development TODO
+# Pipit Development Roadmap
 
-Based on [pipit-lang-spec-v0.1.0](spec/pipit-lang-spec-v0.1.0.md).
+**v0.1.0 Complete** ✅ (2026-02-15)
+
+- Full compiler pipeline (parse → resolve → graph → analyze → schedule → codegen)
+- Runtime library with lock-free ring buffers, timers, statistics
+- 265 passing tests, comprehensive documentation
+- Basic benchmarks (compiler + runtime primitives + end-to-end PDL)
 
 ---
 
-## Project Scaffold
+## v0.1.1 - Performance Characterization & Spec Sheet (Current)
 
-- [x] Decide implementation language for `pcc` compiler → Rust ([ADR-001](adr/001-rust-for-pcc.md))
-- [x] Set up build system and project structure → `compiler/` (Rust) + `runtime/` (C++)
-- [x] CI pipeline: format → lint → typecheck → test → `.github/workflows/ci.yml`
-- [x] Create `doc/adr/` for architecture decisions
-- [x] Document shared buffer multi-reader semantics ([ADR-006](adr/006-shared-buffer-multi-reader-ring.md))
+**Goal**: Establish comprehensive performance baselines and identify bottlenecks before major feature additions.
 
-## Lexer (§2)
+### Wide Coverage Runtime Benchmarks
 
-- [x] UTF-8 source reading
-- [x] Tokenize keywords: `set const param define clock mode control switch default delay`
-- [x] Tokenize special symbols: `| -> @ : ? $ ( ) { } [ ] , =`
-- [x] Numeric literals (int, float, negative, exponent)
-- [x] Unit literals: frequency (`Hz kHz MHz GHz`), size (`KB MB GB`)
-- [x] String literals with `\"` `\\` escapes
-- [x] Array literals `[...]` — brackets tokenized; array parsing deferred to parser
-- [x] Identifiers `[a-zA-Z_][a-zA-Z0-9_]*`
-- [x] Line comments `#`
-- [x] Error reporting with source location
+- [ ] **Extended compiler benchmarks**:
+  - [ ] Large pipeline compilation (100+ actors, 20+ tasks)
+  - [ ] Deep nesting (define within define, 5+ levels)
+  - [ ] Wide fan-out (single source → 50 consumers via taps)
+  - [ ] Modal complexity (10+ modes, 5+ control signals)
+  - [ ] Incremental compilation time (measure per-phase cost)
 
-## Parser & AST (§10 BNF)
+- [ ] **Ring buffer stress tests**:
+  - [ ] High throughput: 1M tokens/sec write+read
+  - [ ] Multi-reader contention: 2, 4, 8, 16 readers
+  - [ ] Buffer size scaling: 64, 256, 1K, 4K, 16K, 64K tokens
+  - [ ] Cache effects: Measure L1/L2/L3 hit rates
+  - [ ] NUMA effects: Cross-socket read/write performance
 
-- [x] Define AST node types for all grammar productions
-- [x] `set_stmt`, `const_stmt`, `param_stmt`
-- [x] `define_stmt` (sub-pipeline)
-- [x] `task_stmt` (`clock <freq> <name> { ... }`)
-- [x] `pipeline_body`: pipe expressions with source / elem / sink
-- [x] `actor_call` with args (scalar, `$param`, const ref)
-- [x] Tap `:name`, probe `?name`, buffer read `@name`, buffer write `-> name`
-- [x] `modal_body`: `control`, `mode`, `switch` with `default` clause
-- [x] Syntax error recovery and diagnostics
+- [ ] **Timer precision benchmarks**:
+  - [ ] Frequency sweep: 1Hz to 1MHz in 10x steps
+  - [ ] Jitter measurement: Histogram of tick latency
+  - [ ] Long-running stability: 24-hour drift test
+  - [ ] Overrun recovery: Measure slip/backlog behavior
+  - [ ] Thread wake-up latency: Best/worst/median
 
-## Actor Registry Interface (§4)
+- [ ] **Task scheduling overhead**:
+  - [ ] Thread creation/join cost
+  - [ ] Context switch overhead between tasks
+  - [ ] Empty pipeline (minimal actor work, measure framework overhead)
+  - [ ] Scaling: 1, 2, 4, 8, 16, 32 concurrent tasks
+  - [ ] CPU affinity impact on performance
 
-- [x] Define actor metadata schema (name, in/out type, token counts, params)
-- [x] Parse `ACTOR` macro `constexpr` registration info from C++ headers
-- [x] Support `PARAM` and `RUNTIME_PARAM` metadata extraction
-- [x] Actor lookup by name
+- [ ] **Memory subsystem**:
+  - [ ] Total memory footprint per task (measure with /proc/self/status)
+  - [ ] Cache line utilization in RingBuffer
+  - [ ] False sharing detection (shared buffers on same cache line)
+  - [ ] Memory bandwidth saturation point
+  - [ ] Page fault impact (large buffers, first access)
 
-## Name Resolution (§8 step 3)
+- [ ] **Actor performance**:
+  - [ ] Per-actor microbenchmarks (FFT, FIR, mul, add, etc.)
+  - [ ] Vectorization effectiveness (check assembly, measure speedup)
+  - [ ] Pipeline stalls (data dependencies, cache misses)
+  - [ ] Actor fusion potential (measure overhead of actor boundaries)
 
-- [x] Resolve actor names against registry
-- [x] Resolve `const` and `param` references
-- [x] Resolve shared buffer names (`->` define, `@` reference)
-- [x] Resolve tap names (`:name` declare vs consume, task scope)
-- [x] Resolve `$name` runtime parameter references
-- [x] Name collision detection within same namespace
-- [x] Diagnostics: unknown name, unused tap, duplicate definition
+- [ ] **End-to-end workloads**:
+  - [ ] SDR receiver chain (1 MSPS, 10 MSPS, 100 MSPS)
+  - [ ] Audio processing (48 kHz, 16-bit stereo, 10 effects)
+  - [ ] Video frame processing (1080p@30fps, simple filters)
+  - [ ] Sensor fusion (10 sensors @ 1 kHz, Kalman filter)
+  - [ ] Network packet processing (1 Gbps, 10 Gbps theoretical)
 
-## SDF Graph Construction (§8 step 4)
+### Bottleneck Analysis
 
-- [x] Build directed graph from pipeline expressions
-- [x] Expand taps to fork nodes (`IN(T,N) → OUT(T,N) × M`)
-- [x] Inline-expand `define` sub-pipelines
-- [x] Convert shared buffers to inter-task edges
-- [x] Feedback loop detection
+- [ ] **Profiling with perf**:
+  - [ ] CPU hotspots: Which functions consume most time?
+  - [ ] Branch mispredictions: Control flow efficiency
+  - [ ] Cache misses: L1/L2/L3 miss rates per component
+  - [ ] TLB misses: Page table efficiency
+  - [ ] Generate flame graphs for representative workloads
 
-## Static Analysis (§8 step 5)
+- [ ] **Lock contention analysis**:
+  - [ ] Measure atomic contention in RingBuffer (multi-reader)
+  - [ ] Memory ordering overhead (relaxed vs acquire/release)
+  - [ ] Identify lock-free algorithm inefficiencies
 
-- [x] Type checking: verify pipe endpoint type compatibility (§3)
-- [x] SDF balance equation solving → repetition vector (§5.5)
-- [x] Feedback loop `delay` verification (§5.10)
-- [x] Cross-clock rate matching: `Pw × fw = Cr × fr` (§5.7)
-- [x] Single-writer constraint on shared buffers (§5.7)
-- [x] Tap consumption check: declared taps must be consumed (§5.6)
-- [x] Buffer size computation (safe upper bound) (§5.7)
-- [x] Memory pool check vs `set mem` limit
-- [x] `param` type vs `RUNTIME_PARAM` type match
+- [ ] **Latency breakdown**:
+  - [ ] Time per actor firing (min/avg/max/p99)
+  - [ ] Timer overhead vs actual work
+  - [ ] Ring buffer read/write vs compute
+  - [ ] Task wake-up to first instruction executed
+  - [ ] End-to-end latency budget (source → sink)
 
-## CSDF Mode Analysis (§6)
+- [ ] **Comparison with alternatives**:
+  - [ ] GNU Radio: Same pipeline, compare throughput
+  - [ ] Pure C++ hand-written: Measure framework overhead
+  - [ ] Theoretical maximum (FLOPS, memory bandwidth)
 
-- [x] Build control subgraph as independent SDF graph
-- [x] Build each `mode` block as independent SDF graph
-- [x] Validate `switch` ctrl supplier exists (control block or param)
-- [x] Validate ctrl type is `int32`
-- [x] Validate mode index coverage (0 .. N-1)
-- [x] Per-mode balance equation solving and buffer sizing
+### Performance Spec Sheet
 
-## Schedule Generation (§8 step 6)
+Create `doc/PERFORMANCE.md` with:
 
-- [x] Per-task topological order (PASS construction via Kahn's algorithm)
-- [x] Determine K (iterations per tick) from target rate
-- [x] Batching optimization for high target rates (K = ceil(freq / 1MHz))
-- [x] Intra-task buffer sizing per edge
-- [x] Feedback cycle back-edge identification (delay actor breaks cycle)
-- [x] `--emit schedule` output for debugging
+- [ ] **Hardware tested**:
+  - [ ] CPU model, core count, frequency
+  - [ ] Cache sizes (L1/L2/L3)
+  - [ ] RAM size, speed, channels
+  - [ ] OS, kernel version, governor settings
 
-## C++ Code Generation (§8 step 7)
+- [ ] **Compiler performance**:
+  - [ ] Parse time vs program size (tokens, lines, actors)
+  - [ ] Memory usage during compilation
+  - [ ] Codegen size vs program complexity
+  - [ ] Time breakdown per compiler phase (table)
 
-- [x] Ring buffer static allocation code
-- [x] Per-task schedule loop (actor firing sequence)
-- [x] Runtime parameter double-buffering mechanism
-- [x] Overrun detection and policy (`drop`, `slip`, `backlog`)
-- [x] Probe instrumentation (stripped in `--release`)
-- [x] CSDF mode transition logic (ctrl evaluation, mode swap at iteration boundary)
-- [x] `main()` with CLI argument parser
-- [x] Statistics collection code (`--stats`)
-- [x] Actor error propagation (check `operator()` return, exit code 1)
-- [x] Functional probe output (`fprintf` when `--probe` enabled, `#ifndef NDEBUG`)
+- [ ] **Runtime performance**:
+  - [ ] Ring buffer throughput (tokens/sec, MB/s)
+    - Single reader, multi-reader (2/4/8)
+    - Different buffer sizes
+  - [ ] Timer precision (jitter distribution, histogram)
+  - [ ] Task startup overhead (time to first tick)
+  - [ ] Empty pipeline overhead (baseline cost)
+  - [ ] Per-actor performance (ns/firing for each actor)
 
-## Runtime Library — `libpipit`
+- [ ] **Scaling characteristics**:
+  - [ ] Throughput vs number of tasks (1-32)
+  - [ ] Latency vs pipeline depth (1-100 actors)
+  - [ ] Memory vs buffer sizes and task count
+  - [ ] Efficiency vs CPU utilization (ideal = 100%)
 
-- [x] Ring buffer (shared memory, lock-free SPSC with multi-reader support)
-  - [x] Multi-reader FIFO with independent read cursors ([ADR-006](adr/006-shared-buffer-multi-reader-ring.md))
-  - [x] Per-reader tail tracking for capacity calculation
-  - [x] Status-checking read/write API for fail-fast semantics
-- [x] Scheduler: `static` strategy (one thread per task, current implementation)
-  - [ ] Future: `round_robin` strategy with thread pool (deferred to v0.2)
-- [x] Timer / tick generator (OS timer abstraction)
-- [x] Overrun policies: drop, slip, backlog (Timer: `last_latency`, `missed_count`, `reset_phase`)
-- [x] Double-buffering for runtime parameters (atomic swap at iteration boundary)
-- [x] Thread management (task → thread mapping)
-- [x] Statistics collection and reporting (`pipit::TaskStats`)
-- [x] Signal handling (SIGINT → graceful shutdown)
+- [ ] **Real-world workload benchmarks**:
+  - [ ] SDR receiver: Max sample rate sustained
+  - [ ] Audio: Max concurrent tracks/effects
+  - [ ] Video: Max resolution/framerate
+  - [ ] Identify bottleneck in each case
 
-## CLI & Integration (§9)
+- [ ] **Comparison table**:
+  - [ ] Pipit vs GNU Radio vs hand-coded C++
+  - [ ] For 3-5 representative pipelines
+  - [ ] Metrics: throughput, latency, CPU%, memory
 
-- [x] Compiler CLI:
-  - [x] `-o/--output` for explicit output file specification
-  - [x] `--actor-path` for automatic actor header discovery
-  - [x] `--verbose` for phase timing and diagnostics
-  - [x] `--cc` and `--cflags` for C++ compiler customization
-  - [x] Exit codes: 0 (success), 1 (compile error), 2 (usage error), 3 (system error)
-- [x] Generated binary CLI:
-  - [x] Runtime flags: `--duration`, `--threads`, `--param`, `--probe`, `--probe-output`, `--stats`
-  - [x] Exit codes: 0 (normal), 1 (runtime error), 2 (startup error)
-  - [x] Improved error messages with "startup error:" prefix and context
-  - [x] Robust duration parsing with time suffixes (`10s`, `1m`, `inf`)
-  - [x] Input validation for all flags (missing args, invalid values)
-- [x] End-to-end tests:
-  - [x] Spec §11.2 `example.pdl` compiles and runs
-  - [x] Spec §11.3 `receiver.pdl` compiles and runs
-  - [x] Overrun policy tests (drop/slip/backlog)
-  - [x] CLI flag tests (exit codes, stats output, duration suffixes)
-- [x] Error message quality review (match spec §7 examples, hints in Diagnostic)
+- [ ] **Known limitations**:
+  - [ ] Frequency limits (min/max sustainable)
+  - [ ] Buffer size constraints
+  - [ ] Platform-specific issues (Linux vs macOS vs Windows)
 
-## Visualization
+### Documentation Updates
 
-- [x] SDF graph visualization output (`--emit graph-dot` produces Graphviz DOT format)
-  - [x] Task clusters with nested modal control/mode subgraphs
-  - [x] Node shapes per kind (box=actor, diamond=fork, circle=probe, cylinder=buffer)
-  - [x] Probe rendered as side-branch off main dataflow
-  - [x] Inter-task buffer edges (dashed red)
-  - [x] Feedback cycle edges (bold blue)
-  - [x] Deterministic output (sorted tasks, namespaced node IDs)
-- [x] Timing diagram visualization (`--emit timing-chart` produces Mermaid Gantt chart)
-  - [x] ASAP parallel scheduling (independent branches run concurrently)
-  - [x] Mermaid-safe labels (fork, probe, buffer nodes avoid `:` separator conflicts)
-  - [x] Zero-duration probes omitted from output
-  - [x] Numeric cycle axis (`dateFormat x` + `axisFormat %Q`)
-  - [x] Feedback back-edges excluded from timing dependencies
-  - [x] Modal task sections (control + per-mode, modes start at offset 0)
-  - [x] Deterministic output (sorted tasks, unique task IDs)
+- [ ] **Benchmark README** (`benches/README.md`):
+  - [ ] Add all new benchmarks to documentation
+  - [ ] Explain what each benchmark measures
+  - [ ] How to run comprehensive benchmark suite
+  - [ ] How to reproduce spec sheet results
 
-## Polish & Release Prep
+- [ ] **Performance tuning guide** (`doc/tuning.md`):
+  - [ ] Buffer sizing guidelines
+  - [ ] Thread/task mapping best practices
+  - [ ] Overrun policy selection criteria
+  - [ ] CPU affinity and NUMA considerations
+  - [ ] Compiler optimization flags (--march, -flto, PGO)
 
-- [x] Compiler error messages match spec format (§7.1, hints in Diagnostic)
-- [x] Runtime error propagation matches spec (§7.2, actor ACTOR_ERROR → exit code 1)
-- [x] `--release` build strips probes to zero cost (`#ifndef NDEBUG`)
-- [x] Documentation: `pcc` usage guide (`doc/pcc-usage-guide.md`)
-- [x] Performance: compile-time benchmarks on non-trivial graphs
-  - [x] Compiler benchmarks (parse, full pipeline, codegen) - `compiler/benches/compiler_bench.rs`
-  - [x] Runtime benchmarks (RingBuffer, Timer, TaskStats) - `benches/runtime_bench.cpp`
-  - [x] Baseline metrics: simple (3.5µs), medium (6.6µs), complex (11µs) parse times
+- [ ] **Known issues** (`doc/known-issues.md`):
+  - [ ] Document any performance cliffs discovered
+  - [ ] Workarounds for common bottlenecks
+  - [ ] Platform-specific quirks
+
+### Tooling
+
+- [ ] **Benchmark automation**:
+  - [ ] `benches/run_all.sh` - Run full suite, generate report
+  - [ ] JSON output format for results
+  - [ ] Regression detection (compare against baseline)
+  - [ ] CI integration: Track performance over commits
+
+- [ ] **Profiling helpers**:
+  - [ ] `scripts/profile.sh <pdl_file>` - Auto-profile with perf
+  - [ ] Flame graph generation
+  - [ ] Cache miss visualization
+
+---
+
+## Future Releases (Deferred)
+
+### v0.2.0 - Quality of Life & Language Improvements
+
+#### Type Inference Improvements
+
+##### Phase 1: Design & Specification
+
+- [ ] **Review current type system**:
+  - [ ] Document how types currently work (explicit only, no inference)
+  - [ ] Identify pain points from user experience (manual c2r() insertion)
+  - [ ] Survey type systems in similar DSLs (GNU Radio, Faust, StreamIt)
+  - [ ] Collect real-world examples where inference would help
+
+- [ ] **Type inference design discussion**:
+  - [ ] Explicit vs implicit conversions trade-offs
+  - [ ] Safety: When should implicit conversion be allowed?
+  - [ ] Clarity: Does auto-conversion make pipelines harder to understand?
+  - [ ] Performance: Cost of implicit conversions vs manual specification
+  - [ ] **Create ADR**: Document design decisions and rationale
+
+- [ ] **Spec update proposal** (`doc/spec/pipit-lang-spec-v0.2.0.md`):
+  - [ ] Formal type inference rules
+  - [ ] Conversion hierarchy (int32 → float → cfloat)
+  - [ ] Where inference applies (const/param vs pipelines)
+  - [ ] Error message improvements
+  - [ ] Generic actor syntax (if supported)
+  - [ ] Backwards compatibility considerations
+
+##### Phase 2: Implementation (after spec approval)
+
+- [ ] **Implicit type conversions in pipelines**:
+  - [ ] Auto-insert `c2r()` when connecting `cfloat → float` pipeline
+  - [ ] Type promotion: `int → float` where compatible
+  - [ ] Detect and suggest conversion actors for type mismatches
+  - [ ] Warning for lossy conversions (float → int)
+
+- [ ] **Type inference for constants and parameters**:
+  - [ ] Infer `const` type from initializer: `const x = 1.0` → float
+  - [ ] Infer `param` type from default value: `param gain = 2.5` → float
+  - [ ] Support explicit type annotations: `const x: int32 = 42`
+  - [ ] Type checking for array elements: `[1, 2.0]` → error (mixed types)
+
+- [ ] **Generic actor support** (if spec approved):
+  - [ ] Template-like syntax: `fir<float>(N, coeff)` vs `fir<int32>(N, coeff)`
+  - [ ] Type parameter inference from arguments
+  - [ ] Monomorphization during codegen (generate specialized versions)
+
+- [ ] **Better type error messages**:
+  - [ ] Show expected vs actual types in context
+  - [ ] Suggest conversion actors with exact syntax
+  - [ ] Trace type through pipeline: `adc(0): float → mul(2.0): float → c2r(): ERROR`
+  - [ ] Highlight the problematic pipe operator in source
+
+#### Runtime & Ecosystem
+
+- [ ] Round-robin scheduler with thread pools
+- [ ] Platform support (macOS, Windows native)
+- [ ] Actor library expansion (file I/O, network, signal processing)
+- [ ] LSP server for IDE integration
+- [ ] Package manager for actor distribution
+- [ ] Improved documentation and tooling
+
+### v0.3 - Advanced Features
+
+- Compiler optimizations (fusion, constant propagation, dead code elimination)
+- Real-time scheduling (priority, deadlines, CPU affinity)
+- Heterogeneous execution (GPU, FPGA support)
+- Distributed pipelines across nodes
+- Auto-tuning based on profiling data
+
+### v0.4 - Production Ready
+
+- Metrics and monitoring (Prometheus, Grafana, OpenTelemetry)
+- Built-in profiler and debugger
+- Fault tolerance and checkpointing
+- Security (sandboxing, input validation)
+- Property-based testing and formal verification
+
+---
+
+## Notes
+
+- v0.1.1 is about understanding current performance limits, not adding features
+- Spec sheet should be reproducible on reference hardware
+- Identify bottlenecks before optimization to avoid premature optimization
+- Results will guide v0.2 priorities (fix bottlenecks vs add features)
