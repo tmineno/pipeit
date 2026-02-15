@@ -43,16 +43,17 @@ clock 10MHz capture {
     :raw1 | fir(lp_coeff) -> wideband
 }
 
-# ── Medium-rate analysis: 1 kHz ──────────────────────────────────────
+# ── Analysis: 10 MHz ─────────────────────────────────────────────────
 #
 #   Reads both shared buffers from capture, decimates, and logs to CSV.
+#   Rate matching: Pw=256 tokens/iter × 10MHz = Cr × 10MHz → Cr=256
 
-clock 1kHz analysis {
-    @filtered | decimate(10000) | :dec_f | csvwrite("filtered.csv")
+clock 10MHz analysis {
+    @filtered | decimate(256) | :dec_f | csvwrite("filtered.csv")
     :dec_f | stdout()
 
-    @narrow | decimate(10000) | csvwrite("narrow.csv")
-    @wideband | decimate(10000) | csvwrite("wideband.csv")
+    @narrow | decimate(256) | csvwrite("narrow.csv")
+    @wideband | decimate(256) | csvwrite("wideband.csv")
 }
 
 # ── Slow logger: 100 Hz ─────────────────────────────────────────────

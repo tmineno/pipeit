@@ -56,7 +56,8 @@
 
 // ── Test: mul actor ──
 TEST(mul_basic) {
-    Actor_mul actor{2.0f}; // Set gain via constructor/initializer
+    Actor_mul actor{2.0f};
+    actor.N = 1;
     float in[1] = {5.0f};
     float out[1];
 
@@ -67,6 +68,7 @@ TEST(mul_basic) {
 
 TEST(mul_negative_gain) {
     Actor_mul actor{-2.0f};
+    actor.N = 1;
     float in[1] = {5.0f};
     float out[1];
 

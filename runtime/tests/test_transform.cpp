@@ -48,6 +48,7 @@
 // ── Test: c2r actor ──
 TEST(c2r_magnitude) {
     Actor_c2r actor;
+    actor.N = 1;
     cfloat in[1] = {cfloat(3.0f, 4.0f)}; // 3+4i, magnitude = 5
     float out[1];
 
@@ -58,6 +59,7 @@ TEST(c2r_magnitude) {
 
 TEST(c2r_real_only) {
     Actor_c2r actor;
+    actor.N = 1;
     cfloat in[1] = {cfloat(7.0f, 0.0f)};
     float out[1];
 
@@ -68,6 +70,7 @@ TEST(c2r_real_only) {
 
 TEST(c2r_imaginary_only) {
     Actor_c2r actor;
+    actor.N = 1;
     cfloat in[1] = {cfloat(0.0f, 5.0f)};
     float out[1];
 

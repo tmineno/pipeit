@@ -62,6 +62,7 @@ pub fn analyze(
     let mut ctx = AnalyzeCtx::new(program, resolved, graph, registry);
     ctx.check_types();
     ctx.infer_shapes_from_edges();
+    ctx.check_shape_constraints();
     ctx.solve_balance_equations();
     ctx.check_feedback_delays();
     ctx.check_cross_clock_rates();
@@ -511,6 +512,25 @@ impl<'a> AnalyzeCtx<'a> {
             return None;
         }
 
+        // Only propagate backward when tgt's input shape has symbolic dimensions.
+        // If all dims are Literal, the shape is fixed by the actor definition
+        // (e.g. stdout IN(float,1)) and should not be treated as a frame dimension
+        // to propagate backward.
+        let tgt_meta_for_check = match &tgt.kind {
+            NodeKind::Actor { name, .. } => self.actor_meta(name),
+            _ => None,
+        };
+        if let Some(tm) = tgt_meta_for_check {
+            if !tm
+                .in_shape
+                .dims
+                .iter()
+                .any(|d| matches!(d, TokenCount::Symbolic(_)))
+            {
+                return None;
+            }
+        }
+
         // Get tgt's resolved input shape dims
         let tgt_dims = self.resolve_input_shape_dims(tgt, sub)?;
         let src_out_rank = src_meta.out_shape.rank();
@@ -670,6 +690,130 @@ impl<'a> AnalyzeCtx<'a> {
             dims.push(val?);
         }
         Some(dims)
+    }
+
+    // ── Phase 0b: Shape constraint validation (§13.6) ───────────────────
+
+    fn check_shape_constraints(&mut self) {
+        for task_graph in self.graph.tasks.values() {
+            for sub in subgraphs_of(task_graph) {
+                self.check_shape_constraints_in_subgraph(sub);
+            }
+        }
+    }
+
+    fn check_shape_constraints_in_subgraph(&mut self, sub: &Subgraph) {
+        for node in &sub.nodes {
+            if let NodeKind::Actor {
+                name,
+                args,
+                shape_constraint,
+                ..
+            } = &node.kind
+            {
+                // Note: runtime param as shape dim (§13.6 check 1) is already
+                // caught by the resolve phase (resolve.rs).
+
+                // Check: unresolved frame dimensions after shape inference (§13.6)
+                // Only flag when:
+                // - both production and consumption rates are unresolvable
+                // - the actor was called with zero args (if args were provided,
+                //   the user intentionally left the frame dim to default)
+                // - no explicit shape constraint was provided
+                if shape_constraint.is_none() && args.is_empty() {
+                    if let Some(meta) = self.actor_meta(name) {
+                        let has_symbolic = meta
+                            .in_shape
+                            .dims
+                            .iter()
+                            .chain(meta.out_shape.dims.iter())
+                            .any(|d| matches!(d, TokenCount::Symbolic(_)));
+
+                        if has_symbolic {
+                            let prod = self.production_rate(node);
+                            let cons = self.consumption_rate(node);
+
+                            if prod.is_none() && cons.is_none() {
+                                let sym_name = meta
+                                    .in_shape
+                                    .dims
+                                    .iter()
+                                    .chain(meta.out_shape.dims.iter())
+                                    .find_map(|d| match d {
+                                        TokenCount::Symbolic(s) => Some(s.as_str()),
+                                        _ => None,
+                                    })
+                                    .unwrap_or("?");
+
+                                self.error_with_hint(
+                                    node.span,
+                                    format!(
+                                        "unresolved frame dimension '{}' at actor '{}'",
+                                        sym_name, name
+                                    ),
+                                    format!(
+                                        "add explicit shape constraint, e.g. {}()[<size>]",
+                                        name
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check 3: conflicting explicit vs edge-inferred shape constraints (§13.6)
+        for edge in &sub.edges {
+            let src = match find_node(sub, edge.source) {
+                Some(n) => n,
+                None => continue,
+            };
+            let tgt = match find_node(sub, edge.target) {
+                Some(n) => n,
+                None => continue,
+            };
+
+            let (tgt_name, tgt_sc) = match &tgt.kind {
+                NodeKind::Actor {
+                    name,
+                    shape_constraint: Some(sc),
+                    ..
+                } => (name.as_str(), sc),
+                _ => continue,
+            };
+
+            let src_dims = match self.resolve_output_shape_dims(src, sub) {
+                Some(d) => d,
+                None => continue,
+            };
+
+            let tgt_dims: Option<Vec<u32>> = tgt_sc
+                .dims
+                .iter()
+                .map(|d| self.resolve_shape_dim(d))
+                .collect();
+            let tgt_dims = match tgt_dims {
+                Some(d) => d,
+                None => continue,
+            };
+
+            if src_dims.len() == tgt_dims.len() {
+                for (i, (&sv, &tv)) in src_dims.iter().zip(tgt_dims.iter()).enumerate() {
+                    if sv != tv {
+                        self.error(
+                            tgt_sc.span,
+                            format!(
+                                "conflicting frame constraint for actor '{}': \
+                                 inferred dim[{}]={} from upstream, but explicit shape specifies {}",
+                                tgt_name, i, sv, tv
+                            ),
+                        );
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     // ── Phase 1: Type checking ──────────────────────────────────────────
@@ -962,19 +1106,28 @@ impl<'a> AnalyzeCtx<'a> {
                             .get(&edge.buffer_name)
                             .map(|b| b.writer_span)
                             .unwrap_or(Span::new((), 0..0));
-                        self.warning(
-                            span,
-                            format!(
-                                "rate mismatch at shared buffer '{}': \
-                                 writer '{}' produces {:.0} tokens/sec, \
-                                 reader '{}' consumes {:.0} tokens/sec",
-                                edge.buffer_name,
-                                edge.writer_task,
-                                writer_rate,
-                                edge.reader_task,
-                                reader_rate,
-                            ),
+                        let msg = format!(
+                            "rate mismatch at shared buffer '{}': \
+                             writer '{}' produces {:.0} tokens/sec, \
+                             reader '{}' consumes {:.0} tokens/sec",
+                            edge.buffer_name,
+                            edge.writer_task,
+                            writer_rate,
+                            edge.reader_task,
+                            reader_rate,
                         );
+                        // Modal task writers have variable throughput (mode
+                        // switching), so rate mismatch is advisory only.
+                        // Pipeline tasks get a hard error per §5.7.
+                        let writer_is_modal = matches!(
+                            self.graph.tasks.get(&edge.writer_task),
+                            Some(TaskGraph::Modal { .. })
+                        );
+                        if writer_is_modal {
+                            self.warning(span, msg);
+                        } else {
+                            self.error(span, msg);
+                        }
                     }
                 }
             }
@@ -1356,6 +1509,72 @@ mod tests {
             .any(|d| d.level == DiagLevel::Error && d.message.contains(pattern))
     }
 
+    /// Parse, resolve, build graph, and analyze — also return the graph for
+    /// looking up NodeIds by actor name.
+    fn analyze_with_graph(
+        source: &str,
+        registry: &Registry,
+    ) -> (AnalysisResult, crate::graph::ProgramGraph) {
+        let parse_result = crate::parser::parse(source);
+        assert!(
+            parse_result.errors.is_empty(),
+            "parse errors: {:?}",
+            parse_result.errors
+        );
+        let program = parse_result.program.expect("parse failed");
+        let resolve_result = resolve::resolve(&program, registry);
+        assert!(
+            resolve_result
+                .diagnostics
+                .iter()
+                .all(|d| d.level != DiagLevel::Error),
+            "resolve errors: {:#?}",
+            resolve_result.diagnostics
+        );
+        let graph_result = crate::graph::build_graph(&program, &resolve_result.resolved, registry);
+        assert!(
+            graph_result
+                .diagnostics
+                .iter()
+                .all(|d| d.level != DiagLevel::Error),
+            "graph errors: {:#?}",
+            graph_result.diagnostics
+        );
+        let result = analyze(
+            &program,
+            &resolve_result.resolved,
+            &graph_result.graph,
+            registry,
+        );
+        (result, graph_result.graph)
+    }
+
+    /// Find the NodeId of the first actor with the given name inside a task.
+    fn find_actor_id(graph: &crate::graph::ProgramGraph, task: &str, actor_name: &str) -> NodeId {
+        use crate::graph::{NodeKind, TaskGraph};
+        let task_graph = graph.tasks.get(task).expect("task not found");
+        let subgraphs: Vec<&crate::graph::Subgraph> = match task_graph {
+            TaskGraph::Pipeline(sub) => vec![sub],
+            TaskGraph::Modal { control, modes } => {
+                let mut subs = vec![control];
+                for (_, m) in modes {
+                    subs.push(m);
+                }
+                subs
+            }
+        };
+        for sub in subgraphs {
+            for node in &sub.nodes {
+                if let NodeKind::Actor { name, .. } = &node.kind {
+                    if name == actor_name {
+                        return node.id;
+                    }
+                }
+            }
+        }
+        panic!("actor '{}' not found in task '{}'", actor_name, task);
+    }
+
     // ── Phase 1: Type checking tests ────────────────────────────────────
 
     #[test]
@@ -1432,47 +1651,69 @@ mod tests {
         let reg = test_registry();
         // constant(0.0) | fft(256) | c2r() | stdout()
         // fft: IN(float,256), OUT(cfloat,256). c2r: IN(cfloat,1), OUT(float,1)
-        let result = analyze_ok(
-            "clock 1kHz t {\n    constant(0.0) | fft(256) | c2r() | stdout()\n}",
-            &reg,
-        );
+        let source = "clock 1kHz t {\n    constant(0.0) | fft(256) | c2r() | stdout()\n}";
+        let (result, graph) = analyze_with_graph(source, &reg);
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(errors.is_empty(), "unexpected errors: {:#?}", errors);
         let rv = result
             .analysis
             .repetition_vectors
             .get(&("t".to_string(), "pipeline".to_string()))
             .expect("rv missing");
-        // All nodes should have consistent rv
-        assert!(!rv.is_empty(), "repetition vector should have entries");
+        // After shape inference: constant OUT=256, c2r IN/OUT=256 (both SHAPE(N)).
+        // constant(256)→fft(256): rv[constant]=rv[fft]=1
+        // fft(256)→c2r(256): rv[c2r]=rv[fft]=1
+        // c2r(256)→stdout(1): rv[c2r]×256 = rv[stdout]×1 → rv[stdout]=256
+        let constant_id = find_actor_id(&graph, "t", "constant");
+        let fft_id = find_actor_id(&graph, "t", "fft");
+        let c2r_id = find_actor_id(&graph, "t", "c2r");
+        let stdout_id = find_actor_id(&graph, "t", "stdout");
+        assert_eq!(rv[&constant_id], 1);
+        assert_eq!(rv[&fft_id], 1);
+        assert_eq!(rv[&c2r_id], 1);
+        assert_eq!(rv[&stdout_id], 256);
     }
 
     #[test]
     fn balance_fir_symbolic() {
         let reg = test_registry();
         // fir with const coeff array → N = array length = 5
-        let result = analyze_ok(
-            concat!(
-                "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
-                "clock 1kHz t {\n    constant(0.0) | fir(coeff) | stdout()\n}",
-            ),
-            &reg,
+        let source = concat!(
+            "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
+            "clock 1kHz t {\n    constant(0.0) | fir(coeff) | stdout()\n}",
         );
+        let (result, graph) = analyze_with_graph(source, &reg);
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(errors.is_empty(), "unexpected errors: {:#?}", errors);
         let rv = result
             .analysis
             .repetition_vectors
             .get(&("t".to_string(), "pipeline".to_string()))
             .expect("rv missing");
-        // adc→fir: rv[adc]*1 == rv[fir]*5 → rv[adc]=5, rv[fir]=1
-        // fir→stdout: rv[fir]*1 == rv[stdout]*1 → rv[stdout]=1
-        assert!(!rv.is_empty());
+        // After shape inference, constant gets inferred OUT rate=5 from fir(coeff).
+        // constant→fir: rv[constant]×5 = rv[fir]×5 → rv[constant]=rv[fir]=1
+        // fir→stdout: rv[fir]×1 = rv[stdout]×1 → rv[stdout]=1
+        let constant_id = find_actor_id(&graph, "t", "constant");
+        let fir_id = find_actor_id(&graph, "t", "fir");
+        let stdout_id = find_actor_id(&graph, "t", "stdout");
+        assert_eq!(rv[&constant_id], 1);
+        assert_eq!(rv[&fir_id], 1);
+        assert_eq!(rv[&stdout_id], 1);
     }
 
     #[test]
     fn balance_with_fork() {
         let reg = test_registry();
-        // Fork creates a branch: adc | :raw | stdout + :raw | mag() needs cfloat input...
-        // Actually mag expects cfloat, adc outputs float. Let's use a valid chain:
-        // constant(0.0) | :raw | stdout()
-        // :raw | stdout()
+        // Fork: constant(0.0) | :raw | stdout() + :raw | stdout()
+        // All rates 1:1 → rv should be uniform
         let result = analyze_ok(
             "clock 1kHz t {\n    constant(0.0) | :raw | stdout()\n    :raw | stdout()\n}",
             &reg,
@@ -1483,6 +1724,9 @@ mod tests {
             .get(&("t".to_string(), "pipeline".to_string()))
             .expect("rv missing");
         assert!(!rv.is_empty());
+        for &val in rv.values() {
+            assert_eq!(val, 1, "expected uniform rv=1 for all nodes, got {:?}", rv);
+        }
     }
 
     // ── Phase 3: Feedback delay tests ───────────────────────────────────
@@ -1521,6 +1765,100 @@ mod tests {
             has_error(&result, "feedback loop"),
             "expected feedback delay error, got: {:#?}",
             result.diagnostics
+        );
+    }
+
+    // ── Phase 4: Cross-clock rate matching tests ──────────────────────
+
+    #[test]
+    fn cross_clock_rate_match_ok() {
+        let reg = test_registry();
+        // fast 10kHz writes 1 token/iter → 10k tokens/sec
+        // slow 1kHz reads via decimate(10): 10 tokens/iter → 10k tokens/sec ✓
+        analyze_ok(
+            concat!(
+                "set mem = 64MB\n",
+                "clock 10kHz fast { constant(0.0) -> sig }\n",
+                "clock 1kHz slow { @sig | decimate(10) | stdout() }\n",
+            ),
+            &reg,
+        );
+    }
+
+    #[test]
+    fn cross_clock_rate_mismatch_error() {
+        let reg = test_registry();
+        // fast 10kHz writes 1 token/iter → 10k tokens/sec
+        // slow 1kHz reads 1 token/iter → 1k tokens/sec ✗
+        let result = analyze_source(
+            concat!(
+                "set mem = 64MB\n",
+                "clock 10kHz fast { constant(0.0) -> sig }\n",
+                "clock 1kHz slow { @sig | stdout() }\n",
+            ),
+            &reg,
+        );
+        assert!(
+            has_error(&result, "rate mismatch"),
+            "expected cross-clock rate mismatch error, got: {:#?}",
+            result.diagnostics
+        );
+    }
+
+    // ── Phase 5/6: Buffer size and memory pool tests ────────────────────
+
+    #[test]
+    fn buffer_size_computation() {
+        let reg = test_registry();
+        // constant(float=4B) → BufferWrite, rv[writer]=1
+        // buffer_bytes = 2 × 1 × 4 = 8 bytes
+        let result = analyze_ok(
+            concat!(
+                "set mem = 64MB\n",
+                "clock 1kHz a { constant(0.0) -> sig }\n",
+                "clock 1kHz b { @sig | stdout() }\n",
+            ),
+            &reg,
+        );
+        assert_eq!(
+            *result.analysis.inter_task_buffers.get("sig").unwrap(),
+            8,
+            "expected 2×1×4=8 bytes for float buffer"
+        );
+        assert_eq!(result.analysis.total_memory, 8);
+    }
+
+    #[test]
+    fn memory_pool_exceeded_error() {
+        let reg = test_registry();
+        // fft(256): BufferWrite rv=256, type=cfloat(8B)
+        // buffer = 2 × 256 × 8 = 4096B > 1KB(1024B) → error
+        let result = analyze_source(
+            concat!(
+                "set mem = 1KB\n",
+                "clock 1kHz a { constant(0.0) | fft(256) -> sig }\n",
+                "clock 1kHz b { @sig | c2r() | stdout() }\n",
+            ),
+            &reg,
+        );
+        assert!(
+            has_error(&result, "shared memory pool exceeded"),
+            "expected memory pool exceeded error, got: {:#?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn memory_pool_within_limit_ok() {
+        let reg = test_registry();
+        // buffer = 8 bytes << 64MB → ok
+        analyze_ok(
+            concat!(
+                "set mem = 64MB\n",
+                "clock 1kHz a { constant(0.0) -> sig }\n",
+                "clock 1kHz b { @sig | stdout() }\n",
+            ),
+            &reg,
         );
     }
 
@@ -1603,14 +1941,26 @@ mod tests {
     fn sdf_edge_inference_direct() {
         // fft()[256] | mag(): N inferred from upstream fft output shape
         let reg = test_registry();
-        let result = analyze_ok(
-            "clock 1kHz t {\n    constant(0.0) | fft()[256] | mag() | stdout()\n}",
-            &reg,
-        );
-        // mag() should have an inferred shape in the analysis result
+        let source = "clock 1kHz t {\n    constant(0.0) | fft()[256] | mag() | stdout()\n}";
+        let (result, graph) = analyze_with_graph(source, &reg);
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(errors.is_empty(), "unexpected errors: {:#?}", errors);
+        // mag() should have an inferred shape [256]
+        let mag_id = find_actor_id(&graph, "t", "mag");
+        let inferred = result
+            .analysis
+            .inferred_shapes
+            .get(&mag_id)
+            .expect("expected inferred shape for mag()");
+        assert_eq!(inferred.dims.len(), 1);
         assert!(
-            !result.analysis.inferred_shapes.is_empty(),
-            "expected inferred shapes for mag(), got none"
+            matches!(&inferred.dims[0], ShapeDim::Literal(256, _)),
+            "expected inferred dim 256, got {:?}",
+            inferred.dims[0]
         );
     }
 
@@ -1638,17 +1988,76 @@ mod tests {
         // fft()[256] | mag() | stdout(): mag's N inferred from fft's output,
         // and the pipeline should have valid balance equations
         let reg = test_registry();
-        let result = analyze_ok(
-            "clock 1kHz t {\n    constant(0.0) | fft()[256] | mag() | stdout()\n}",
-            &reg,
-        );
+        let source = "clock 1kHz t {\n    constant(0.0) | fft()[256] | mag() | stdout()\n}";
+        let (result, graph) = analyze_with_graph(source, &reg);
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(errors.is_empty(), "unexpected errors: {:#?}", errors);
         let rv = result
             .analysis
             .repetition_vectors
             .get(&("t".to_string(), "pipeline".to_string()))
             .expect("rv missing");
-        // constant fires 256x, fft 1x, mag 1x, stdout 256x
-        assert!(rv.values().any(|&v| v > 1), "expected non-trivial rv");
+        // After shape inference: constant OUT=256, mag IN/OUT=256 (SHAPE(N)).
+        // constant(256)→fft(256): rv[constant]=rv[fft]=1
+        // fft(256)→mag(256): rv[mag]=rv[fft]=1
+        // mag(256)→stdout(1): rv[mag]×256 = rv[stdout]×1 → rv[stdout]=256
+        let constant_id = find_actor_id(&graph, "t", "constant");
+        let fft_id = find_actor_id(&graph, "t", "fft");
+        let mag_id = find_actor_id(&graph, "t", "mag");
+        let stdout_id = find_actor_id(&graph, "t", "stdout");
+        assert_eq!(rv[&constant_id], 1);
+        assert_eq!(rv[&fft_id], 1);
+        assert_eq!(rv[&mag_id], 1);
+        assert_eq!(rv[&stdout_id], 256);
+    }
+
+    // ── Shape constraint error tests (§13.6) ──────────────────────────
+
+    #[test]
+    fn unresolved_dimension_error() {
+        // fft() without arg or shape constraint → N unresolved
+        let reg = test_registry();
+        let result = analyze_source(
+            "clock 1kHz t {\n    constant(0.0) | fft() | mag() | stdout()\n}",
+            &reg,
+        );
+        assert!(
+            has_error(&result, "unresolved frame dimension"),
+            "should error about unresolved frame dimension: {:#?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn conflicting_shape_constraint_error() {
+        // fft(256) outputs [256], but mag()[128] has explicit [128] → conflict
+        let reg = test_registry();
+        let result = analyze_source(
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | mag()[128] | stdout()\n}",
+            &reg,
+        );
+        assert!(
+            has_error(&result, "conflicting frame constraint"),
+            "should error about conflicting frame constraint: {:#?}",
+            result.diagnostics
+        );
+    }
+
+    // Note: runtime_param_as_shape_dim is already tested in resolve::tests
+    // (resolve phase catches it before analysis runs).
+
+    #[test]
+    fn shape_constraint_matching_inference_ok() {
+        // fft(256) outputs [256], mag()[256] has explicit [256] → matches → ok
+        let reg = test_registry();
+        analyze_ok(
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | mag()[256] | stdout()\n}",
+            &reg,
+        );
     }
 
     // ── Integration tests ───────────────────────────────────────────────

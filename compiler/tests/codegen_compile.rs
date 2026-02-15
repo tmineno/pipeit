@@ -986,7 +986,7 @@ fn shared_buffer_io_uses_pointer_offsets_in_repetition_loops() {
     let cpp = generate_inline_cpp(
         concat!(
             "clock 1MHz w { constant(0.0) | fft(256) | c2r() | fir(5, [0.1, 0.2, 0.4, 0.2, 0.1]) -> sig }\n",
-            "clock 1kHz r { @sig | decimate(10000) | stdout() }\n",
+            "clock 1MHz r { @sig | decimate(256) | stdout() }\n",
         ),
         "shared_io_offsets",
     );

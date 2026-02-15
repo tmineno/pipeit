@@ -682,10 +682,12 @@ mod tests {
         let meta = result.schedule.tasks.get("t").unwrap();
         let sched = get_pipeline_schedule(meta);
         assert_eq!(sched.firings.len(), 4);
-        // rv: adc=256, fft=1, c2r=256, stdout=256
-        assert_eq!(sched.firings[0].repetition_count, 256, "adc fires 256x");
+        // With shape inference: constant gets inferred [256] from fft backward,
+        // c2r gets inferred [256] from fft forward.
+        // rv: constant=1, fft=1, c2r=1, stdout=256
+        assert_eq!(sched.firings[0].repetition_count, 1, "constant fires 1x");
         assert_eq!(sched.firings[1].repetition_count, 1, "fft fires 1x");
-        assert_eq!(sched.firings[2].repetition_count, 256, "c2r fires 256x");
+        assert_eq!(sched.firings[2].repetition_count, 1, "c2r fires 1x");
         assert_eq!(sched.firings[3].repetition_count, 256, "stdout fires 256x");
     }
 
@@ -699,9 +701,13 @@ mod tests {
         let meta = result.schedule.tasks.get("t").unwrap();
         let sched = get_pipeline_schedule(meta);
         // fft(256): IN(float,256), OUT(cfloat,256)
-        // rv: adc=256, fft=1, c2r=256, stdout=256
+        // With shape inference: constant gets inferred [256] → rv=1
+        // c2r gets inferred [256] → rv=1, stdout rv=256
         let adc_rv = sched.firings.first().unwrap().repetition_count;
-        assert_eq!(adc_rv, 256, "adc should fire 256 times for fft(256)");
+        assert_eq!(
+            adc_rv, 1,
+            "constant fires 1x (produces 256 per firing via inference)"
+        );
     }
 
     // ── K factor tests ──────────────────────────────────────────────────

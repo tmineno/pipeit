@@ -34,6 +34,7 @@
 // ── Test: constant actor ──
 TEST(constant_zero) {
     Actor_constant actor{0.0f};
+    actor.N = 1;
     float in[1]; // Unused for source actor
     float out[1];
 
@@ -44,6 +45,7 @@ TEST(constant_zero) {
 
 TEST(constant_positive) {
     Actor_constant actor{42.0f};
+    actor.N = 1;
     float in[1];
     float out[1];
 
@@ -54,6 +56,7 @@ TEST(constant_positive) {
 
 TEST(constant_negative) {
     Actor_constant actor{-3.14f};
+    actor.N = 1;
     float in[1];
     float out[1];
 
@@ -64,6 +67,7 @@ TEST(constant_negative) {
 
 TEST(constant_multiple_calls) {
     Actor_constant actor{7.5f};
+    actor.N = 1;
     float in[1];
     float out[1];
 

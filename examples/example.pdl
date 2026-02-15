@@ -23,7 +23,8 @@ clock 10MHz capture {
     :raw | mag() | stdout()
 }
 
-# Post-processing task: 1kHz target rate
-clock 1kHz drain {
-    @signal | decimate(10000) | csvwrite("output.csv")
+# Post-processing task: same rate, decimates by FFT block factor
+# Rate matching: Pw=256 tokens/iter (fft block) × 10MHz = Cr × 10MHz → Cr=256
+clock 10MHz drain {
+    @signal | decimate(256) | csvwrite("output.csv")
 }
