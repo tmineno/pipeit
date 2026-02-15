@@ -1,134 +1,248 @@
-# Runtime Benchmarks
+# Pipit Benchmarks
 
-This directory contains two types of benchmarks:
+Comprehensive benchmark suite for performance characterization (v0.2.1).
 
-1. **Primitive Benchmarks** (`runtime_bench.cpp`) - Low-level performance of `libpipit` primitives
-2. **End-to-End Benchmarks** (`pdl_bench.sh`) - Full pipeline performance from compiled PDL programs
+## Quick Start
+
+```bash
+# Run all benchmarks
+./run_all.sh
+
+# Run specific category
+./run_all.sh --filter actor
+./run_all.sh --filter ringbuf --filter timer
+
+# Custom output directory
+./run_all.sh --output-dir /tmp/my_results
+```
+
+Categories: `compiler`, `runtime`, `ringbuf`, `timer`, `thread`, `actor`, `pdl`, `affinity`, `memory`, `latency`, `perf`, `all`
 
 ## Requirements
 
-- Google Benchmark library: https://github.com/google/benchmark
-
-Install on Ubuntu/Debian:
+- Rust toolchain (for compiler benchmarks)
+- C++20 compiler (g++ or clang++)
+- Google Benchmark library (for C++ benchmarks except timer_bench)
 
 ```bash
+# Ubuntu/Debian
 sudo apt install libbenchmark-dev
 ```
 
-## Build and Run
+## Benchmark Suites
+
+### 1. Compiler Benchmarks (Criterion)
+
+**File**: `../compiler/benches/compiler_bench.rs`
+
+Measures Pipit compiler performance across pipeline complexity levels:
+
+| Group | What it measures |
+|-------|-----------------|
+| `parse` | Parser performance (simple/medium/complex/modal) |
+| `parse_stress` | Stress tests (100+ actors, 5-level nesting, 50 fan-out, 10 modes) |
+| `parse_scaling` | Parse time vs number of tasks (1/5/10/20/50) |
+| `full_pipeline` | Parse + resolve + graph (empty registry) |
+| `full_pipeline_loaded` | Full pipeline with loaded actor registry (parse through codegen) |
+| `phase/*` | Per-phase cost (parse, resolve, graph, analyze, schedule, codegen) |
+| `codegen_size` | Code size proxy |
 
 ```bash
-# Compile runtime benchmarks
-c++ -std=c++20 -O3 -march=native \
-    -I ../runtime/libpipit/include \
-    runtime_bench.cpp \
-    -lbenchmark -lpthread \
-    -o runtime_bench
-
-# Run benchmarks
-./runtime_bench
-
-# Run with specific filters
-./runtime_bench --benchmark_filter=RingBuffer
-
-# Output as JSON
-./runtime_bench --benchmark_format=json --benchmark_out=results.json
+cargo bench --manifest-path ../compiler/Cargo.toml
 ```
 
-## Benchmark Suite
+### 2. Runtime Primitive Benchmarks
 
-### RingBuffer
+**File**: `runtime_bench.cpp`
 
-- `BM_RingBuffer_Write` - Write performance (64 floats per iteration)
-- `BM_RingBuffer_Read` - Read performance (64 floats per iteration)
-- `BM_RingBuffer_RoundTrip` - Write/read latency (32 floats)
-- `BM_RingBuffer_MultiReader` - Multi-reader performance (2 readers, 16 floats)
+Low-level performance of `libpipit` primitives:
 
-### Timer
+- `BM_RingBuffer_Write/Read/RoundTrip/MultiReader`
+- `BM_Timer_Tick_1kHz/10kHz`
+- `BM_TaskStats_Record`
+- `BM_AtomicParam_Load/Store`
 
-- `BM_Timer_Tick_1kHz` - 1 kHz timer tick overhead
-- `BM_Timer_Tick_10kHz` - 10 kHz timer tick overhead
+```bash
+c++ -std=c++20 -O3 -march=native -I ../runtime/libpipit/include \
+    runtime_bench.cpp -lbenchmark -lpthread -o /tmp/runtime_bench
+/tmp/runtime_bench
+```
 
-### TaskStats
+### 3. Ring Buffer Stress Tests
 
-- `BM_TaskStats_Record` - Statistics recording overhead
+**File**: `ringbuf_bench.cpp`
 
-### Atomic Parameters
+Multi-threaded ring buffer performance:
 
-- `BM_AtomicParam_Load` - Runtime parameter read overhead
-- `BM_AtomicParam_Store` - Runtime parameter write overhead
+- `BM_RingBuffer_Throughput` - Sustained write+read (1M tokens, writer+reader threads)
+- `BM_RingBuffer_Contention/{2,4,8,16}readers` - Multi-reader contention scaling
+- `BM_RingBuffer_SizeScaling/{64,256,1K,4K,16K,64K}` - Buffer capacity effects
+- `BM_RingBuffer_ChunkScaling/{1,4,16,64,256,1024}` - Transfer size effects
+
+```bash
+c++ -std=c++20 -O3 -march=native -I ../runtime/libpipit/include \
+    ringbuf_bench.cpp -lbenchmark -lpthread -o /tmp/ringbuf_bench
+/tmp/ringbuf_bench
+```
+
+### 4. Timer Precision Benchmarks
+
+**File**: `timer_bench.cpp`
+
+Timer accuracy and jitter characterization (custom measurement, no Google Benchmark):
+
+- **Frequency sweep**: 1Hz to 1MHz in decade steps
+- **Jitter histogram**: 10,000 ticks at 10kHz with percentile breakdown
+- **Overrun recovery**: Force overrun, measure reset_phase() recovery
+- **Wake-up latency**: Best/worst/median at 1kHz
+
+```bash
+c++ -std=c++20 -O3 -march=native -I ../runtime/libpipit/include \
+    timer_bench.cpp -lpthread -o /tmp/timer_bench
+/tmp/timer_bench
+```
+
+### 5. Thread Scheduling Benchmarks
+
+**File**: `thread_bench.cpp`
+
+Task scheduling and threading overhead:
+
+- `BM_ThreadCreateJoin` - Thread create + join cost
+- `BM_ContextSwitch` - Atomic ping-pong round-trip
+- `BM_EmptyPipeline` - Minimal timer+actor loop (framework overhead)
+- `BM_TaskScaling/{1,2,4,8,16,32}` - Concurrent task scaling
+- `BM_TimerOverhead` - Pure timer object overhead
+
+```bash
+c++ -std=c++20 -O3 -march=native -I ../runtime/libpipit/include \
+    thread_bench.cpp -lbenchmark -lpthread -o /tmp/thread_bench
+/tmp/thread_bench
+```
+
+### 6. Actor Microbenchmarks
+
+**File**: `actor_bench.cpp`
+
+Per-actor firing cost (isolated from timer/buffer overhead):
+
+- Arithmetic: `mul`, `add`, `sub`, `div`, `abs`, `sqrt`
+- FFT: N=64, 256, 1024, 4096
+- FIR: 5-tap, 16-tap, 64-tap
+- Statistics: `mean`, `rms`, `min`, `max` (N=64)
+- Transform: `c2r`, `mag` (N=256), `decimate` (N=10)
+
+```bash
+c++ -std=c++20 -O3 -march=native -I ../runtime/libpipit/include \
+    actor_bench.cpp -lbenchmark -lpthread -o /tmp/actor_bench
+/tmp/actor_bench
+```
+
+### 7. End-to-End PDL Benchmarks
+
+**Files**: `pdl_bench.sh`, `pdl/*.pdl`
+
+Full pipeline performance from compiled PDL programs:
+
+| PDL Program | Description | Rate |
+|------------|-------------|------|
+| `simple.pdl` | Single task baseline | 100 kHz |
+| `multitask.pdl` | Shared buffer communication | 10 kHz / 5 kHz |
+| `modal.pdl` | CSDF mode switching | 50 kHz |
+| `complex.pdl` | Taps + FIR + decimation | 100 kHz + 10 kHz |
+| `sdr_receiver.pdl` | FFT + FIR + demod chain | 1 MHz + 100 kHz |
+| `audio_chain.pdl` | Audio effects pipeline | 48 kHz |
+| `sensor_fusion.pdl` | 5 sensor channels + aggregator | 1 kHz |
+
+```bash
+./pdl_bench.sh
+```
+
+### 8. CPU Affinity Benchmarks
+
+**File**: `affinity_bench.cpp`
+
+Measures how thread-to-core pinning affects ring buffer throughput. Probes CPU
+topology from sysfs at startup (SMT siblings, physical cores, CCD boundaries).
+
+- `BM_Affinity_Unpinned` - Baseline (OS scheduler decides)
+- `BM_Affinity_SameCore` - Writer/reader on probed SMT siblings
+- `BM_Affinity_AdjacentCore` - Writer/reader on adjacent physical cores
+- `BM_Affinity_DistantCore` - Writer/reader on most-distant cores
+- `BM_Affinity_TaskScaling/{1..32}` - N threads pinned to distinct cores
+
+### 9. Memory Subsystem Benchmarks
+
+**File**: `memory_bench.cpp`
+
+Memory characteristics of Pipit runtime components:
+
+- `BM_Memory_Footprint` - sizeof() for RingBuffer, Timer, TaskStats (via counters)
+- `BM_Memory_CacheLineUtil/{1..1024}` - Cache line efficiency at different chunk sizes
+- `BM_Memory_FalseSharing/{1..8}readers` - False sharing detection
+- `BM_Memory_Bandwidth/{4..16384}` - Memory bandwidth saturation (KB)
+- `BM_Memory_PageFault_Cold/Warm` - Page fault impact
+
+### 10. Latency Breakdown Benchmarks
+
+**File**: `latency_bench.cpp`
+
+Detailed latency analysis with percentile tracking (custom measurement):
+
+- Per-actor firing: mul, add, fft, fir, mean, c2r, rms (min/avg/p90/p99/p999/max)
+- Timer overhead vs actual work ratio
+- Ring buffer read/write vs compute time budget
+- Task wake-up to first instruction latency
+- End-to-end pipeline latency: mul -> fir -> mean
+
+### 11. Perf-Based Analysis
+
+**Directory**: `perf/`
+
+Shell scripts wrapping existing benchmarks with `perf stat`/`perf record`. All
+scripts probe the environment at startup (CPU topology, cache sizes, available
+perf events) and adapt dynamically.
+
+| Script | What it measures |
+|--------|-----------------|
+| `perf_ringbuf.sh` | Ring buffer L1/L2/L3 cache hit rates, TLB behavior |
+| `perf_numa.sh` | NUMA/CCD topology effects (graceful degradation on single-node) |
+| `perf_affinity.sh` | Affinity + cache/context-switch/migration correlation |
+| `perf_actor.sh` | Vectorization (IPC), pipeline stalls, data dependency analysis |
+| `perf_memory.sh` | Page faults, cache line utilization, false sharing via perf |
+| `perf_profile.sh` | CPU hotspots, branch mispredictions, cache/TLB miss rates |
+| `perf_flamegraph.sh` | Flame graph SVGs (auto-downloads FlameGraph tools) |
+| `perf_contention.sh` | Atomic contention scaling, memory ordering overhead |
+
+Requires: `perf` (Linux). Optional: `numactl`, `taskset`.
+
+```bash
+# Run individual script
+bash perf/perf_actor.sh
+
+# Run all perf analysis
+./run_all.sh --filter perf
+```
+
+## Output Format
+
+- **Google Benchmark**: JSON files in `results/` (e.g., `actor_bench.json`)
+- **Criterion**: HTML reports in `../target/criterion/`
+- **Timer bench**: Text output in `results/timer_bench.txt`
+- **Latency bench**: Text output in `results/latency_bench.txt`
+- **PDL bench**: Text output in `results/pdl_bench.txt`
+- **Perf analysis**: Text/JSON in `results/perf_*.txt` and `results/perf_*.json`
+- **Flame graphs**: SVG in `results/flamegraph_*.svg` (open in browser)
 
 ## Expected Performance
 
 On modern hardware (x86_64, 3+ GHz):
 
-- RingBuffer write: ~10-20 ns per token
-- RingBuffer read: ~10-20 ns per token
-- Timer tick (1 kHz): ~1-5 µs overhead
+- RingBuffer write/read: ~10-20 ns per token
+- Timer tick (1 kHz): ~1-5 us overhead
 - TaskStats record: ~5-10 ns
 - Atomic param load/store: ~1-2 ns
-
----
-
-## PDL End-to-End Benchmarks
-
-### Quick Start
-
-```bash
-# Run all PDL benchmarks (compiles and executes test programs)
-./pdl_bench.sh
-```
-
-### Test PDL Programs
-
-The `pdl/` directory contains representative pipeline programs:
-
-- **simple.pdl** - Single task, minimal overhead baseline (100 kHz)
-- **multitask.pdl** - Multi-task with shared buffer communication (10 kHz producer, 5 kHz consumer)
-- **modal.pdl** - CSDF mode switching overhead (50 kHz)
-- **complex.pdl** - Realistic processing with taps, shared buffers, decimation (100 kHz + 10 kHz)
-
-### What Gets Measured
-
-For each PDL program:
-
-1. Compilation time (pcc → C++)
-2. C++ compilation time (C++ → executable)
-3. Runtime performance:
-   - Tick counts and miss rates
-   - Average/max task latency
-   - Shared buffer utilization
-
-### Manual Profiling
-
-```bash
-# Compile and run individual PDL programs manually
-cd pdl
-../../target/release/pcc simple.pdl -I ../../examples/actors.h -o /tmp/simple
-/tmp/simple --duration 10s --stats
-
-# With custom parameters
-../../target/release/pcc modal.pdl -I ../../examples/actors.h -o /tmp/modal
-/tmp/modal --duration 2s --param mode_sel=1 --stats
-```
-
-### Build Artifacts
-
-All generated C++ files and compiled binaries are placed in `/tmp/pipit_bench_<pid>/` and automatically cleaned up after benchmarking. This keeps the source directory clean.
-
-### Expected End-to-End Performance
-
-On modern hardware (x86_64, 3+ GHz):
-
-- Simple pipeline (100 kHz): ~70-80 µs avg latency per tick
-- Multi-task (10 kHz/5 kHz): ~75-85 µs avg latency per task
-- Modal switching (50 kHz): ~70-80 µs avg latency with mode transitions
-- Complex pipeline (100 kHz): ~70-90 µs avg latency with decimation
-
-These end-to-end latencies include:
-
-- Actor execution time
-- Ring buffer operations
-- Timer wait overhead
-- Statistics collection (if enabled)
-- Mode switching (for modal pipelines)
+- Actor mul (N=64): ~10-30 ns per firing
+- Actor FFT (N=256): ~5-15 us per firing
+- Simple pipeline (100 kHz): ~70-80 us avg latency
+- Thread wake-up: ~40-70 us median
