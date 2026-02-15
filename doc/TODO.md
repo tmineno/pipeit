@@ -133,19 +133,26 @@
   - [x] Add dedicated error messages for:
     - [x] runtime param used as shape dimension (`"runtime param '$N' cannot be used as frame dimension"`)
     - [x] unknown name in shape constraint (`"unknown name 'X' in shape constraint"`)
+    - [x] unresolved frame dimension (§13.6: actor with no args, no shape constraint, no inference)
+    - [x] conflicting frame constraint (§13.6: inferred shape vs explicit shape mismatch)
+    - [x] cross-clock rate mismatch error for pipeline tasks (§5.7: `Pw × fw ≠ Cr × fr`)
 
 - [x] **Test coverage**:
   - [x] Add parser tests for `actor()[...]` syntax (7 tests)
   - [x] Add registry tests for `SHAPE(...)` port declarations (9 tests)
   - [x] Add resolve tests for shape constraint validation (6 tests)
   - [x] Add analysis tests for dimension inference success/failure cases (3 tests)
+  - [x] Add analysis tests for shape constraint validation (3 tests: unresolved dim, conflicting shape, matching ok)
+  - [x] Add analysis tests for Phase 4/5/6 (5 tests: cross-clock rate, buffer size, memory pool)
+  - [x] Strengthen existing analysis test assertions with concrete rv values (balance, shape inference)
   - [x] Add codegen compile tests covering inferred vs explicit shape constraints (3 tests)
-  - [x] Add migration tests proving v0.1-style programs remain unchanged (all 85 existing codegen tests pass)
+  - [x] Add migration tests proving v0.1-style programs remain unchanged (all 92 codegen tests pass)
+  - [x] Fix runtime actor tests for frame-rate variant actors (constant, mul, c2r now require N=1)
 
 - [x] **Done criteria for v0.2.0**:
   - [x] `doc/spec/pipit-lang-spec-v0.2.0.md` and implementation behavior match
-  - [x] No regression in existing examples/tests (338 tests total, all passing)
-  - [x] Shape constraint diagnostics implemented in resolve phase
+  - [x] No regression in existing examples/tests (353 tests total, all passing)
+  - [x] Shape constraint diagnostics implemented in resolve and analyze phases
 
 ---
 
@@ -474,7 +481,7 @@
 
 - **v0.1.1** completes runtime features designed for v0.1.0 - essential foundation
 - **v0.1.2** closes the first standard-library milestone (Phase 1 + docs)
-- **v0.2.0** ✅ aligned implementation with frame-dimension/vectorization plan (ADR-007, PortShape, SHAPE parsing, shape constraints, dimension inference)
+- **v0.2.0** ✅ aligned implementation with frame-dimension/vectorization plan (ADR-007, PortShape, SHAPE parsing, shape constraints, dimension inference, §13.6 shape validation, §5.7 cross-clock rate enforcement)
 - **v0.2.1-v0.2.2** continue stdlib expansion and performance baselining
 - **v0.3.0** keeps language evolution as design-first (spec/ADR before implementation)
 - **v0.4.0+** deferred until core is stable and well-characterized
