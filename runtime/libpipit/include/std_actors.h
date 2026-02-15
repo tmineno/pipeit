@@ -1,10 +1,9 @@
 #pragma once
-//
-// std_actors.h — Pipit Standard Actor Library
-//
-// Standard library of actors for common signal processing tasks.
-// Part of the Pipit runtime library.
-//
+/// @file std_actors.h
+/// @brief Pipit Standard Actor Library
+///
+/// Standard library of actors for common signal processing tasks.
+/// Part of the Pipit runtime library.
 
 #include <cmath>
 #include <complex>
@@ -13,15 +12,21 @@
 #include <pipit.h>
 #include <span>
 
-// ── Source actors ──
+/// @defgroup source_actors Source Actors
+/// @{
 
-// ── constant: Constant signal source ──
-//
-// Generates a constant signal value.
-// Useful for testing, DC signals, and gain/offset applications.
-//
-// Example: constant(1.0)
-//
+/// @brief Constant signal source
+///
+/// Generates a constant signal value.
+/// Useful for testing, DC signals, and gain/offset applications.
+///
+/// @param value Constant output value (runtime parameter)
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// clock 1kHz t { constant(1.0) | stdout() }
+/// @endcode
 ACTOR(constant, IN(void, 0), OUT(float, 1), RUNTIME_PARAM(float, value)) {
     (void)in;
     out[0] = value;
@@ -30,15 +35,23 @@ ACTOR(constant, IN(void, 0), OUT(float, 1), RUNTIME_PARAM(float, value)) {
 }
 ;
 
-// ── Transform actors ──
+/// @}
 
-// ── fft: Fast Fourier Transform ──
-//
-// Computes FFT using Cooley-Tukey algorithm (radix-2, DIT).
-// Requires N to be a power of 2.
-//
-// Example: fft(256)
-//
+/// @defgroup transform_actors Transform Actors
+/// @{
+
+/// @brief Fast Fourier Transform
+///
+/// Computes FFT using Cooley-Tukey algorithm (radix-2, DIT).
+/// Requires N to be a power of 2.
+///
+/// @param N FFT size (must be power of 2)
+/// @return ACTOR_OK on success, ACTOR_ERROR if N is not a power of 2
+///
+/// Example usage:
+/// @code{.pdl}
+/// fft(256)
+/// @endcode
 ACTOR(fft, IN(float, N), OUT(cfloat, N), PARAM(int, N)) {
     // Verify N is power of 2
     if (N <= 0 || (N & (N - 1)) != 0) {
@@ -95,12 +108,16 @@ ACTOR(fft, IN(float, N), OUT(cfloat, N), PARAM(int, N)) {
 }
 ;
 
-// ── c2r: Complex to Real conversion ──
-//
-// Converts complex signal to real by taking magnitude.
-//
-// Example: c2r()
-//
+/// @brief Complex to Real conversion
+///
+/// Converts complex signal to real by taking magnitude.
+///
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// c2r()
+/// @endcode
 ACTOR(c2r, IN(cfloat, 1), OUT(float, 1)) {
     out[0] = std::abs(in[0]);
     return ACTOR_OK;
@@ -108,12 +125,16 @@ ACTOR(c2r, IN(cfloat, 1), OUT(float, 1)) {
 }
 ;
 
-// ── mag: Complex magnitude ──
-//
-// Computes magnitude of complex signal (same as c2r).
-//
-// Example: mag()
-//
+/// @brief Complex magnitude
+///
+/// Computes magnitude of complex signal (same as c2r).
+///
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// mag()
+/// @endcode
 ACTOR(mag, IN(cfloat, 1), OUT(float, 1)) {
     out[0] = std::abs(in[0]);
     return ACTOR_OK;
@@ -121,12 +142,18 @@ ACTOR(mag, IN(cfloat, 1), OUT(float, 1)) {
 }
 ;
 
-// ── fir: Finite Impulse Response filter ──
-//
-// Applies FIR filter with given coefficients.
-//
-// Example: fir([0.1, 0.2, 0.4, 0.2, 0.1])
-//
+/// @brief Finite Impulse Response filter
+///
+/// Applies FIR filter with given coefficients.
+///
+/// @param N Filter length (must match coefficient array size)
+/// @param coeff Filter coefficients
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// fir([0.1, 0.2, 0.4, 0.2, 0.1])
+/// @endcode
 ACTOR(fir, IN(float, N), OUT(float, 1), PARAM(int, N) PARAM(std::span<const float>, coeff)) {
     float y = 0;
     for (int i = 0; i < N; i++)
@@ -137,14 +164,23 @@ ACTOR(fir, IN(float, N), OUT(float, 1), PARAM(int, N) PARAM(std::span<const floa
 }
 ;
 
-// ── Basic arithmetic actors ──
+/// @}
 
-// ── mul: Multiplication ──
-//
-// Multiplies signal by a runtime-adjustable gain.
-//
-// Example: mul($gain) or mul(2.5)
-//
+/// @defgroup arithmetic_actors Basic Arithmetic Actors
+/// @{
+
+/// @brief Multiplication
+///
+/// Multiplies signal by a runtime-adjustable gain.
+///
+/// @param gain Multiplication factor (runtime parameter)
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// mul($gain)
+/// mul(2.5)
+/// @endcode
 ACTOR(mul, IN(float, 1), OUT(float, 1), RUNTIME_PARAM(float, gain)) {
     out[0] = in[0] * gain;
     return ACTOR_OK;
@@ -152,12 +188,16 @@ ACTOR(mul, IN(float, 1), OUT(float, 1), RUNTIME_PARAM(float, gain)) {
 }
 ;
 
-// ── add: Addition ──
-//
-// Adds two signals together.
-//
-// Example: :a | add(:b)
-//
+/// @brief Addition
+///
+/// Adds two signals together.
+///
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// :a | add(:b)
+/// @endcode
 ACTOR(add, IN(float, 2), OUT(float, 1)) {
     out[0] = in[0] + in[1];
     return ACTOR_OK;
@@ -165,12 +205,16 @@ ACTOR(add, IN(float, 2), OUT(float, 1)) {
 }
 ;
 
-// ── sub: Subtraction ──
-//
-// Subtracts second input from first (out = in[0] - in[1]).
-//
-// Example: :a | sub(:b)
-//
+/// @brief Subtraction
+///
+/// Subtracts second input from first (out = in[0] - in[1]).
+///
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// :a | sub(:b)
+/// @endcode
 ACTOR(sub, IN(float, 2), OUT(float, 1)) {
     out[0] = in[0] - in[1];
     return ACTOR_OK;
@@ -178,13 +222,17 @@ ACTOR(sub, IN(float, 2), OUT(float, 1)) {
 }
 ;
 
-// ── div: Division ──
-//
-// Divides first input by second (out = in[0] / in[1]).
-// Returns NaN on division by zero (IEEE 754 behavior).
-//
-// Example: :a | div(:b)
-//
+/// @brief Division
+///
+/// Divides first input by second (out = in[0] / in[1]).
+/// Returns NaN on division by zero (IEEE 754 behavior).
+///
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// :a | div(:b)
+/// @endcode
 ACTOR(div, IN(float, 2), OUT(float, 1)) {
     if (in[1] == 0.0f) {
         out[0] = std::numeric_limits<float>::quiet_NaN();
@@ -196,12 +244,16 @@ ACTOR(div, IN(float, 2), OUT(float, 1)) {
 }
 ;
 
-// ── abs: Absolute value ──
-//
-// Computes absolute value of signal.
-//
-// Example: abs()
-//
+/// @brief Absolute value
+///
+/// Computes absolute value of signal.
+///
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// abs()
+/// @endcode
 ACTOR(abs, IN(float, 1), OUT(float, 1)) {
     out[0] = std::abs(in[0]);
     return ACTOR_OK;
@@ -209,13 +261,17 @@ ACTOR(abs, IN(float, 1), OUT(float, 1)) {
 }
 ;
 
-// ── sqrt: Square root ──
-//
-// Computes square root of signal.
-// Returns NaN for negative inputs (IEEE 754 behavior).
-//
-// Example: sqrt()
-//
+/// @brief Square root
+///
+/// Computes square root of signal.
+/// Returns NaN for negative inputs (IEEE 754 behavior).
+///
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// sqrt()
+/// @endcode
 ACTOR(sqrt, IN(float, 1), OUT(float, 1)) {
     out[0] = std::sqrt(in[0]);
     return ACTOR_OK;
@@ -223,14 +279,19 @@ ACTOR(sqrt, IN(float, 1), OUT(float, 1)) {
 }
 ;
 
-// ── threshold: Threshold detector ──
-//
-// Converts float to int32 based on threshold.
-// Outputs 1 if input > threshold, otherwise 0.
-// Useful for control signals in modal tasks.
-//
-// Example: threshold(0.5)
-//
+/// @brief Threshold detector
+///
+/// Converts float to int32 based on threshold.
+/// Outputs 1 if input > threshold, otherwise 0.
+/// Useful for control signals in modal tasks.
+///
+/// @param value Threshold value (runtime parameter)
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// threshold(0.5)
+/// @endcode
 ACTOR(threshold, IN(float, 1), OUT(int32, 1), RUNTIME_PARAM(float, value)) {
     out[0] = (in[0] > value) ? 1 : 0;
     return ACTOR_OK;
@@ -238,15 +299,23 @@ ACTOR(threshold, IN(float, 1), OUT(int32, 1), RUNTIME_PARAM(float, value)) {
 }
 ;
 
-// ── Statistics actors ──
+/// @}
 
-// ── mean: Running mean ──
-//
-// Computes mean (average) over N samples.
-// Consumes N tokens, outputs 1 token.
-//
-// Example: mean(10)
-//
+/// @defgroup statistics_actors Statistics Actors
+/// @{
+
+/// @brief Running mean
+///
+/// Computes mean (average) over N samples.
+/// Consumes N tokens, outputs 1 token.
+///
+/// @param N Number of samples to average
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// mean(10)
+/// @endcode
 ACTOR(mean, IN(float, N), OUT(float, 1), PARAM(int, N)) {
     float sum = 0.0f;
     for (int i = 0; i < N; ++i) {
@@ -258,13 +327,18 @@ ACTOR(mean, IN(float, N), OUT(float, 1), PARAM(int, N)) {
 }
 ;
 
-// ── rms: Root Mean Square ──
-//
-// Computes RMS over N samples.
-// Consumes N tokens, outputs 1 token.
-//
-// Example: rms(10)
-//
+/// @brief Root Mean Square
+///
+/// Computes RMS over N samples.
+/// Consumes N tokens, outputs 1 token.
+///
+/// @param N Number of samples for RMS calculation
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// rms(10)
+/// @endcode
 ACTOR(rms, IN(float, N), OUT(float, 1), PARAM(int, N)) {
     float sum_sq = 0.0f;
     for (int i = 0; i < N; ++i) {
@@ -276,13 +350,18 @@ ACTOR(rms, IN(float, N), OUT(float, 1), PARAM(int, N)) {
 }
 ;
 
-// ── min: Minimum value ──
-//
-// Finds minimum value over N samples.
-// Consumes N tokens, outputs 1 token.
-//
-// Example: min(10)
-//
+/// @brief Minimum value
+///
+/// Finds minimum value over N samples.
+/// Consumes N tokens, outputs 1 token.
+///
+/// @param N Number of samples to search
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// min(10)
+/// @endcode
 ACTOR(min, IN(float, N), OUT(float, 1), PARAM(int, N)) {
     float min_val = in[0];
     for (int i = 1; i < N; ++i) {
@@ -296,13 +375,18 @@ ACTOR(min, IN(float, N), OUT(float, 1), PARAM(int, N)) {
 }
 ;
 
-// ── max: Maximum value ──
-//
-// Finds maximum value over N samples.
-// Consumes N tokens, outputs 1 token.
-//
-// Example: max(10)
-//
+/// @brief Maximum value
+///
+/// Finds maximum value over N samples.
+/// Consumes N tokens, outputs 1 token.
+///
+/// @param N Number of samples to search
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// max(10)
+/// @endcode
 ACTOR(max, IN(float, N), OUT(float, 1), PARAM(int, N)) {
     float max_val = in[0];
     for (int i = 1; i < N; ++i) {
@@ -316,15 +400,24 @@ ACTOR(max, IN(float, N), OUT(float, 1), PARAM(int, N)) {
 }
 ;
 
-// ── Feedback actors ──
+/// @}
 
-// ── delay: Feedback delay ──
-//
-// Provides initial tokens for feedback loops.
-// Built-in support: delay(N, init) provides N initial tokens.
-//
-// Example: delay(1, 0.0)
-//
+/// @defgroup feedback_actors Feedback Actors
+/// @{
+
+/// @brief Feedback delay
+///
+/// Provides initial tokens for feedback loops.
+/// Built-in support: delay(N, init) provides N initial tokens.
+///
+/// @param N Number of initial tokens to provide
+/// @param init Initial value for tokens
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// delay(1, 0.0)
+/// @endcode
 ACTOR(delay, IN(float, 1), OUT(float, 1), PARAM(int, N) PARAM(float, init)) {
     // Built-in: delay(N, init) provides N initial tokens
     (void)N;
@@ -335,19 +428,28 @@ ACTOR(delay, IN(float, 1), OUT(float, 1), PARAM(int, N) PARAM(float, init)) {
 }
 ;
 
-// ── File I/O actors ──
+/// @}
 
-// ── binread: Binary file reader ──
-//
-// Reads binary data from file and converts to float output.
-// Opens file on first firing, returns ACTOR_ERROR on EOF or read error.
-// Stateful actor (one file per pipeline run).
-//
-// Supported dtypes: "int16", "int32", "float", "cfloat"
-// For cfloat, outputs the magnitude as float.
-//
-// Example: binread("data.bin", "int16")
-//
+/// @defgroup fileio_actors File I/O Actors
+/// @{
+
+/// @brief Binary file reader
+///
+/// Reads binary data from file and converts to float output.
+/// Opens file on first firing, returns ACTOR_ERROR on EOF or read error.
+/// Stateful actor (one file per pipeline run).
+///
+/// Supported dtypes: "int16", "int32", "float", "cfloat"
+/// For cfloat, outputs the magnitude as float.
+///
+/// @param path File path (runtime parameter)
+/// @param dtype Data type: "int16", "int32", "float", or "cfloat" (runtime parameter)
+/// @return ACTOR_OK on success, ACTOR_ERROR on EOF or read error
+///
+/// Example usage:
+/// @code{.pdl}
+/// binread("data.bin", "int16")
+/// @endcode
 ACTOR(binread, IN(void, 0), OUT(float, 1),
       RUNTIME_PARAM(std::span<const char>, path) RUNTIME_PARAM(std::span<const char>, dtype)) {
     (void)in;
@@ -397,17 +499,23 @@ ACTOR(binread, IN(void, 0), OUT(float, 1),
 }
 ;
 
-// ── binwrite: Binary file writer ──
-//
-// Writes binary data to file from float input.
-// Opens file on first firing, returns ACTOR_ERROR on write error.
-// Stateful actor (one file per pipeline run).
-//
-// Supported dtypes: "int16", "int32", "float", "cfloat"
-// For cfloat, writes (real, 0) complex number.
-//
-// Example: binwrite("output.bin", "float")
-//
+/// @brief Binary file writer
+///
+/// Writes binary data to file from float input.
+/// Opens file on first firing, returns ACTOR_ERROR on write error.
+/// Stateful actor (one file per pipeline run).
+///
+/// Supported dtypes: "int16", "int32", "float", "cfloat"
+/// For cfloat, writes (real, 0) complex number.
+///
+/// @param path File path (runtime parameter)
+/// @param dtype Data type: "int16", "int32", "float", or "cfloat" (runtime parameter)
+/// @return ACTOR_OK on success, ACTOR_ERROR on write error
+///
+/// Example usage:
+/// @code{.pdl}
+/// binwrite("output.bin", "float")
+/// @endcode
 ACTOR(binwrite, IN(float, 1), OUT(void, 0),
       RUNTIME_PARAM(std::span<const char>, path) RUNTIME_PARAM(std::span<const char>, dtype)) {
     (void)out;
@@ -455,14 +563,22 @@ ACTOR(binwrite, IN(float, 1), OUT(void, 0),
 }
 ;
 
-// ── Rate conversion actors ──
+/// @}
 
-// ── decimate: Downsampling ──
-//
-// Consumes N tokens, outputs first token (rate reduction by N).
-//
-// Example: decimate(10)
-//
+/// @defgroup rate_conversion_actors Rate Conversion Actors
+/// @{
+
+/// @brief Downsampling
+///
+/// Consumes N tokens, outputs first token (rate reduction by N).
+///
+/// @param N Decimation factor
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// decimate(10)
+/// @endcode
 ACTOR(decimate, IN(float, N), OUT(float, 1), PARAM(int, N)) {
     out[0] = in[0];
     return ACTOR_OK;
@@ -470,14 +586,21 @@ ACTOR(decimate, IN(float, N), OUT(float, 1), PARAM(int, N)) {
 }
 ;
 
-// ── Sink actors ──
+/// @}
 
-// ── stdout: Standard output ──
-//
-// Writes signal values to stdout (one per line).
-//
-// Example: stdout()
-//
+/// @defgroup sink_actors Sink Actors
+/// @{
+
+/// @brief Standard output
+///
+/// Writes signal values to stdout (one per line).
+///
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// stdout()
+/// @endcode
 ACTOR(stdout, IN(float, 1), OUT(void, 0)) {
     printf("%f\n", in[0]);
     (void)out;
@@ -486,13 +609,17 @@ ACTOR(stdout, IN(float, 1), OUT(void, 0)) {
 }
 ;
 
-// ── stderr: Standard error output ──
-//
-// Writes signal values to stderr (one per line).
-// Useful for error reporting and monitoring.
-//
-// Example: stderr()
-//
+/// @brief Standard error output
+///
+/// Writes signal values to stderr (one per line).
+/// Useful for error reporting and monitoring.
+///
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// stderr()
+/// @endcode
 ACTOR(stderr, IN(float, 1), OUT(void, 0)) {
     fprintf(stderr, "%f\n", in[0]);
     (void)out;
@@ -501,13 +628,17 @@ ACTOR(stderr, IN(float, 1), OUT(void, 0)) {
 }
 ;
 
-// ── stdin: Standard input ──
-//
-// Reads signal values from stdin (one per line).
-// Returns ACTOR_ERROR on EOF or parse failure.
-//
-// Example: stdin()
-//
+/// @brief Standard input
+///
+/// Reads signal values from stdin (one per line).
+/// Returns ACTOR_ERROR on EOF or parse failure.
+///
+/// @return ACTOR_OK on success, ACTOR_ERROR on EOF or parse failure
+///
+/// Example usage:
+/// @code{.pdl}
+/// stdin()
+/// @endcode
 ACTOR(stdin, IN(void, 0), OUT(float, 1)) {
     (void)in;
     float value;
@@ -520,13 +651,18 @@ ACTOR(stdin, IN(void, 0), OUT(float, 1)) {
 }
 ;
 
-// ── stdout_fmt: Formatted standard output ──
-//
-// Writes signal values to stdout with custom formatting.
-// Formats: "default" (%.6f), "hex" (raw bytes), "scientific" (%.6e)
-//
-// Example: stdout_fmt("hex")
-//
+/// @brief Formatted standard output
+///
+/// Writes signal values to stdout with custom formatting.
+/// Formats: "default" (%.6f), "hex" (raw bytes), "scientific" (%.6e)
+///
+/// @param format Output format: "default", "hex", or "scientific" (runtime parameter)
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// stdout_fmt("hex")
+/// @endcode
 ACTOR(stdout_fmt, IN(float, 1), OUT(void, 0), RUNTIME_PARAM(std::span<const char>, format)) {
     std::string fmt(format.data(), format.size());
     if (fmt == "hex") {
@@ -541,3 +677,5 @@ ACTOR(stdout_fmt, IN(float, 1), OUT(void, 0), RUNTIME_PARAM(std::span<const char
 }
 }
 ;
+
+/// @}

@@ -23,6 +23,16 @@ repos:
         pass_filenames: false
         types: [rust]
 
+  # Documentation
+  - repo: local
+    hooks:
+      - id: gen-stdlib-doc
+        name: gen-stdlib-doc
+        entry: python3 scripts/gen-stdlib-doc.py
+        language: system
+        pass_filenames: false
+        files: runtime/libpipit/include/std_actors\.h
+
   # C++
   - repo: https://github.com/pre-commit/mirrors-clang-format
     rev: v19.1.6

@@ -81,14 +81,13 @@
 - 85 integration tests + 58 C++ runtime tests (143 total for stdlib)
 - All actors have both compilation and runtime test coverage
 
-### Documentation (Deferred)
+### Documentation ✅ COMPLETE
 
-- [ ] **Documentation generation**:
-  - [ ] Set up Doxygen for `runtime/libpipit/include/std_actors.h`
-  - [ ] Convert existing comments to Doxygen format
-  - [ ] Create Doxyfile configuration
-  - [ ] Add documentation generation script/target
-  - [ ] Generate HTML reference manual from code comments
+- [x] **Documentation generation**:
+  - [x] Convert existing comments to Doxygen format (`/// @brief`, `@param`, `@return`, `@code{.pdl}`)
+  - [x] Create `scripts/gen-stdlib-doc.py` to parse Doxygen comments and generate flat markdown
+  - [x] Generate `doc/spec/standard-library-spec.md` from `std_actors.h`
+  - [x] Add `gen-stdlib-doc` pre-commit hook (triggers on `std_actors.h` changes)
 
 ### Phase 2: Signal Processing Basics (Medium Complexity)
 
