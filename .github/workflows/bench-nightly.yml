@@ -1,0 +1,44 @@
+name: Benchmark Nightly
+
+on:
+  schedule:
+    - cron: "15 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  perf_nightly:
+    name: Perf Nightly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install benchmark deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libbenchmark-dev jq
+          if ! command -v perf >/dev/null 2>&1; then
+            sudo apt-get install -y linux-tools-common || true
+          fi
+
+      - name: Run perf lane + canonical validation + baseline compare
+        run: |
+          bash benches/run_all.sh \
+            --filter perf \
+            --output-dir benches/results-nightly \
+            --report \
+            --validate \
+            --compare-baseline-dir benches/baselines/nightly \
+            --compare-allow-missing-baseline \
+            --compare-no-fail-on-regression \
+            --compare-output benches/results-nightly/baseline_comparison.md
+
+      - name: Snapshot canonical baseline candidates
+        run: |
+          mkdir -p benches/results-nightly/baseline_snapshot
+          find benches/results-nightly -maxdepth 1 -type f -name '*.canonical.json' -exec cp {} benches/results-nightly/baseline_snapshot/ \;
+
+      - name: Upload nightly benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-nightly-results
+          path: benches/results-nightly/
