@@ -86,6 +86,10 @@ startup error: unknown param 'xyz'
 startup error: --duration requires a value
 startup error: invalid --duration '10x' (use <sec>, <sec>s, <min>m, or inf)
 startup error: --threads requires a positive integer
+startup error: --probe requires a name
+startup error: unknown probe 'probe_name'
+startup error: --probe-output requires a path
+startup error: failed to open probe output file '/path': <errno message>
 startup error: unknown option '--bad-flag'
 ```
 
@@ -119,4 +123,166 @@ When `--stats` is enabled, statistics are printed to stderr on exit:
 ```
 [stats] task 'audio': ticks=48000, missed=12 (drop), max_latency=1234ns, avg_latency=456ns
 [stats] shared buffer 'signal': 256 tokens (1024B)
+```
+
+## Probe Debugging
+
+Probes are zero-cost observation points in PDL pipelines that emit data samples for debugging and validation. Probes are **completely stripped** from release builds (`--release`) with no runtime overhead.
+
+### Adding Probes to PDL
+
+Use the `?name` syntax in pipeline expressions to create a probe:
+
+```pdl
+clock 10MHz receiver {
+    mode sync {
+        adc(0) | fir(sync_coeff) | ?sync_out -> sync_result
+    }
+
+    mode data {
+        adc(0) | fft(256) | c2r() | ?data_out -> payload
+    }
+}
+```
+
+Probes are passthrough nodes — they don't modify data flow, only observe it when explicitly enabled at runtime.
+
+### Runtime Probe Control
+
+**Enable specific probes:**
+
+```bash
+# Enable single probe (output to stderr)
+./receiver --duration 1s --probe sync_out
+
+# Enable multiple probes
+./receiver --duration 1s --probe sync_out --probe data_out
+
+# Duplicate probe names are idempotent (no error)
+./receiver --duration 1s --probe sync_out --probe sync_out
+```
+
+**Redirect probe output to file:**
+
+```bash
+# Write probe data to file instead of stderr
+./receiver --duration 1s --probe sync_out --probe-output /tmp/probes.txt
+
+# Multiple probes to same file
+./receiver --duration 1s --probe sync_out --probe data_out --probe-output /tmp/all_probes.txt
+```
+
+**Default behavior:**
+
+- By default, **all probes are disabled** and produce no output
+- Probes must be explicitly enabled with `--probe <name>` to emit data
+- When `--probe-output` is not specified, probe data goes to **stderr**
+
+### Probe Output Format
+
+Each probe emits one line per token:
+
+```
+[probe:sync_out] 0.123456
+[probe:sync_out] 0.234567
+[probe:sync_out] 0.345678
+```
+
+Format: `[probe:<name>] <value>` where value depends on data type:
+
+- `float`, `double`: printed as `%f`
+- `int32`, `int16`, `int8`: printed as `%d`
+- `cfloat`, `cdouble`: real part printed
+
+### Probe Error Handling
+
+**Unknown probe name:**
+
+```bash
+$ ./receiver --probe nonexistent
+startup error: unknown probe 'nonexistent'
+# Exit code: 2
+```
+
+**Missing probe output path:**
+
+```bash
+$ ./receiver --probe-output
+startup error: --probe-output requires a path
+# Exit code: 2
+```
+
+**File open failure:**
+
+```bash
+$ ./receiver --probe sync_out --probe-output /nonexistent/path/file.txt
+startup error: failed to open probe output file '/nonexistent/path/file.txt': No such file or directory
+# Exit code: 2
+```
+
+**Important:** Startup validation failures (unknown probe, file errors) **never launch worker threads**. The program exits immediately with code 2.
+
+### Release Builds
+
+Probes are **completely stripped** from release builds:
+
+```bash
+# Build with --release flag
+pcc receiver.pdl -I actors.h --release -o receiver_release
+
+# Probe infrastructure is not included (zero cost)
+# --probe and --probe-output flags still parse but have no effect
+```
+
+In release builds:
+
+- No probe storage variables generated (`_probe_*_enabled` flags omitted)
+- No probe emission code (`#ifndef NDEBUG` guards)
+- No runtime overhead — equivalent to code without probes
+- CLI flags accepted but ignored (for deployment script compatibility)
+
+### Probe Use Cases
+
+**Validate signal processing:**
+
+```bash
+# Check FFT output magnitudes
+./receiver --duration 0.1s --probe fft_mag --probe-output fft_samples.txt
+```
+
+**Debug mode switching:**
+
+```bash
+# Observe which mode is producing data
+./receiver --duration 10s --probe sync_out --probe data_out
+```
+
+**Compare pipeline stages:**
+
+```bash
+# Multiple probes to track signal flow
+clock 48kHz audio {
+    adc(0) | ?raw | lpf(1000) | ?filtered | gain(:volume) | ?output | dac(0)
+}
+
+./audio --probe raw --probe filtered --probe output --probe-output stages.txt
+```
+
+### Example: Debugging receiver.pdl
+
+```bash
+# Compile receiver with probe support
+pcc examples/receiver.pdl -I examples/actors.h -o receiver
+
+# Run and observe sync mode output
+./receiver --duration 0.1s --probe sync_out
+
+# Capture data mode output to file
+./receiver --duration 1s --probe data_out --probe-output data_samples.txt
+
+# Enable both probes simultaneously
+./receiver --duration 1s --probe sync_out --probe data_out
+
+# Combine with statistics
+./receiver --duration 1s --probe sync_out --probe-output probes.txt --stats
 ```

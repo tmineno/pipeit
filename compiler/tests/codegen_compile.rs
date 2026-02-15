@@ -886,3 +886,179 @@ fn duration_with_suffix() {
         assert_eq!(code, 0, "duration suffix test failed: {}", stderr);
     }
 }
+
+// ── Probe Tests ─────────────────────────────────────────────────────────────
+
+#[test]
+fn receiver_pdl_runs() {
+    // Verify receiver.pdl compiles and runs without probes
+    if let Some((code, _stdout, stderr)) =
+        compile_and_run_pdl("receiver.pdl", &["--duration", "0.01"])
+    {
+        assert_eq!(code, 0, "receiver.pdl failed: {}", stderr);
+    }
+}
+
+#[test]
+fn stats_output_includes_task_and_buffer_stats() {
+    // Verify --stats includes both task and buffer statistics
+    if let Some((code, _stdout, stderr)) =
+        compile_and_run_pdl("receiver.pdl", &["--duration", "0.01", "--stats"])
+    {
+        assert_eq!(code, 0, "receiver.pdl --stats failed: {}", stderr);
+        assert!(
+            stderr.contains("[stats] task"),
+            "expected task stats in stderr, got: {}",
+            stderr
+        );
+        assert!(
+            stderr.contains("[stats] shared buffer"),
+            "expected buffer stats in stderr, got: {}",
+            stderr
+        );
+    }
+}
+
+#[test]
+fn probe_emits_when_enabled() {
+    // Verify enabled probe outputs data to stderr
+    if let Some((code, _stdout, stderr)) = compile_and_run_pdl(
+        "receiver.pdl",
+        &["--duration", "0.01", "--probe", "sync_out"],
+    ) {
+        assert_eq!(code, 0, "receiver.pdl with probe failed: {}", stderr);
+        assert!(
+            stderr.contains("[probe:sync_out]"),
+            "expected probe output in stderr, got: {}",
+            stderr
+        );
+    }
+}
+
+#[test]
+fn probe_silent_when_not_enabled() {
+    // Verify disabled probe produces no output
+    if let Some((code, _stdout, stderr)) =
+        compile_and_run_pdl("receiver.pdl", &["--duration", "0.01"])
+    {
+        assert_eq!(code, 0, "receiver.pdl failed: {}", stderr);
+        assert!(
+            !stderr.contains("[probe:"),
+            "unexpected probe output when not enabled: {}",
+            stderr
+        );
+    }
+}
+
+#[test]
+fn unknown_probe_exits_code_2() {
+    // Verify unknown probe name validation
+    if let Some((code, _stdout, stderr)) =
+        compile_and_run_pdl("receiver.pdl", &["--probe", "nonexistent"])
+    {
+        assert_eq!(
+            code, 2,
+            "expected exit code 2 for unknown probe, got {}",
+            code
+        );
+        assert!(
+            stderr.contains("startup error: unknown probe 'nonexistent'"),
+            "expected unknown probe error message, got: {}",
+            stderr
+        );
+    }
+}
+
+#[test]
+fn probe_output_missing_path_exits_code_2() {
+    // Verify --probe-output requires path argument (existing CLI validation)
+    if let Some((code, _stdout, stderr)) = compile_and_run_pdl("receiver.pdl", &["--probe-output"])
+    {
+        assert_eq!(
+            code, 2,
+            "expected exit code 2 for missing probe output path, got {}",
+            code
+        );
+        assert!(
+            stderr.contains("startup error: --probe-output requires a path"),
+            "expected missing path error message, got: {}",
+            stderr
+        );
+    }
+}
+
+#[test]
+fn probe_output_open_failure_exits_code_2() {
+    // Verify file open error handling
+    if let Some((code, _stdout, stderr)) = compile_and_run_pdl(
+        "receiver.pdl",
+        &[
+            "--probe",
+            "sync_out",
+            "--probe-output",
+            "/nonexistent/directory/file.txt",
+        ],
+    ) {
+        assert_eq!(
+            code, 2,
+            "expected exit code 2 for file open failure, got {}",
+            code
+        );
+        assert!(
+            stderr.contains("startup error: failed to open probe output file"),
+            "expected file open error message, got: {}",
+            stderr
+        );
+    }
+}
+
+#[test]
+fn duplicate_probe_args_accepted() {
+    // Verify duplicate probe names are idempotent
+    if let Some((code, _stdout, stderr)) = compile_and_run_pdl(
+        "receiver.pdl",
+        &[
+            "--duration",
+            "0.01",
+            "--probe",
+            "sync_out",
+            "--probe",
+            "sync_out",
+        ],
+    ) {
+        assert_eq!(code, 0, "duplicate probe args failed: {}", stderr);
+        assert!(
+            stderr.contains("[probe:sync_out]"),
+            "expected probe output, got: {}",
+            stderr
+        );
+    }
+}
+
+#[test]
+fn probe_output_file_contains_data() {
+    // Verify probe output file is created and contains data
+    let tmp = std::env::temp_dir().join("pipit_probe_test.txt");
+    let tmp_str = tmp.to_str().unwrap();
+
+    if let Some((code, _stdout, _stderr)) = compile_and_run_pdl(
+        "receiver.pdl",
+        &[
+            "--duration",
+            "0.01",
+            "--probe",
+            "sync_out",
+            "--probe-output",
+            tmp_str,
+        ],
+    ) {
+        assert_eq!(code, 0, "probe output to file failed");
+        let contents = std::fs::read_to_string(&tmp).expect("failed to read probe output file");
+        assert!(
+            contents.contains("[probe:sync_out]"),
+            "expected probe output in file, got: {}",
+            contents
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+}

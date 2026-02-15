@@ -15,32 +15,32 @@
 
 ### Runtime Features
 
-- [ ] **Probe runtime wiring and startup validation**:
-  - [ ] Build runtime map from probe name → generated `_probe_<name>_enabled` flag
-  - [ ] Wire `--probe <name>` to enable matching probe flags before task launch
-  - [ ] On unknown `--probe <name>`: print startup error and exit code `2`
-  - [ ] Support multiple `--probe` flags; duplicate names are idempotent
-  - [ ] Wire `--probe-output <file>` to `_probe_output` `FILE*` before task launch
-  - [ ] On `--probe-output` file open failure: print startup error and exit code `2` (hard-fail, no fallback)
-  - [ ] Keep default probe output on `stderr` when `--probe-output` is not provided
-  - [ ] Keep probe emission guarded for release builds (`#ifndef NDEBUG`)
+- [x] **Probe runtime wiring and startup validation**:
+  - [x] Build runtime map from probe name → generated `_probe_<name>_enabled` flag
+  - [x] Wire `--probe <name>` to enable matching probe flags before task launch
+  - [x] On unknown `--probe <name>`: print startup error and exit code `2`
+  - [x] Support multiple `--probe` flags; duplicate names are idempotent
+  - [x] Wire `--probe-output <file>` to `_probe_output` `FILE*` before task launch
+  - [x] On `--probe-output` file open failure: print startup error and exit code `2` (hard-fail, no fallback)
+  - [x] Keep default probe output on `stderr` when `--probe-output` is not provided
+  - [x] Keep probe emission guarded for release builds (`#ifndef NDEBUG`)
 
-- [ ] **Probe completion exit criteria**:
-  - [ ] Probe data is emitted only for explicitly enabled probe names
-  - [ ] Startup validation failures never launch worker threads
-  - [ ] Probe startup and runtime behavior documented in `doc/pcc-usage-guide.md`
+- [x] **Probe completion exit criteria**:
+  - [x] Probe data is emitted only for explicitly enabled probe names
+  - [x] Startup validation failures never launch worker threads
+  - [x] Probe startup and runtime behavior documented in `doc/pcc-usage-guide.md`
 
 ### Quality & Testing
 
-- [ ] **End-to-end tests**:
-  - [ ] Test receiver.pdl compiles and runs
-  - [ ] Test --stats output format (task stats + shared buffer stats)
-  - [ ] Test probe emits data for enabled probe
-  - [ ] Test probe remains silent when not enabled
-  - [ ] Test unknown probe name exits with code `2` and startup error message
-  - [ ] Test `--probe-output` missing path exits with code `2`
-  - [ ] Test `--probe-output` open failure exits with code `2` and startup error message
-  - [ ] Test duplicate `--probe <name>` arguments are accepted and do not duplicate control state
+- [x] **End-to-end tests**:
+  - [x] Test receiver.pdl compiles and runs
+  - [x] Test --stats output format (task stats + shared buffer stats)
+  - [x] Test probe emits data for enabled probe
+  - [x] Test probe remains silent when not enabled
+  - [x] Test unknown probe name exits with code `2` and startup error message
+  - [x] Test `--probe-output` missing path exits with code `2`
+  - [x] Test `--probe-output` open failure exits with code `2` and startup error message
+  - [x] Test duplicate `--probe <name>` arguments are accepted and do not duplicate control state
 
 ---
 
