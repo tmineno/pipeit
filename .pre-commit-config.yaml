@@ -4,14 +4,14 @@ repos:
     hooks:
       - id: cargo-fmt
         name: cargo fmt
-        entry: cargo fmt --all -- --check
+        entry: cargo fmt --all
         language: system
         pass_filenames: false
         types: [rust]
 
       - id: cargo-clippy
         name: cargo clippy
-        entry: cargo clippy --all-targets -- -D warnings
+        entry: cargo clippy --all-targets --fix --allow-staged --allow-dirty -- -D warnings
         language: system
         pass_filenames: false
         types: [rust]
@@ -35,3 +35,4 @@ repos:
     rev: v0.17.2
     hooks:
       - id: markdownlint-cli2
+        args: ["--fix"]
