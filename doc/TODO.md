@@ -9,36 +9,44 @@
 
 ---
 
-## v0.1.1 - Complete Core Runtime (Current)
+## v0.1.1 - Probe Completion & Hardening (Current)
 
-**Goal**: Complete runtime features designed for v0.1.0 but not yet implemented. These are essential for production-ready generated code.
-
-**Criticality**: HIGH | **Complexity**: LOW-MEDIUM
+**Goal**: Complete probe runtime wiring and harden startup/runtime behavior with full end-to-end test coverage.
 
 ### Runtime Features
 
-- [ ] **Expanded CLI flags**:
-  - [ ] `--probe <name>` - Enable named probe (runtime wiring)
-  - [ ] `--probe-output <file>` - Set active probe output stream (default stderr)
+- [ ] **Probe runtime wiring and startup validation**:
+  - [ ] Build runtime map from probe name → generated `_probe_<name>_enabled` flag
+  - [ ] Wire `--probe <name>` to enable matching probe flags before task launch
+  - [ ] On unknown `--probe <name>`: print startup error and exit code `2`
+  - [ ] Support multiple `--probe` flags; duplicate names are idempotent
+  - [ ] Wire `--probe-output <file>` to `_probe_output` `FILE*` before task launch
+  - [ ] On `--probe-output` file open failure: print startup error and exit code `2` (hard-fail, no fallback)
+  - [ ] Keep default probe output on `stderr` when `--probe-output` is not provided
+  - [ ] Keep probe emission guarded for release builds (`#ifndef NDEBUG`)
 
-- [ ] **Functional probe output**:
-  - [ ] Wire `--probe <name>` to `_probe_<name>_enabled` flags
-  - [ ] Wire `--probe-output <file>` to `_probe_output` `FILE*`
+- [ ] **Probe completion exit criteria**:
+  - [ ] Probe data is emitted only for explicitly enabled probe names
+  - [ ] Startup validation failures never launch worker threads
+  - [ ] Probe startup and runtime behavior documented in `doc/pcc-usage-guide.md`
 
 ### Quality & Testing
 
 - [ ] **End-to-end tests**:
   - [ ] Test receiver.pdl compiles and runs
-  - [ ] Test --stats output format
-  - [ ] Test probe functionality
+  - [ ] Test --stats output format (task stats + shared buffer stats)
+  - [ ] Test probe emits data for enabled probe
+  - [ ] Test probe remains silent when not enabled
+  - [ ] Test unknown probe name exits with code `2` and startup error message
+  - [ ] Test `--probe-output` missing path exits with code `2`
+  - [ ] Test `--probe-output` open failure exits with code `2` and startup error message
+  - [ ] Test duplicate `--probe <name>` arguments are accepted and do not duplicate control state
 
 ---
 
 ## v0.1.2 - Standard Actor Library
 
 **Goal**: Provide well-tested, documented actors for common signal processing tasks. Prioritize simple, high-value actors before complex ones.
-
-**Criticality**: HIGH | **Complexity**: MEDIUM-HIGH
 
 ### Phase 1: Essential I/O & Math (Simple, High Value)
 
@@ -150,8 +158,6 @@
 
 **Goal**: Establish comprehensive performance baselines and identify bottlenecks. Measure what exists before optimizing.
 
-**Criticality**: MEDIUM | **Complexity**: MEDIUM
-
 ### Extended Benchmarks
 
 - [ ] **Compiler benchmarks**:
@@ -245,7 +251,7 @@
   - [ ] Compiler optimization flags
 
 - [ ] **Benchmark automation**:
-  - [ ] `benches/run_all.sh` - Run full suite, generate report
+  - [ ] Add `benches/run_all.sh` wrapper to run `benches/pdl_bench.sh` plus runtime benchmark build/run
   - [ ] JSON output format for results
   - [ ] Regression detection (compare against baseline)
   - [ ] CI integration: Track performance over commits
@@ -255,8 +261,6 @@
 ## v0.2.0 - Language Evolution (Type Inference)
 
 **Goal**: Improve PDL ergonomics and type system based on real usage experience. Design-first approach.
-
-**Criticality**: MEDIUM | **Complexity**: LOW (design), HIGH (implementation)
 
 ### Phase 1: Design & Specification
 
@@ -312,8 +316,6 @@
 
 **Goal**: Make Pipit easier to use and deploy in real projects.
 
-**Criticality**: LOW-MEDIUM | **Complexity**: MEDIUM-HIGH
-
 ### Runtime Improvements
 
 - [ ] Round-robin scheduler with thread pools
@@ -333,8 +335,6 @@
 ## v0.3.0 - Advanced Features (Future)
 
 **Goal**: Compiler optimizations, real-time scheduling, heterogeneous execution.
-
-**Criticality**: LOW | **Complexity**: HIGH
 
 ### Compiler Optimizations
 
@@ -367,8 +367,6 @@
 ## v0.4.0 - Production Hardening (Future)
 
 **Goal**: Observability, reliability, security, verification for production deployments.
-
-**Criticality**: LOW (until production use) | **Complexity**: HIGH
 
 ### Observability
 
