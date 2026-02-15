@@ -2,7 +2,7 @@
 
 A domain-specific language for describing clock-driven, real-time data pipelines using Synchronous Dataflow (SDF) semantics on shared memory.
 
-**⚠️ Work in Progress**: Pipit is under active development. The core compiler pipeline and runtime are functional (v0.1.0), but some runtime features and the standard actor library are still being implemented. See [TODO.md](doc/TODO.md) for the development roadmap.
+**⚠️ Work in Progress**: Pipit is under active development. The core compiler pipeline and runtime are functional, and performance/stdlib expansion is in progress. See [TODO.md](doc/TODO.md) for the development roadmap.
 
 ## What it does
 
@@ -33,17 +33,22 @@ clock 1kHz drain {
 ## Quick Start
 
 ```bash
-# Build the compiler
-cd compiler && cargo build --release
+# Build the compiler (from repo root)
+cargo build --release -p pcc
 
 # Compile a pipeline to C++
-cargo run -- ../examples/gain.pdl -I ../examples/actors.h --emit cpp -o gain.cpp
+target/release/pcc examples/gain.pdl \
+  -I runtime/libpipit/include/std_actors.h \
+  --emit cpp -o gain.cpp
 
 # Build the executable manually
-c++ -std=c++20 -O2 gain.cpp -I ../runtime/libpipit/include -I ../examples -lpthread -o gain
+c++ -std=c++20 -O2 gain.cpp -I runtime/libpipit/include -lpthread -o gain
 
-# Or compile directly to executable (one step)
-cargo run -- ../examples/gain.pdl -I ../examples/actors.h -o gain
+# Or compile directly to executable (one step, requires C++20)
+target/release/pcc examples/gain.pdl \
+  -I runtime/libpipit/include/std_actors.h \
+  --cflags=-std=c++20 \
+  -o gain
 
 # Run with duration and stats
 ./gain --duration 10s --stats
@@ -87,7 +92,7 @@ cargo run -- ../examples/gain.pdl -I ../examples/actors.h -o gain
 ```
 compiler/       Rust compiler (pcc)
   src/            parse → resolve → graph → analyze → schedule → codegen
-  tests/          262 tests (unit + C++ integration + end-to-end run)
+  tests/          unit + integration + end-to-end coverage
 runtime/        C++ runtime library (libpipit)
   libpipit/       Ring buffer, timer, statistics
 examples/       Example .pdl files and actor headers
@@ -96,7 +101,7 @@ doc/            Language spec, ADRs, usage guide
 
 ## Documentation
 
-- [Language Spec v0.1.0](doc/spec/pipit-lang-spec-v0.1.0.md)
+- [Language Spec v0.2.0](doc/spec/pipit-lang-spec-v0.2.0.md)
 - [pcc Usage Guide](doc/pcc-usage-guide.md)
 - [Development TODO](doc/TODO.md)
 
