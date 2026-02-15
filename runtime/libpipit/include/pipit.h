@@ -56,10 +56,20 @@ namespace pipit {
 template <typename T, std::size_t Capacity, std::size_t Readers = 1> class RingBuffer {
     static_assert(Capacity > 0, "RingBuffer capacity must be > 0");
     static_assert(Readers > 0, "RingBuffer must have at least one reader");
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "RingBuffer element type must be trivially copyable");
     static constexpr std::size_t N = Capacity;
 
-    alignas(64) std::atomic<std::size_t> head_{0};          // absolute write cursor
-    alignas(64) std::atomic<std::size_t> tails_[Readers]{}; // absolute read cursors
+    struct alignas(64) PaddedTail {
+        std::atomic<std::size_t> value{0};
+    };
+
+    alignas(64) std::atomic<std::size_t> head_{0}; // absolute write cursor
+    PaddedTail tails_[Readers];                    // absolute read cursors (cache-line isolated)
+    std::size_t cached_min_tail_{0};               // writer-private cached min tail
+    // Writer-side debug counters (single-writer updates).
+    std::uint64_t write_slow_path_count_{0};
+    std::uint64_t write_fail_count_{0};
     T buf_[N];
 
   public:
@@ -67,21 +77,34 @@ template <typename T, std::size_t Capacity, std::size_t Readers = 1> class RingB
 
     bool write(const T *src, std::size_t count) {
         std::size_t h = head_.load(std::memory_order_relaxed);
-        std::size_t min_tail = tails_[0].load(std::memory_order_acquire);
-        for (std::size_t i = 1; i < Readers; ++i) {
-            std::size_t t = tails_[i].load(std::memory_order_acquire);
-            if (t < min_tail)
-                min_tail = t;
+        // Fast path: check with cached min_tail (avoids O(Readers) acquire loads)
+        std::size_t used = h - cached_min_tail_;
+        if (used > Capacity || Capacity - used < count) {
+            ++write_slow_path_count_;
+            // Slow path: rescan all tails
+            std::size_t mt = tails_[0].value.load(std::memory_order_acquire);
+            for (std::size_t i = 1; i < Readers; ++i) {
+                std::size_t t = tails_[i].value.load(std::memory_order_acquire);
+                if (t < mt)
+                    mt = t;
+            }
+            cached_min_tail_ = mt;
+            used = h - cached_min_tail_;
+            if (used > Capacity) {
+                ++write_fail_count_;
+                return false;
+            }
+            if (Capacity - used < count) {
+                ++write_fail_count_;
+                return false;
+            }
         }
-        std::size_t used = h - min_tail;
-        if (used > Capacity)
-            return false;
-        std::size_t free = Capacity - used;
-        if (count > free)
-            return false;
-        for (std::size_t i = 0; i < count; ++i) {
-            buf_[(h + i) % N] = src[i];
-        }
+        // Two-phase memcpy (avoids per-element modulo)
+        std::size_t start = h % N;
+        std::size_t first = std::min(count, N - start);
+        std::memcpy(&buf_[start], src, first * sizeof(T));
+        if (first < count)
+            std::memcpy(&buf_[0], src + first, (count - first) * sizeof(T));
         head_.store(h + count, std::memory_order_release);
         return true;
     }
@@ -89,15 +112,18 @@ template <typename T, std::size_t Capacity, std::size_t Readers = 1> class RingB
     bool read(std::size_t reader_idx, T *dst, std::size_t count) {
         if (reader_idx >= Readers)
             return false;
-        std::size_t t = tails_[reader_idx].load(std::memory_order_relaxed);
+        std::size_t t = tails_[reader_idx].value.load(std::memory_order_relaxed);
         std::size_t h = head_.load(std::memory_order_acquire);
         std::size_t avail = h - t;
         if (count > avail)
             return false;
-        for (std::size_t i = 0; i < count; ++i) {
-            dst[i] = buf_[(t + i) % N];
-        }
-        tails_[reader_idx].store(t + count, std::memory_order_release);
+        // Two-phase memcpy (avoids per-element modulo)
+        std::size_t start = t % N;
+        std::size_t first = std::min(count, N - start);
+        std::memcpy(dst, &buf_[start], first * sizeof(T));
+        if (first < count)
+            std::memcpy(dst + first, &buf_[0], (count - first) * sizeof(T));
+        tails_[reader_idx].value.store(t + count, std::memory_order_release);
         return true;
     }
 
@@ -107,8 +133,15 @@ template <typename T, std::size_t Capacity, std::size_t Readers = 1> class RingB
         if (reader_idx >= Readers)
             return 0;
         std::size_t h = head_.load(std::memory_order_acquire);
-        std::size_t t = tails_[reader_idx].load(std::memory_order_acquire);
+        std::size_t t = tails_[reader_idx].value.load(std::memory_order_acquire);
         return h - t;
+    }
+
+    std::uint64_t debug_write_slow_path_count() const { return write_slow_path_count_; }
+    std::uint64_t debug_write_fail_count() const { return write_fail_count_; }
+    void debug_reset_write_counters() {
+        write_slow_path_count_ = 0;
+        write_fail_count_ = 0;
     }
 };
 

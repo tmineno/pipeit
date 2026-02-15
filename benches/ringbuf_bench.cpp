@@ -6,12 +6,39 @@
 #include <atomic>
 #include <benchmark/benchmark.h>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <pipit.h>
 #include <thread>
 #include <vector>
 
+#if defined(__linux__)
+#include <pthread.h>
+#include <sched.h>
+#endif
+
 using namespace pipit;
+
+static bool bench_pin_enabled() {
+    const char *v = std::getenv("PIPIT_BENCH_PIN");
+    return v != nullptr && v[0] != '\0' && v[0] != '0';
+}
+
+static void maybe_pin_current_thread(std::size_t cpu_hint) {
+#if defined(__linux__)
+    if (!bench_pin_enabled())
+        return;
+    unsigned int n = std::thread::hardware_concurrency();
+    if (n == 0)
+        return;
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(static_cast<int>(cpu_hint % n), &set);
+    (void)pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+#else
+    (void)cpu_hint;
+#endif
+}
 
 // ── High throughput: sustained write+read ───────────────────────────────────
 //
@@ -73,27 +100,49 @@ template <std::size_t Readers> static void BM_RingBuffer_Contention(benchmark::S
     static constexpr std::size_t CHUNK = 16;
     static constexpr uint64_t TOKENS = 100'000;
 
+    uint64_t total_written_tokens = 0;
+    uint64_t total_reader_tokens = 0;
+    uint64_t total_read_success = 0;
+    uint64_t total_read_fail = 0;
+    uint64_t total_write_slow_path = 0;
+    uint64_t total_write_fail = 0;
+
     for (auto _ : state) {
         RingBuffer<float, CAP, Readers> rb;
+        rb.debug_reset_write_counters();
         float write_data[CHUNK];
         for (std::size_t i = 0; i < CHUNK; ++i)
             write_data[i] = static_cast<float>(i);
 
         std::atomic<bool> done{false};
         std::vector<std::thread> readers;
+        std::atomic<uint64_t> read_success{0};
+        std::atomic<uint64_t> read_fail{0};
 
         // Launch reader threads
         for (std::size_t r = 0; r < Readers; ++r) {
-            readers.emplace_back([&rb, &done, r] {
+            readers.emplace_back([&rb, &done, &read_success, &read_fail, r] {
+                maybe_pin_current_thread(r + 1);
                 float buf[CHUNK];
+                uint64_t local_success = 0;
+                uint64_t local_fail = 0;
                 while (!done.load(std::memory_order_acquire)) {
-                    rb.read(r, buf, CHUNK);
+                    if (rb.read(r, buf, CHUNK)) {
+                        ++local_success;
+                    } else {
+                        ++local_fail;
+                    }
                 }
                 // Drain remaining
                 while (rb.read(r, buf, CHUNK)) {
+                    ++local_success;
                 }
+                read_success.fetch_add(local_success, std::memory_order_relaxed);
+                read_fail.fetch_add(local_fail, std::memory_order_relaxed);
             });
         }
+
+        maybe_pin_current_thread(0);
 
         // Writer: push tokens
         uint64_t written = 0;
@@ -107,14 +156,44 @@ template <std::size_t Readers> static void BM_RingBuffer_Contention(benchmark::S
         for (auto &t : readers)
             t.join();
 
-        state.SetItemsProcessed(written);
+        uint64_t iter_read_success = read_success.load(std::memory_order_relaxed);
+        uint64_t iter_read_fail = read_fail.load(std::memory_order_relaxed);
+
+        total_written_tokens += written;
+        total_reader_tokens += iter_read_success * CHUNK;
+        total_read_success += iter_read_success;
+        total_read_fail += iter_read_fail;
+        total_write_slow_path += rb.debug_write_slow_path_count();
+        total_write_fail += rb.debug_write_fail_count();
     }
+
+    state.SetItemsProcessed(total_written_tokens);
+    state.SetBytesProcessed(total_written_tokens * sizeof(float));
+    state.counters["writer_tokens"] = static_cast<double>(total_written_tokens);
+    state.counters["reader_tokens"] = static_cast<double>(total_reader_tokens);
+    state.counters["reader_tokens_per_sec"] =
+        benchmark::Counter(static_cast<double>(total_reader_tokens), benchmark::Counter::kIsRate);
+    state.counters["read_success"] = static_cast<double>(total_read_success);
+    state.counters["read_fail"] = static_cast<double>(total_read_fail);
+    state.counters["read_fail_pct"] =
+        (total_read_success + total_read_fail) > 0
+            ? (100.0 * static_cast<double>(total_read_fail) /
+               static_cast<double>(total_read_success + total_read_fail))
+            : 0.0;
+    state.counters["write_slow_path"] = static_cast<double>(total_write_slow_path);
+    state.counters["write_fail"] = static_cast<double>(total_write_fail);
+    state.counters["write_fail_pct"] =
+        ((total_written_tokens / CHUNK) + total_write_fail) > 0
+            ? (100.0 * static_cast<double>(total_write_fail) /
+               static_cast<double>((total_written_tokens / CHUNK) + total_write_fail))
+            : 0.0;
 }
 
 BENCHMARK(BM_RingBuffer_Contention<2>)->Name("BM_RingBuffer_Contention/2readers");
 BENCHMARK(BM_RingBuffer_Contention<4>)->Name("BM_RingBuffer_Contention/4readers");
 BENCHMARK(BM_RingBuffer_Contention<8>)->Name("BM_RingBuffer_Contention/8readers");
 BENCHMARK(BM_RingBuffer_Contention<16>)->Name("BM_RingBuffer_Contention/16readers");
+BENCHMARK(BM_RingBuffer_Contention<32>)->Name("BM_RingBuffer_Contention/32readers");
 
 // ── Buffer size scaling ─────────────────────────────────────────────────────
 //

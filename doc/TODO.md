@@ -272,17 +272,17 @@
   - [x] Add batched timer wake processing option for high-frequency schedules (10kHz+) (`set tick_rate = <freq>`, K = ceil(task_freq / tick_rate))
   - [x] Define target: lower `timer.wait() @10kHz` overhead share below 95% of timer+work budget (K=10 → ~7% framework overhead per firing; see ADR-009)
 
-- [ ] **Ring buffer contention optimization** (HIGH impact):
-  - [ ] Rework multi-reader tail publication to reduce atomic contention in `Contention/{2,4,8,16}readers`
-  - [ ] Add cache-line padding/alignment review for reader metadata and shared indices
-  - [ ] Evaluate batched read/write publish strategy to reduce synchronization frequency
-  - [ ] Define target: cut 16-reader latency regression (currently ~14x vs 2-reader) by at least 2x
+- [x] **Ring buffer contention optimization** (HIGH impact) — ADR-010:
+  - [x] Rework multi-reader tail publication to reduce atomic contention (PaddedTail: each tail gets own 64-byte cache line)
+  - [x] Add cache-line padding/alignment review for reader metadata (alignas(64) PaddedTail struct)
+  - [x] Evaluate batched read/write publish strategy (cached min_tail: O(1) amortized writer, two-phase memcpy)
+  - [x] Define target: cut 16-reader latency regression by at least 2x (see ADR-010 benchmarks)
 
-- [ ] **Memory false-sharing and bandwidth tuning** (HIGH impact):
-  - [ ] Eliminate false-sharing hotspots in memory benchmarks (`BM_Memory_FalseSharing/*`)
-  - [ ] Audit memory layout and allocation alignment for hot runtime structs (ring buffer + task stats)
-  - [ ] Tune working-set access patterns for large chunk/cacheline scenarios (`CacheLineUtil/256+`)
-  - [ ] Define target: reduce 8-reader false-sharing latency by at least 30%
+- [x] **Memory false-sharing and bandwidth tuning** (HIGH impact) — ADR-010:
+  - [x] Eliminate false-sharing hotspots in memory benchmarks (PaddedTail eliminates tails_ false sharing)
+  - [x] Audit memory layout and allocation alignment for hot runtime structs (head_ and each tail on separate cache lines)
+  - [x] Tune working-set access patterns for large chunk/cacheline scenarios (two-phase memcpy replaces per-element modulo)
+  - [x] Define target: reduce 8-reader false-sharing latency by at least 30% (see ADR-010 benchmarks)
 
 - [ ] **Affinity task-scaling optimization** (HIGH impact):
   - [ ] Investigate front-end stalls in `perf_affinity.sh` task-scaling path (IPC ~0.12, frontend idle ~69.85%)
