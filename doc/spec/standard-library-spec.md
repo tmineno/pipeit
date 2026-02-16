@@ -8,6 +8,12 @@
 | Actor | Input | Output | Description |
 |-------|-------|--------|-------------|
 | `constant` | void | float[N] | Constant signal source |
+| `sine` | void | float[N] | Sine wave generator |
+| `square` | void | float[N] | Square wave generator |
+| `sawtooth` | void | float[N] | Sawtooth wave generator |
+| `triangle` | void | float[N] | Triangle wave generator |
+| `noise` | void | float[N] | White noise generator |
+| `impulse` | void | float[N] | Impulse train generator |
 | `fft` | float[N] | cfloat[N] | Fast Fourier Transform |
 | `c2r` | cfloat[N] | float[N] | Complex to Real conversion |
 | `fir` | float[N] | float[1] | Complex magnitude |
@@ -53,6 +59,154 @@ ACTOR(constant, IN(void, 0), OUT(float, N), RUNTIME_PARAM(float, value) PARAM(in
 
 ```pdl
 clock 1kHz t { constant(1.0) | stdout() }
+```
+
+---
+
+### sine
+
+**Sine wave generator** — Generates a sinusoidal signal: `amp * sin(2 * pi * freq * t)`. Time is derived from the task clock via pipit_iteration_index() and pipit_task_rate_hz(), ensuring phase continuity across firings.
+
+**Signature:**
+
+```cpp
+ACTOR(sine, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N))
+```
+
+**Parameters:**
+
+- `freq` - Frequency in Hz
+- `amp` - Peak amplitude
+
+**Returns:** ACTOR_OK on success
+
+**Example:**
+
+```pdl
+clock 48kHz audio { sine(440.0, 1.0) | stdout() }
+```
+
+---
+
+### square
+
+**Square wave generator** — Generates a square wave with 50% duty cycle: +amp for the first half of each period, -amp for the second half.
+
+**Signature:**
+
+```cpp
+ACTOR(square, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N))
+```
+
+**Parameters:**
+
+- `freq` - Frequency in Hz
+- `amp` - Peak amplitude
+
+**Returns:** ACTOR_OK on success
+
+**Example:**
+
+```pdl
+clock 1kHz t { square(100.0, 1.0) | stdout() }
+```
+
+---
+
+### sawtooth
+
+**Sawtooth wave generator** — Generates a sawtooth wave that ramps linearly from -amp to +amp over each period.
+
+**Signature:**
+
+```cpp
+ACTOR(sawtooth, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N))
+```
+
+**Parameters:**
+
+- `freq` - Frequency in Hz
+- `amp` - Peak amplitude
+
+**Returns:** ACTOR_OK on success
+
+**Example:**
+
+```pdl
+clock 1kHz t { sawtooth(100.0, 1.0) | stdout() }
+```
+
+---
+
+### triangle
+
+**Triangle wave generator** — Generates a triangle wave that ramps linearly from -amp to +amp and back over each period.
+
+**Signature:**
+
+```cpp
+ACTOR(triangle, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N))
+```
+
+**Parameters:**
+
+- `freq` - Frequency in Hz
+- `amp` - Peak amplitude
+
+**Returns:** ACTOR_OK on success
+
+**Example:**
+
+```pdl
+clock 1kHz t { triangle(100.0, 1.0) | stdout() }
+```
+
+---
+
+### noise
+
+**White noise generator** — Generates uniformly distributed pseudo-random noise in the range [-amp, +amp] using a fast xorshift32 PRNG. Deterministic for a given sequence of firings (state persists across calls).
+
+**Signature:**
+
+```cpp
+ACTOR(noise, IN(void, 0), OUT(float, N), PARAM(float, amp) PARAM(int, N))
+```
+
+**Parameters:**
+
+- `amp` - Peak amplitude
+
+**Returns:** ACTOR_OK on success
+
+**Example:**
+
+```pdl
+clock 1kHz t { noise(0.5) | stdout() }
+```
+
+---
+
+### impulse
+
+**Impulse train generator** — Generates a periodic impulse: outputs 1.0 every `period` samples and 0.0 otherwise. Uses pipit_iteration_index() for sample position.
+
+**Signature:**
+
+```cpp
+ACTOR(impulse, IN(void, 0), OUT(float, N), PARAM(int, period) PARAM(int, N))
+```
+
+**Parameters:**
+
+- `period` - Impulse period in samples (must be > 0)
+
+**Returns:** ACTOR_OK on success
+
+**Example:**
+
+```pdl
+clock 1kHz t { impulse(100) | stdout() }
 ```
 
 ---

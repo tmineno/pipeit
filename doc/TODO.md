@@ -331,8 +331,18 @@
 
 ### Future (Separate Phase)
 
-- [ ] **Oscilloscope GUI** (`tools/pipscope/`): ImGui + ImPlot standalone app receiving PPKT via UDP
-- [ ] **Function waveform generators**: `sine`, `square`, `sawtooth`, `triangle`, `noise`, `impulse`
+- [x] **Oscilloscope GUI** (`tools/pipscope/`): ImGui + ImPlot standalone app receiving PPKT via UDP
+  - [x] PPKT receiver with per-channel sample buffers (`ppkt_receiver.h`)
+  - [x] ImGui + ImPlot waveform display with auto-channel discovery
+  - [x] Controls: Pause/Resume, Auto-Y, Samples slider (64-65536)
+  - [x] CLI: `pipscope --port <port>` / `pipscope -p <port>`
+  - [x] CMake FetchContent build (GLFW 3.4, ImGui v1.91.8, ImPlot v0.16)
+  - [x] E2E tests: 17 tests (SampleBuffer, dtype conversion, UDP loopback receiver)
+- [x] **Function waveform generators**: `sine`, `square`, `sawtooth`, `triangle`, `noise`, `impulse`
+  - [x] 6 source actors in `std_actors.h` (phase via `pipit_iteration_index()` / `pipit_task_rate_hz()`)
+  - [x] 12 runtime unit tests (`test_waveform.cpp`)
+  - [x] 6 codegen compile tests (`codegen_compile.rs`)
+  - [x] stdlib docs auto-generated (`standard-library-spec.md`, 29 actors total)
 
 ---
 

@@ -27,3 +27,4 @@ a.out
 # Temp
 tmp/
 benches/results/
+imgui.ini
