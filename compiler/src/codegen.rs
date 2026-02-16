@@ -675,94 +675,122 @@ impl<'a> CodegenCtx<'a> {
         }
         let meta = meta.unwrap();
 
-        let in_count = self
-            .resolve_port_rate_val(&meta.in_shape, meta, args, shape_constraint)
-            .unwrap_or(0);
-        let out_count = self
-            .resolve_port_rate_val(&meta.out_shape, meta, args, shape_constraint)
-            .unwrap_or(0);
+        let in_count = self.resolve_port_rate_val(&meta.in_shape, meta, args, shape_constraint);
+        let out_count = self.resolve_port_rate_val(&meta.out_shape, meta, args, shape_constraint);
         let in_cpp = pipit_type_to_cpp(meta.in_type);
         let _out_cpp = pipit_type_to_cpp(meta.out_type);
 
         // Input: find upstream edge buffers
         let incoming_edges: Vec<&Edge> = sub.edges.iter().filter(|e| e.target == node.id).collect();
 
-        let in_ptr =
-            if meta.in_type == PipitType::Void || in_count == 0 || incoming_edges.is_empty() {
-                "nullptr".to_string()
-            } else if incoming_edges.len() == 1 {
-                let edge = incoming_edges[0];
-                if let Some(buf_name) = edge_bufs.get(&(edge.source, edge.target)) {
-                    let rep = self.firing_repetition(sched, node.id);
-                    if rep > 1 {
-                        format!("&{}[_r * {}]", buf_name, in_count)
-                    } else {
-                        buf_name.clone()
-                    }
+        let in_ptr = if meta.in_type == PipitType::Void || incoming_edges.is_empty() {
+            "nullptr".to_string()
+        } else if incoming_edges.len() == 1 {
+            let edge = incoming_edges[0];
+            if let Some(buf_name) = edge_bufs.get(&(edge.source, edge.target)) {
+                let rep = self.firing_repetition(sched, node.id);
+                if rep > 1 {
+                    let stride = in_count.unwrap_or_else(|| {
+                        self.edge_buffer_tokens(sched, edge.source, edge.target) / rep
+                    });
+                    format!("&{}[_r * {}]", buf_name, stride)
                 } else {
-                    "nullptr".to_string()
+                    buf_name.clone()
                 }
             } else {
-                // Multi-input actor: concatenate into a local buffer
-                let local_in = format!("_in_{}", node.id.0);
-                let _ = writeln!(self.out, "{}{} {}[{}];", indent, in_cpp, local_in, in_count);
-                let mut offset = 0u32;
-                let per_edge = in_count / incoming_edges.len() as u32;
-                for edge in &incoming_edges {
-                    if let Some(buf_name) = edge_bufs.get(&(edge.source, edge.target)) {
-                        let rep = self.firing_repetition(sched, node.id);
-                        let src_expr = if rep > 1 {
-                            format!("&{}[_r * {}]", buf_name, per_edge)
-                        } else {
-                            buf_name.clone()
-                        };
-                        let _ = writeln!(
-                            self.out,
-                            "{}std::memcpy(&{}[{}], {}, {} * sizeof({}));",
-                            indent, local_in, offset, src_expr, per_edge, in_cpp
-                        );
-                    }
-                    offset += per_edge;
+                "nullptr".to_string()
+            }
+        } else {
+            // Multi-input actor: concatenate into a local buffer
+            let total_tokens: u32 = incoming_edges
+                .iter()
+                .map(|e| self.edge_buffer_tokens(sched, e.source, e.target))
+                .sum();
+            let effective_in = in_count.unwrap_or(total_tokens);
+            let local_in = format!("_in_{}", node.id.0);
+            let _ = writeln!(
+                self.out,
+                "{}{} {}[{}];",
+                indent, in_cpp, local_in, effective_in
+            );
+            let mut offset = 0u32;
+            let per_edge = effective_in / incoming_edges.len() as u32;
+            for edge in &incoming_edges {
+                if let Some(buf_name) = edge_bufs.get(&(edge.source, edge.target)) {
+                    let rep = self.firing_repetition(sched, node.id);
+                    let src_expr = if rep > 1 {
+                        format!("&{}[_r * {}]", buf_name, per_edge)
+                    } else {
+                        buf_name.clone()
+                    };
+                    let _ = writeln!(
+                        self.out,
+                        "{}std::memcpy(&{}[{}], {}, {} * sizeof({}));",
+                        indent, local_in, offset, src_expr, per_edge, in_cpp
+                    );
                 }
-                local_in
-            };
+                offset += per_edge;
+            }
+            local_in
+        };
 
         // Output buffer
         let outgoing_edges: Vec<&Edge> = sub.edges.iter().filter(|e| e.source == node.id).collect();
 
-        let out_ptr =
-            if meta.out_type == PipitType::Void || out_count == 0 || outgoing_edges.is_empty() {
-                "nullptr".to_string()
-            } else if outgoing_edges.len() == 1 {
-                let edge = outgoing_edges[0];
-                if let Some(buf_name) = edge_bufs.get(&(edge.source, edge.target)) {
-                    let rep = self.firing_repetition(sched, node.id);
-                    if rep > 1 {
-                        format!("&{}[_r * {}]", buf_name, out_count)
-                    } else {
-                        buf_name.clone()
-                    }
+        let out_ptr = if meta.out_type == PipitType::Void || outgoing_edges.is_empty() {
+            "nullptr".to_string()
+        } else if outgoing_edges.len() == 1 {
+            let edge = outgoing_edges[0];
+            if let Some(buf_name) = edge_bufs.get(&(edge.source, edge.target)) {
+                let rep = self.firing_repetition(sched, node.id);
+                if rep > 1 {
+                    let stride = out_count.unwrap_or_else(|| {
+                        self.edge_buffer_tokens(sched, edge.source, edge.target) / rep
+                    });
+                    format!("&{}[_r * {}]", buf_name, stride)
                 } else {
-                    "nullptr".to_string()
+                    buf_name.clone()
                 }
             } else {
-                // Multiple outgoing edges: write to first, then copy to rest (handled by fork)
-                if let Some(buf_name) =
-                    edge_bufs.get(&(outgoing_edges[0].source, outgoing_edges[0].target))
-                {
-                    let rep = self.firing_repetition(sched, node.id);
-                    if rep > 1 {
-                        format!("&{}[_r * {}]", buf_name, out_count)
-                    } else {
-                        buf_name.clone()
-                    }
+                "nullptr".to_string()
+            }
+        } else {
+            // Multiple outgoing edges: write to first, then copy to rest (handled by fork)
+            if let Some(buf_name) =
+                edge_bufs.get(&(outgoing_edges[0].source, outgoing_edges[0].target))
+            {
+                let rep = self.firing_repetition(sched, node.id);
+                if rep > 1 {
+                    let stride = out_count.unwrap_or_else(|| {
+                        self.edge_buffer_tokens(
+                            sched,
+                            outgoing_edges[0].source,
+                            outgoing_edges[0].target,
+                        ) / rep
+                    });
+                    format!("&{}[_r * {}]", buf_name, stride)
                 } else {
-                    "nullptr".to_string()
+                    buf_name.clone()
                 }
-            };
+            } else {
+                "nullptr".to_string()
+            }
+        };
+
+        // Build schedule-based dimension overrides for symbolic params that
+        // couldn't be resolved from args or shape constraints.  The SDF solver
+        // computes per-edge token counts that give us the correct value.
+        let schedule_dim_overrides =
+            self.build_schedule_dim_overrides(meta, args, shape_constraint, sched, node.id, sub);
 
         // Construct actor and fire, check return value
-        let params = self.format_actor_params(task_name, meta, args, shape_constraint);
+        let params = self.format_actor_params(
+            task_name,
+            meta,
+            args,
+            shape_constraint,
+            &schedule_dim_overrides,
+        );
         let call = if params.is_empty() {
             format!("Actor_{}{{}}({}, {})", actor_name, in_ptr, out_ptr)
         } else {
@@ -1506,6 +1534,7 @@ impl<'a> CodegenCtx<'a> {
         meta: &ActorMeta,
         args: &[Arg],
         shape_constraint: Option<&ShapeConstraint>,
+        schedule_dim_overrides: &HashMap<String, u32>,
     ) -> String {
         let mut parts = Vec::new();
         // Track const array args used for count params so they can auto-fill span params.
@@ -1533,10 +1562,12 @@ impl<'a> CodegenCtx<'a> {
                     }
                 }
             } else if param.kind == ParamKind::Param {
-                // No arg at this index — try to infer dimension param from shape constraint
+                // No arg at this index — try to infer dimension param from shape constraint,
+                // then from span args, then from schedule-resolved edge buffer sizes
                 if let Some(val) = self
                     .resolve_dim_param_from_shape(&param.name, meta, shape_constraint)
                     .or_else(|| self.infer_dim_param_from_span_args(&param.name, meta, args))
+                    .or_else(|| schedule_dim_overrides.get(&param.name).copied())
                 {
                     parts.push(val.to_string());
                 } else if let Some(array_arg) = last_array_const {
@@ -1859,6 +1890,86 @@ impl<'a> CodegenCtx<'a> {
 
     fn edge_buffer_tokens(&self, sched: &SubgraphSchedule, src: NodeId, tgt: NodeId) -> u32 {
         sched.edge_buffers.get(&(src, tgt)).copied().unwrap_or(1)
+    }
+
+    /// Build dimension overrides from the SDF schedule for symbolic params that
+    /// couldn't be resolved from args or shape constraints.
+    ///
+    /// When both sides of an edge have symbolic port rates (e.g. sine OUT(float,N)
+    /// → socket_write IN(float,N)), shape inference can't propagate.  But the SDF
+    /// balance solver has already computed the per-edge token count, so we derive
+    /// the dimension value from: edge_tokens / firing_repetition.
+    fn build_schedule_dim_overrides(
+        &self,
+        meta: &ActorMeta,
+        args: &[Arg],
+        shape_constraint: Option<&ShapeConstraint>,
+        sched: &SubgraphSchedule,
+        node_id: NodeId,
+        sub: &Subgraph,
+    ) -> HashMap<String, u32> {
+        let mut overrides = HashMap::new();
+        let rep = self.firing_repetition(sched, node_id);
+
+        // Check input shape dims
+        for dim in &meta.in_shape.dims {
+            if let TokenCount::Symbolic(sym) = dim {
+                if overrides.contains_key(sym.as_str()) {
+                    continue;
+                }
+                // Skip if already resolvable
+                if self
+                    .resolve_dim_param_from_shape(sym, meta, shape_constraint)
+                    .or_else(|| self.infer_dim_param_from_span_args(sym, meta, args))
+                    .is_some()
+                {
+                    continue;
+                }
+                // Also skip if there's an explicit arg for this param
+                if let Some(idx) = meta.params.iter().position(|p| p.name == *sym) {
+                    if args.get(idx).is_some() {
+                        continue;
+                    }
+                }
+                // Derive from incoming edge buffer tokens
+                if let Some(edge) = sub.edges.iter().find(|e| e.target == node_id) {
+                    let tokens = self.edge_buffer_tokens(sched, edge.source, edge.target);
+                    if rep > 0 {
+                        overrides.insert(sym.clone(), tokens / rep);
+                    }
+                }
+            }
+        }
+
+        // Check output shape dims
+        for dim in &meta.out_shape.dims {
+            if let TokenCount::Symbolic(sym) = dim {
+                if overrides.contains_key(sym.as_str()) {
+                    continue;
+                }
+                if self
+                    .resolve_dim_param_from_shape(sym, meta, shape_constraint)
+                    .or_else(|| self.infer_dim_param_from_span_args(sym, meta, args))
+                    .is_some()
+                {
+                    continue;
+                }
+                if let Some(idx) = meta.params.iter().position(|p| p.name == *sym) {
+                    if args.get(idx).is_some() {
+                        continue;
+                    }
+                }
+                // Derive from outgoing edge buffer tokens
+                if let Some(edge) = sub.edges.iter().find(|e| e.source == node_id) {
+                    let tokens = self.edge_buffer_tokens(sched, edge.source, edge.target);
+                    if rep > 0 {
+                        overrides.insert(sym.clone(), tokens / rep);
+                    }
+                }
+            }
+        }
+
+        overrides
     }
 }
 

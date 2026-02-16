@@ -1,0 +1,30 @@
+# socket_stream.pdl — Source & Sink with PPKT socket I/O
+# ======================================================
+# Demonstrates: socket_write (sink), socket_read (source),
+#               PPKT protocol streaming, waveform generators,
+#               inter-process pipelines via UDP
+#
+# Usage:
+#   # Terminal 1 — run this pipeline (generates + sends, receives + prints)
+#   pcc examples/socket_stream.pdl \
+#     -I runtime/libpipit/include/std_actors.h \
+#     -I runtime/libpipit/include/std_sink.h \
+#     -I runtime/libpipit/include/std_source.h \
+#     --cflags=-std=c++20 -o socket_stream
+#   ./socket_stream --duration 5s --stats
+#
+#   # Terminal 2 (optional) — view with oscilloscope
+#   tools/pipscope/build/pipscope --port 9100
+
+param freq = 10000000
+param amp  = 0.8
+
+# Generate a sine wave and stream it out via UDP
+clock 100MHz sender {
+    sine($freq, $amp) | socket_write("localhost:9100", 0)
+}
+
+# Receive samples from another process and print them
+clock 1kHz receiver {
+    socket_read("localhost:9200") | stdout()
+}
