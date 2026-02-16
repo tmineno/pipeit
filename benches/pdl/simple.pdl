@@ -1,6 +1,6 @@
-# Simple pipeline benchmark - minimal overhead baseline
-# Single task, simple actor chain
+# Simple pipeline benchmark - baseline single-task execution
+# Exercises clocked execution and per-task stats behavior.
 
-clock 100kHz process {
-    adc(0) | mul(2.0) | mul(0.5) | delay(1, 0.0) | stdout()
+clock 10kHz process {
+    constant(0.0) | mul(2.0) | mul(0.5) | delay(1, 0.0) | stdout()
 }

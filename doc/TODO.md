@@ -160,80 +160,54 @@
 
 **Goal**: Establish comprehensive performance baselines and identify bottlenecks. Measure what exists before optimizing.
 
-### Extended Benchmarks
+### KPI Suite Finalization (2026-02-16)
+
+- [x] Consolidate benchmark scope to spec-aligned KPI suites:
+  - [x] Keep: `compiler`, `ringbuf`, `timer`, `thread`, `pdl`
+  - [x] Remove non-essential suites from `benches/`: `runtime`, `actor`, `affinity`, `memory`, `latency`, `perf`
+  - [x] Consolidate benchmark/report flow into single script: `benches/run_all.sh`
+  - [x] Remove unused schema and legacy telemetry/report helper scripts
+  - [x] Tighten benchmark conditions to representative runtime ranges (1kHz–10MHz effective, 1–8 readers)
+  - [x] Document finalized KPI definitions and conditions in `benches/README.md`
+  - [x] Document benchmark consolidation decision in ADR-012 (`doc/adr/012-benchmark-suite-kpi-consolidation.md`)
+
+### Benchmark Suites (Final)
 
 - [x] **Compiler benchmarks** (`compiler/benches/compiler_bench.rs`):
-  - [x] Large pipeline compilation (100+ actors, 20+ tasks) — `generate_large_pipeline(20, 5)`
-  - [x] Deep nesting (define within define, 5+ levels) — `generate_deep_nesting(5)`
-  - [x] Wide fan-out (single source → 50 consumers via taps) — `generate_wide_fanout(50)`
-  - [x] Modal complexity (10+ modes, 5+ control signals) — `generate_modal_complex(10)`
-  - [x] Incremental compilation time (measure per-phase cost) — `bench_per_phase` (parse/resolve/graph/analyze/schedule/codegen)
-  - [x] Full pipeline with loaded registry — `bench_full_pipeline_loaded` (parse through codegen)
-  - [x] Parse scaling benchmark — `bench_parse_scaling` (1/5/10/20/50 tasks)
+  - [x] Parse latency KPI for representative scenarios (`simple`, `multitask`, `complex`, `modal`)
+  - [x] Full compile latency KPI (`parse -> resolve -> graph -> analyze -> schedule -> codegen`)
+  - [x] Phase latency breakdown KPI (`parse`, `resolve`, `graph`, `analyze`, `schedule`, `codegen`)
+  - [x] Parse scaling KPI (1/5/10/20/40 tasks)
 
 - [x] **Ring buffer stress tests** (`benches/ringbuf_bench.cpp`):
   - [x] High throughput: 1M tokens write+read (writer+reader threads)
-  - [x] Multi-reader contention: 2, 4, 8, 16 readers (templated)
-  - [x] Buffer size scaling: 64, 256, 1K, 4K, 16K, 64K tokens
-  - [x] Chunk size scaling: 1, 4, 16, 64, 256, 1024 tokens per transfer
-  - [x] Cache effects: Measure L1/L2/L3 hit rates — `perf/perf_ringbuf.sh` (perf stat on SizeScaling benchmarks)
-  - [x] NUMA effects: Cross-socket read/write performance — `perf/perf_numa.sh` (CCD-distance via taskset on single-node; numactl on multi-node)
+  - [x] Multi-reader contention: 1, 2, 4, 8 readers
+  - [x] Buffer size scaling: 256, 1K, 4K, 16K tokens
+  - [x] Chunk size scaling: 16, 64, 256 tokens per transfer
 
 - [x] **Timer precision benchmarks** (`benches/timer_bench.cpp`):
-  - [x] Frequency sweep: 1Hz to 1MHz in 10x steps
-  - [x] Jitter measurement: Histogram of tick latency (10k ticks, percentile breakdown)
+  - [x] Frequency sweep: 1kHz, 10kHz, 48kHz, 100kHz, 1MHz
+  - [x] Jitter measurement with percentile stats and overrun counts
+  - [x] Spin-wait precision trade-off (`timer_spin`: 0/10us/50us)
+  - [x] Batch vs single comparison (`K=1` vs `K=10`)
+  - [x] High-frequency batched behavior (`K=1/10/100`)
   - [ ] Long-running stability: 24-hour drift test (deferred — too long for CI)
-  - [x] Overrun recovery: Measure slip/backlog behavior (force overrun + reset_phase)
-  - [x] Thread wake-up latency: Best/worst/median (1k ticks at 1kHz)
 
 - [x] **Task scheduling overhead** (`benches/thread_bench.cpp`):
-  - [x] Thread creation/join cost
-  - [x] Context switch overhead between tasks (atomic ping-pong)
-  - [x] Empty pipeline (minimal actor work, measure framework overhead)
-  - [x] Scaling: 1, 2, 4, 8, 16, 32 concurrent tasks
-  - [x] Timer overhead (pure timer object cost, no sleep)
-  - [x] CPU affinity impact on performance — `affinity_bench.cpp` + `perf/perf_affinity.sh` (topology probed from sysfs)
-
-- [x] **Memory subsystem** (`benches/memory_bench.cpp` + `perf/perf_memory.sh`):
-  - [x] Total memory footprint per task — `BM_Memory_Footprint` (sizeof via counters)
-  - [x] Cache line utilization in RingBuffer — `BM_Memory_CacheLineUtil` + perf L1-dcache analysis
-  - [x] False sharing detection — `BM_Memory_FalseSharing` (1-8 readers) + perf cache-miss scaling
-  - [x] Memory bandwidth saturation point — `BM_Memory_Bandwidth` (4KB-16MB memcpy)
-  - [x] Page fault impact — `BM_Memory_PageFault_Cold/Warm` + perf page-fault counters
-
-- [x] **Actor performance** (`benches/actor_bench.cpp`):
-  - [x] Per-actor microbenchmarks (FFT, FIR, mul, add, sub, div, abs, sqrt, mean, rms, min, max, c2r, mag, decimate)
-  - [x] FFT scaling: N=64, 256, 1024, 4096
-  - [x] FIR tap scaling: 5-tap, 16-tap, 64-tap
-  - [x] Vectorization effectiveness — `perf/perf_actor.sh` (IPC as SIMD proxy across actors/FFT/FIR)
-  - [x] Pipeline stalls (data dependencies, cache misses) — `perf/perf_actor.sh` (L1-dcache, stalled-cycles)
-  - [ ] Actor fusion potential (requires schedule-fusion implementation)
+  - [x] Deadline miss rate KPI (`BM_TaskDeadline`)
+  - [x] Task scaling KPI (`BM_TaskScaling`)
+  - [x] K-factor batching KPI (`BM_KFactorBatching`)
+  - [x] High-frequency tick-rate KPI (`BM_HighFreqTickRate`)
 
 - [x] **End-to-end workloads** (`benches/pdl/`):
-  - [x] SDR receiver chain (1 MHz capture + 100 kHz demod) — `sdr_receiver.pdl`
-  - [x] Audio processing (48 kHz effects chain) — `audio_chain.pdl`
-  - [x] Sensor fusion (5 sensors @ 1 kHz + aggregator) — `sensor_fusion.pdl`
+  - [x] Modal/control workload — `modal.pdl`
+  - [x] Multi-task workload — `multitask.pdl`
+  - [x] SDR workload — `sdr_receiver.pdl`
+  - [x] Simple baseline workload — `simple.pdl`
 
-### Profiling & Analysis
-
-- [x] **Profiling with perf** (`perf/perf_profile.sh` + `perf/perf_flamegraph.sh`):
-  - [x] CPU hotspots — perf record + perf report (per benchmark binary)
-  - [x] Branch mispredictions — perf stat branch-misses
-  - [x] Cache misses (L1/L2/L3) — perf stat L1-dcache-load-misses + cache-misses
-  - [x] TLB misses — perf stat dTLB/iTLB-load-misses
-  - [x] Flame graphs for representative workloads — SVG via FlameGraph tools
-
-- [x] **Lock contention analysis** (`perf/perf_contention.sh`):
-  - [x] Atomic contention in RingBuffer (multi-reader) — cache-miss scaling as reader count grows
-  - [x] Memory ordering overhead — 1-reader vs multi-reader IPC comparison
-  - [x] Lock-free algorithm inefficiencies — stalled-cycles + cache-miss proxy analysis
-
-- [x] **Latency breakdown** (`benches/latency_bench.cpp`):
-  - [x] Time per actor firing (min/avg/max/p99) — percentile tracking for mul, fft, fir, mean, c2r, rms
-  - [x] Timer overhead vs actual work — timer.wait() vs actor compute ratio
-  - [x] Ring buffer read/write vs compute — component-level budget breakdown
-  - [x] Task wake-up to first instruction — thread creation to first timestamp
-  - [x] End-to-end latency budget (source → sink) — mul→fir→mean pipeline budget
+- [x] **De-scoped from active workflow**:
+  - [x] Remove legacy perf helper scripts and telemetry-only benchmark paths
+  - [x] Remove legacy standalone report scripts and canonical schema validation path
 
 - [ ] **Comparison with alternatives** (deferred — requires GNU Radio setup):
   - [ ] GNU Radio: Same pipeline, compare throughput
@@ -242,25 +216,26 @@
 
 ### Documentation
 
-- [ ] **Performance spec sheet** (`doc/PERFORMANCE.md`):
-  - [ ] Hardware tested (CPU, cache, RAM, OS)
-  - [ ] Compiler performance (parse time, memory, codegen size)
-  - [ ] Runtime performance (ring buffer, timer, task overhead)
-  - [ ] Scaling characteristics (tasks, pipeline depth, buffer sizes)
-  - [ ] Real-world workload benchmarks
+- [ ] **Performance spec sheet** (`doc/performance-analysis-report.md`):
+  - [x] Hardware tested (CPU, cache, RAM, OS)
+  - [x] Compiler performance (parse time, memory, codegen size)
+  - [x] Runtime performance (ring buffer, timer, task overhead)
+  - [x] Scaling characteristics (tasks, pipeline depth, buffer sizes)
+  - [x] Real-world workload benchmarks
   - [ ] Comparison table (Pipit vs GNU Radio vs hand-coded)
-  - [ ] Known limitations (frequency limits, buffer constraints)
+  - [x] Known limitations (frequency limits, buffer constraints)
 
-- [ ] **Performance tuning guide** (`doc/tuning.md`):
-  - [ ] Buffer sizing guidelines
-  - [ ] Thread/task mapping best practices
-  - [ ] Overrun policy selection criteria
+- [ ] **Performance tuning guide** (`doc/performance-analysis-report.md`):
+  - [x] Buffer sizing guidelines
+  - [x] Thread/task mapping best practices
+  - [x] Overrun policy selection criteria
   - [ ] CPU affinity and NUMA considerations
   - [ ] Compiler optimization flags
 
 - [x] **Benchmark automation**:
   - [x] Add `benches/run_all.sh` wrapper to run all benchmark suites
-  - [x] JSON output format for results (Google Benchmark JSON + Criterion HTML)
+  - [x] Consolidate run/report/json->md workflow in single script (ADR-012)
+  - [x] JSON output format for runtime benchmark results
   - [ ] Regression detection (compare against baseline)
   - [ ] CI integration: Track performance over commits
 
@@ -296,8 +271,8 @@
   - [ ] Add long-running drift/stability benchmark harness (non-CI nightly)
 
 - [ ] **Benchmark harness correctness and reproducibility** (HIGH priority for trustworthy data):
-  - [ ] Fix compiler benchmark invocation (`--output-format` incompatibility) so compiler section is truly measured
-  - [ ] Fix PDL benchmark compile failures so end-to-end workloads emit runtime stats
+  - [x] Fix compiler benchmark invocation (`--output-format` incompatibility) so compiler section is truly measured
+  - [x] Fix PDL benchmark compile failures so end-to-end workloads emit runtime stats
   - [ ] Make flamegraph step robust in offline environments (preinstalled tools path or graceful skip with instructions)
   - [ ] Add release/perf build mode requirement checks and report when debug libraries skew results
   - [ ] Add optional ASLR/state pinning guidance for reproducible local perf runs

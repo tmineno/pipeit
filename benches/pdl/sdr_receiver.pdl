@@ -1,16 +1,15 @@
-# SDR receiver chain benchmark — realistic signal processing workload
-# Two tasks: high-rate capture with FFT/FIR, lower-rate demodulation
+# SDR receiver benchmark — multi-rate chain with shared buffer
+# Two tasks: capture FFT + reduction, lower-rate demodulation.
 #
 # Exercises: shared buffers, multi-rate, FFT, FIR, decimation
 
-const demod_coeff = [0.05, 0.1, 0.15, 0.2, 0.25, 0.2, 0.15, 0.1, 0.05]
 param gain = 1.0
 
-clock 1MHz capture {
-    adc(0) | mul($gain) | fft(256) | c2r() | :raw | fir(9, demod_coeff) -> baseband
-    :raw | mag() | stdout()
+clock 10kHz capture {
+    constant(0.0) | mul($gain) | fft(256) | :spec | c2r() | mean(256) -> baseband
+    :spec | mag(256) | mean(256) | stdout()
 }
 
-clock 100kHz demod {
+clock 1kHz demod {
     @baseband | decimate(10) | mul(1.0) | stdout()
 }

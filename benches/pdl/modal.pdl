@@ -1,15 +1,15 @@
 # Modal benchmark - CSDF mode switching
-# Tests control flow and mode transition overhead
+# Tests control subgraph + mode transition semantics.
 
-clock 50kHz adaptive {
+clock 10kHz adaptive {
     control {
-        adc(0) | detect() -> ctrl
+        constant(0.0) | detect() -> ctrl
     }
     mode low {
-        adc(1) | mul(1.0) | stdout()
+        constant(0.0) | mul(1.0) | stdout()
     }
     mode high {
-        adc(2) | mul(2.0) | stdout()
+        constant(0.0) | mul(2.0) | stdout()
     }
     switch(ctrl, low, high) default low
 }

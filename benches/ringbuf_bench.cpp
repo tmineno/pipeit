@@ -98,18 +98,16 @@ BENCHMARK(BM_RingBuffer_Throughput)->Unit(benchmark::kMillisecond);
 template <std::size_t Readers> static void BM_RingBuffer_Contention(benchmark::State &state) {
     static constexpr std::size_t CAP = 4096;
     static constexpr std::size_t CHUNK = 16;
-    static constexpr uint64_t TOKENS = 100'000;
+    static constexpr uint64_t TOKENS = 250'000;
 
     uint64_t total_written_tokens = 0;
     uint64_t total_reader_tokens = 0;
     uint64_t total_read_success = 0;
     uint64_t total_read_fail = 0;
-    uint64_t total_write_slow_path = 0;
     uint64_t total_write_fail = 0;
 
     for (auto _ : state) {
         RingBuffer<float, CAP, Readers> rb;
-        rb.debug_reset_write_counters();
         float write_data[CHUNK];
         for (std::size_t i = 0; i < CHUNK; ++i)
             write_data[i] = static_cast<float>(i);
@@ -146,9 +144,12 @@ template <std::size_t Readers> static void BM_RingBuffer_Contention(benchmark::S
 
         // Writer: push tokens
         uint64_t written = 0;
+        uint64_t write_fail = 0;
         while (written < TOKENS) {
             if (rb.write(write_data, CHUNK)) {
                 written += CHUNK;
+            } else {
+                ++write_fail;
             }
         }
 
@@ -163,8 +164,7 @@ template <std::size_t Readers> static void BM_RingBuffer_Contention(benchmark::S
         total_reader_tokens += iter_read_success * CHUNK;
         total_read_success += iter_read_success;
         total_read_fail += iter_read_fail;
-        total_write_slow_path += rb.debug_write_slow_path_count();
-        total_write_fail += rb.debug_write_fail_count();
+        total_write_fail += write_fail;
     }
 
     state.SetItemsProcessed(total_written_tokens);
@@ -180,7 +180,6 @@ template <std::size_t Readers> static void BM_RingBuffer_Contention(benchmark::S
             ? (100.0 * static_cast<double>(total_read_fail) /
                static_cast<double>(total_read_success + total_read_fail))
             : 0.0;
-    state.counters["write_slow_path"] = static_cast<double>(total_write_slow_path);
     state.counters["write_fail"] = static_cast<double>(total_write_fail);
     state.counters["write_fail_pct"] =
         ((total_written_tokens / CHUNK) + total_write_fail) > 0
@@ -189,11 +188,10 @@ template <std::size_t Readers> static void BM_RingBuffer_Contention(benchmark::S
             : 0.0;
 }
 
+BENCHMARK(BM_RingBuffer_Contention<1>)->Name("BM_RingBuffer_Contention/1reader");
 BENCHMARK(BM_RingBuffer_Contention<2>)->Name("BM_RingBuffer_Contention/2readers");
 BENCHMARK(BM_RingBuffer_Contention<4>)->Name("BM_RingBuffer_Contention/4readers");
 BENCHMARK(BM_RingBuffer_Contention<8>)->Name("BM_RingBuffer_Contention/8readers");
-BENCHMARK(BM_RingBuffer_Contention<16>)->Name("BM_RingBuffer_Contention/16readers");
-BENCHMARK(BM_RingBuffer_Contention<32>)->Name("BM_RingBuffer_Contention/32readers");
 
 // ── Buffer size scaling ─────────────────────────────────────────────────────
 //
@@ -218,12 +216,10 @@ template <std::size_t Cap> static void BM_RingBuffer_SizeScaling(benchmark::Stat
     state.SetBytesProcessed(state.iterations() * CHUNK * sizeof(float));
 }
 
-BENCHMARK(BM_RingBuffer_SizeScaling<64>)->Name("BM_RingBuffer_SizeScaling/64");
 BENCHMARK(BM_RingBuffer_SizeScaling<256>)->Name("BM_RingBuffer_SizeScaling/256");
 BENCHMARK(BM_RingBuffer_SizeScaling<1024>)->Name("BM_RingBuffer_SizeScaling/1K");
 BENCHMARK(BM_RingBuffer_SizeScaling<4096>)->Name("BM_RingBuffer_SizeScaling/4K");
 BENCHMARK(BM_RingBuffer_SizeScaling<16384>)->Name("BM_RingBuffer_SizeScaling/16K");
-BENCHMARK(BM_RingBuffer_SizeScaling<65536>)->Name("BM_RingBuffer_SizeScaling/64K");
 
 // ── Chunk size scaling ──────────────────────────────────────────────────────
 //
@@ -247,6 +243,6 @@ static void BM_RingBuffer_ChunkScaling(benchmark::State &state) {
     state.SetItemsProcessed(state.iterations() * chunk);
     state.SetBytesProcessed(state.iterations() * chunk * sizeof(float));
 }
-BENCHMARK(BM_RingBuffer_ChunkScaling)->Arg(1)->Arg(4)->Arg(16)->Arg(64)->Arg(256)->Arg(1024);
+BENCHMARK(BM_RingBuffer_ChunkScaling)->Arg(16)->Arg(64)->Arg(256);
 
 BENCHMARK_MAIN();
