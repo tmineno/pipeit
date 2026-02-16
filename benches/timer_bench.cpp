@@ -1,14 +1,8 @@
-// Timer precision benchmarks — frequency sweep, jitter, overrun recovery
-//
-// Not using Google Benchmark (timers have real-time constraints that conflict
-// with benchmark harness timing). Custom measurement with structured output.
+#include <benchmark/benchmark.h>
 
 #include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <cstdint>
-#include <cstdio>
-#include <numeric>
 #include <pipit.h>
 #include <thread>
 #include <vector>
@@ -17,29 +11,28 @@ using namespace pipit;
 using Clock = std::chrono::steady_clock;
 using Nanos = std::chrono::nanoseconds;
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
 struct LatencyStats {
-    int64_t min_ns;
-    int64_t max_ns;
-    int64_t median_ns;
-    int64_t avg_ns;
-    int64_t p90_ns;
-    int64_t p99_ns;
-    int64_t p999_ns;
-    int overruns;
-    int total_ticks;
+    int64_t min_ns = 0;
+    int64_t max_ns = 0;
+    int64_t median_ns = 0;
+    int64_t avg_ns = 0;
+    int64_t p90_ns = 0;
+    int64_t p99_ns = 0;
+    int64_t p999_ns = 0;
+    int64_t overruns = 0;
+    int64_t total_ticks = 0;
 };
 
-static LatencyStats compute_stats(std::vector<int64_t> &latencies, int overruns) {
+static LatencyStats compute_stats(std::vector<int64_t> &latencies, int64_t overruns) {
     LatencyStats s{};
-    s.total_ticks = static_cast<int>(latencies.size());
+    s.total_ticks = static_cast<int64_t>(latencies.size());
     s.overruns = overruns;
-    if (latencies.empty())
+    if (latencies.empty()) {
         return s;
+    }
 
     std::sort(latencies.begin(), latencies.end());
-    int n = static_cast<int>(latencies.size());
+    const int n = static_cast<int>(latencies.size());
 
     s.min_ns = latencies[0];
     s.max_ns = latencies[n - 1];
@@ -49,79 +42,20 @@ static LatencyStats compute_stats(std::vector<int64_t> &latencies, int overruns)
     s.p999_ns = latencies[std::min(static_cast<int>(n * 0.999), n - 1)];
 
     int64_t sum = 0;
-    for (auto v : latencies)
+    for (auto v : latencies) {
         sum += v;
+    }
     s.avg_ns = sum / n;
-
     return s;
 }
 
-static void print_stats(const char *label, double freq_hz, const LatencyStats &s) {
-    printf("[timer_bench] %-20s freq=%-10.0f ticks=%-6d overruns=%-4d "
-           "min=%-8ld avg=%-8ld median=%-8ld p90=%-8ld p99=%-8ld p99.9=%-8ld max=%-8ld ns\n",
-           label, freq_hz, s.total_ticks, s.overruns, s.min_ns, s.avg_ns, s.median_ns, s.p90_ns,
-           s.p99_ns, s.p999_ns, s.max_ns);
-}
-
-// ── Frequency sweep ─────────────────────────────────────────────────────────
-//
-// Timer at 1Hz, 10Hz, 100Hz, 1kHz, 10kHz, 100kHz, 1MHz.
-// For low frequencies (<=10Hz) use fewer ticks to keep total time reasonable.
-
-static void run_frequency_sweep() {
-    printf("\n=== Frequency Sweep ===\n");
-
-    struct FreqSpec {
-        double freq;
-        int ticks;
-        const char *label;
-    };
-
-    FreqSpec specs[] = {
-        {1.0, 3, "1Hz"},
-        {10.0, 10, "10Hz"},
-        {100.0, 50, "100Hz"},
-        {1000.0, 100, "1kHz"},
-        {10000.0, 1000, "10kHz"},
-        {100000.0, 5000, "100kHz"},
-        {1000000.0, 10000, "1MHz"},
-    };
-
-    for (auto &spec : specs) {
-        Timer timer(spec.freq);
-        std::vector<int64_t> latencies;
-        latencies.reserve(spec.ticks);
-        int overruns = 0;
-
-        for (int i = 0; i < spec.ticks; ++i) {
-            timer.wait();
-            if (timer.overrun()) {
-                ++overruns;
-            }
-            latencies.push_back(timer.last_latency().count());
-        }
-
-        auto stats = compute_stats(latencies, overruns);
-        print_stats(spec.label, spec.freq, stats);
-    }
-}
-
-// ── Jitter histogram ────────────────────────────────────────────────────────
-//
-// 10,000 ticks at 10kHz, collect latency distribution.
-
-static void run_jitter_histogram() {
-    printf("\n=== Jitter Histogram (10kHz, 10000 ticks) ===\n");
-
-    const double freq = 10000.0;
-    const int n_ticks = 10000;
-
-    Timer timer(freq);
+static LatencyStats measure_timer_distribution(double freq_hz, int ticks, int64_t spin_ns = 0) {
+    Timer timer(freq_hz, true, spin_ns);
     std::vector<int64_t> latencies;
-    latencies.reserve(n_ticks);
-    int overruns = 0;
+    latencies.reserve(ticks);
+    int64_t overruns = 0;
 
-    for (int i = 0; i < n_ticks; ++i) {
+    for (int i = 0; i < ticks; ++i) {
         timer.wait();
         if (timer.overrun()) {
             ++overruns;
@@ -129,245 +63,283 @@ static void run_jitter_histogram() {
         latencies.push_back(timer.last_latency().count());
     }
 
-    auto stats = compute_stats(latencies, overruns);
-    print_stats("jitter_10kHz", freq, stats);
+    return compute_stats(latencies, overruns);
+}
 
-    // Print histogram buckets (log scale)
-    printf("[timer_bench] histogram buckets (ns):\n");
-    int buckets[] = {100, 1000, 10000, 100000, 1000000, 10000000};
-    int prev = 0;
-    for (int b : buckets) {
-        int count = 0;
+static void set_latency_counters(benchmark::State &state, const LatencyStats &s, double freq_hz) {
+    state.counters["freq_hz"] = freq_hz;
+    state.counters["ticks"] = static_cast<double>(s.total_ticks);
+    state.counters["overruns"] = static_cast<double>(s.overruns);
+    state.counters["min_ns"] = static_cast<double>(s.min_ns);
+    state.counters["avg_ns"] = static_cast<double>(s.avg_ns);
+    state.counters["median_ns"] = static_cast<double>(s.median_ns);
+    state.counters["p90_ns"] = static_cast<double>(s.p90_ns);
+    state.counters["p99_ns"] = static_cast<double>(s.p99_ns);
+    state.counters["p999_ns"] = static_cast<double>(s.p999_ns);
+    state.counters["max_ns"] = static_cast<double>(s.max_ns);
+}
+
+static void BM_Timer_FrequencySweep(benchmark::State &state) {
+    const double freq_hz = static_cast<double>(state.range(0));
+    const int ticks = static_cast<int>(state.range(1));
+
+    for ([[maybe_unused]] auto _ : state) {
+        const auto t0 = Clock::now();
+        const auto stats = measure_timer_distribution(freq_hz, ticks);
+        const auto t1 = Clock::now();
+
+        set_latency_counters(state, stats, freq_hz);
+        state.SetIterationTime(std::chrono::duration<double>(t1 - t0).count());
+        benchmark::DoNotOptimize(stats.avg_ns);
+    }
+
+    state.SetItemsProcessed(static_cast<int64_t>(ticks) * state.iterations());
+}
+
+BENCHMARK(BM_Timer_FrequencySweep)
+    ->Args({1, 3})
+    ->Args({10, 10})
+    ->Args({100, 50})
+    ->Args({1000, 100})
+    ->Args({10000, 1000})
+    ->Args({100000, 5000})
+    ->Args({1000000, 10000})
+    ->UseManualTime()
+    ->Iterations(1)
+    ->Unit(benchmark::kMillisecond);
+
+static void BM_Timer_JitterHistogram(benchmark::State &state) {
+    constexpr double kFreqHz = 10000.0;
+    constexpr int kTicks = 10000;
+
+    for ([[maybe_unused]] auto _ : state) {
+        const auto t0 = Clock::now();
+        Timer timer(kFreqHz);
+        std::vector<int64_t> latencies;
+        latencies.reserve(kTicks);
+        int64_t overruns = 0;
+
+        for (int i = 0; i < kTicks; ++i) {
+            timer.wait();
+            if (timer.overrun()) {
+                ++overruns;
+            }
+            latencies.push_back(timer.last_latency().count());
+        }
+
+        const auto stats = compute_stats(latencies, overruns);
+        const auto t1 = Clock::now();
+
+        set_latency_counters(state, stats, kFreqHz);
+
+        const int buckets[] = {100, 1000, 10000, 100000, 1000000, 10000000};
+        int prev = 0;
+        int idx = 0;
+        for (int b : buckets) {
+            int count = 0;
+            for (auto v : latencies) {
+                if (v >= prev && v < b) {
+                    ++count;
+                }
+            }
+            state.counters["hist_bucket_" + std::to_string(idx)] = static_cast<double>(count);
+            prev = b;
+            ++idx;
+        }
+        int overflow = 0;
         for (auto v : latencies) {
-            if (v >= prev && v < b)
-                ++count;
+            if (v >= buckets[5]) {
+                ++overflow;
+            }
         }
-        if (count > 0) {
-            printf("[timer_bench]   [%8d, %8d) ns: %d (%.1f%%)\n", prev, b, count,
-                   100.0 * count / n_ticks);
+        state.counters["hist_bucket_overflow"] = static_cast<double>(overflow);
+
+        state.SetIterationTime(std::chrono::duration<double>(t1 - t0).count());
+        benchmark::DoNotOptimize(stats.p99_ns);
+    }
+
+    state.SetItemsProcessed(static_cast<int64_t>(kTicks) * state.iterations());
+}
+
+BENCHMARK(BM_Timer_JitterHistogram)->UseManualTime()->Iterations(1)->Unit(benchmark::kMillisecond);
+
+static void BM_Timer_OverrunRecovery(benchmark::State &state) {
+    constexpr double kFreqHz = 1000.0;
+
+    for ([[maybe_unused]] auto _ : state) {
+        const auto t0 = Clock::now();
+
+        Timer timer(kFreqHz);
+        for (int i = 0; i < 10; ++i) {
+            timer.wait();
         }
-        prev = b;
-    }
-    // Overflow bucket
-    int overflow = 0;
-    for (auto v : latencies) {
-        if (v >= buckets[5])
-            ++overflow;
-    }
-    if (overflow > 0) {
-        printf("[timer_bench]   [%8d,      inf) ns: %d (%.1f%%)\n", buckets[5], overflow,
-               100.0 * overflow / n_ticks);
-    }
-}
 
-// ── Overrun recovery ────────────────────────────────────────────────────────
-//
-// Force overruns via sleep, measure recovery time after reset_phase().
-
-static void run_overrun_recovery() {
-    printf("\n=== Overrun Recovery ===\n");
-
-    const double freq = 1000.0; // 1kHz
-    Timer timer(freq);
-
-    // Warm up with 10 normal ticks
-    for (int i = 0; i < 10; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
         timer.wait();
-    }
 
-    // Force an overrun by sleeping through several ticks
-    std::this_thread::sleep_for(std::chrono::milliseconds(50)); // Miss ~50 ticks at 1kHz
-    timer.wait();
-    int64_t missed = timer.missed_count();
-    bool was_overrun = timer.overrun();
-    int64_t overrun_latency = timer.last_latency().count();
+        const int64_t missed = timer.missed_count();
+        const int64_t overrun_detected = timer.overrun() ? 1 : 0;
+        const int64_t overrun_latency_ns = timer.last_latency().count();
 
-    printf("[timer_bench] overrun: detected=%s missed_count=%ld latency=%ld ns\n",
-           was_overrun ? "yes" : "no", missed, overrun_latency);
+        timer.reset_phase();
 
-    // Recovery via reset_phase()
-    timer.reset_phase();
-
-    // Measure post-recovery latency
-    std::vector<int64_t> recovery_latencies;
-    recovery_latencies.reserve(100);
-    int post_overruns = 0;
-    for (int i = 0; i < 100; ++i) {
-        timer.wait();
-        if (timer.overrun())
-            ++post_overruns;
-        recovery_latencies.push_back(timer.last_latency().count());
-    }
-
-    auto stats = compute_stats(recovery_latencies, post_overruns);
-    print_stats("post_recovery", freq, stats);
-}
-
-// ── Wake-up latency ─────────────────────────────────────────────────────────
-//
-// 1000 ticks at 1kHz, report best/worst/median wake-up deviation.
-
-static void run_wakeup_latency() {
-    printf("\n=== Wake-up Latency (1kHz, 1000 ticks) ===\n");
-
-    const double freq = 1000.0;
-    const int n_ticks = 1000;
-
-    Timer timer(freq);
-    std::vector<int64_t> latencies;
-    latencies.reserve(n_ticks);
-    int overruns = 0;
-
-    for (int i = 0; i < n_ticks; ++i) {
-        timer.wait();
-        if (timer.overrun())
-            ++overruns;
-        latencies.push_back(timer.last_latency().count());
-    }
-
-    auto stats = compute_stats(latencies, overruns);
-    print_stats("wakeup_1kHz", freq, stats);
-}
-
-// ── Jitter with spin-wait ──────────────────────────────────────────────────
-//
-// Compare jitter at 10kHz with different spin thresholds (0, 10µs, 50µs).
-
-static void run_jitter_spin() {
-    printf("\n=== Jitter with Spin-Wait (10kHz, 1000 ticks) ===\n");
-
-    const double freq = 10000.0;
-    const int n_ticks = 1000;
-    int64_t spin_values[] = {0, 10000, 50000}; // 0, 10µs, 50µs in ns
-    const char *spin_labels[] = {"no_spin", "spin_10us", "spin_50us"};
-
-    for (int s = 0; s < 3; ++s) {
-        Timer timer(freq, true, spin_values[s]);
-        std::vector<int64_t> latencies;
-        latencies.reserve(n_ticks);
-        int overruns = 0;
-
-        for (int i = 0; i < n_ticks; ++i) {
+        std::vector<int64_t> post_latencies;
+        post_latencies.reserve(100);
+        int64_t post_overruns = 0;
+        for (int i = 0; i < 100; ++i) {
             timer.wait();
             if (timer.overrun()) {
-                ++overruns;
+                ++post_overruns;
             }
-            latencies.push_back(timer.last_latency().count());
+            post_latencies.push_back(timer.last_latency().count());
         }
 
-        auto stats = compute_stats(latencies, overruns);
-        print_stats(spin_labels[s], freq, stats);
+        const auto post_stats = compute_stats(post_latencies, post_overruns);
+        const auto t1 = Clock::now();
+
+        set_latency_counters(state, post_stats, kFreqHz);
+        state.counters["recovery_missed_count"] = static_cast<double>(missed);
+        state.counters["recovery_overrun_detected"] = static_cast<double>(overrun_detected);
+        state.counters["recovery_overrun_latency_ns"] = static_cast<double>(overrun_latency_ns);
+
+        state.SetIterationTime(std::chrono::duration<double>(t1 - t0).count());
+        benchmark::DoNotOptimize(post_stats.avg_ns);
     }
+
+    state.SetItemsProcessed(100 * state.iterations());
 }
 
-// ── Batch vs single comparison ────────────────────────────────────────────
-//
-// Compare wall-clock time for 10,000 total firings:
-//   K=1:  10,000 ticks at 10kHz (no batching)
-//   K=10: 1,000 ticks at 1kHz (10 firings per tick)
+BENCHMARK(BM_Timer_OverrunRecovery)->UseManualTime()->Iterations(1)->Unit(benchmark::kMillisecond);
 
-static void run_batch_vs_single() {
-    printf("\n=== Batch vs Single Comparison ===\n");
-    printf("Total firings: 10,000 (K=1: 10000 ticks @ 10kHz, K=10: 1000 ticks @ 1kHz)\n");
+static void BM_Timer_WakeupLatency(benchmark::State &state) {
+    constexpr double kFreqHz = 1000.0;
+    constexpr int kTicks = 1000;
 
-    // K=1: 10,000 ticks at 10kHz
-    {
-        auto t0 = Clock::now();
-        Timer timer(10000.0, false);
-        int overruns = 0;
-        for (int i = 0; i < 10000; ++i) {
+    for ([[maybe_unused]] auto _ : state) {
+        const auto t0 = Clock::now();
+        const auto stats = measure_timer_distribution(kFreqHz, kTicks);
+        const auto t1 = Clock::now();
+
+        set_latency_counters(state, stats, kFreqHz);
+        state.SetIterationTime(std::chrono::duration<double>(t1 - t0).count());
+        benchmark::DoNotOptimize(stats.median_ns);
+    }
+
+    state.SetItemsProcessed(static_cast<int64_t>(kTicks) * state.iterations());
+}
+
+BENCHMARK(BM_Timer_WakeupLatency)->UseManualTime()->Iterations(1)->Unit(benchmark::kMillisecond);
+
+static void BM_Timer_JitterSpin(benchmark::State &state) {
+    constexpr double kFreqHz = 10000.0;
+    constexpr int kTicks = 1000;
+    const int64_t spin_ns = state.range(0);
+
+    for ([[maybe_unused]] auto _ : state) {
+        const auto t0 = Clock::now();
+        const auto stats = measure_timer_distribution(kFreqHz, kTicks, spin_ns);
+        const auto t1 = Clock::now();
+
+        set_latency_counters(state, stats, kFreqHz);
+        state.counters["spin_ns"] = static_cast<double>(spin_ns);
+        state.SetIterationTime(std::chrono::duration<double>(t1 - t0).count());
+        benchmark::DoNotOptimize(stats.p99_ns);
+    }
+
+    state.SetItemsProcessed(static_cast<int64_t>(kTicks) * state.iterations());
+}
+
+BENCHMARK(BM_Timer_JitterSpin)
+    ->Arg(0)
+    ->Arg(10000)
+    ->Arg(50000)
+    ->UseManualTime()
+    ->Iterations(1)
+    ->Unit(benchmark::kMillisecond);
+
+static void BM_Timer_BatchVsSingle(benchmark::State &state) {
+    constexpr int total_firings = 10000;
+    const int k = static_cast<int>(state.range(0));
+    const int ticks = total_firings / k;
+    const double timer_freq_hz = 10000.0 / static_cast<double>(k);
+
+    for ([[maybe_unused]] auto _ : state) {
+        Timer timer(timer_freq_hz, false);
+        int64_t overruns = 0;
+
+        const auto t0 = Clock::now();
+        for (int i = 0; i < ticks; ++i) {
             timer.wait();
             if (timer.overrun()) {
                 ++overruns;
                 continue;
             }
-            // Single firing
-            volatile float x = 1.0f;
-            (void)x;
-        }
-        auto t1 = Clock::now();
-        int64_t elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-        printf("[timer_bench] K=1  (10kHz): %ld ms, overruns=%d\n", elapsed_ms, overruns);
-    }
-
-    // K=10: 1,000 ticks at 1kHz
-    {
-        auto t0 = Clock::now();
-        Timer timer(1000.0, false);
-        int overruns = 0;
-        for (int i = 0; i < 1000; ++i) {
-            timer.wait();
-            if (timer.overrun()) {
-                ++overruns;
-                continue;
-            }
-            // 10 firings per tick
-            for (int k = 0; k < 10; ++k) {
+            for (int j = 0; j < k; ++j) {
                 volatile float x = 1.0f;
-                (void)x;
+                benchmark::DoNotOptimize(x);
             }
         }
-        auto t1 = Clock::now();
-        int64_t elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-        printf("[timer_bench] K=10 (1kHz):  %ld ms, overruns=%d\n", elapsed_ms, overruns);
+        const auto t1 = Clock::now();
+
+        const double elapsed_s = std::chrono::duration<double>(t1 - t0).count();
+        const double elapsed_ns = elapsed_s * 1e9;
+
+        state.counters["k_factor"] = static_cast<double>(k);
+        state.counters["ticks"] = static_cast<double>(ticks);
+        state.counters["overruns"] = static_cast<double>(overruns);
+        state.counters["per_firing_ns"] = elapsed_ns / static_cast<double>(total_firings);
+        state.SetIterationTime(elapsed_s);
     }
+
+    state.SetItemsProcessed(static_cast<int64_t>(total_firings) * state.iterations());
 }
 
-// ── High-frequency sweep with batching ────────────────────────────────────
-//
-// Jitter + overrun stats at 1MHz, 10MHz, 100MHz with default tick_rate (1MHz).
+BENCHMARK(BM_Timer_BatchVsSingle)
+    ->Arg(1)
+    ->Arg(10)
+    ->UseManualTime()
+    ->Iterations(1)
+    ->Unit(benchmark::kMillisecond);
 
-static void run_freq_sweep_batched() {
-    printf("\n=== High-Frequency Sweep (batched, tick_rate=1MHz) ===\n");
+static void BM_Timer_HighFreqBatched(benchmark::State &state) {
+    const double freq_hz = static_cast<double>(state.range(0));
+    const int k = static_cast<int>(state.range(1));
+    const int ticks = static_cast<int>(state.range(2));
 
-    struct FreqSpec {
-        double freq;
-        int k;
-        int ticks;
-        const char *label;
-    };
+    for ([[maybe_unused]] auto _ : state) {
+        Timer timer(freq_hz / static_cast<double>(k), true);
+        std::vector<int64_t> timer_lat;
+        timer_lat.reserve(ticks);
+        int64_t overruns = 0;
 
-    FreqSpec specs[] = {
-        {1000000.0, 1, 1000, "1MHz_K1"},
-        {10000000.0, 10, 1000, "10MHz_K10"},
-        {100000000.0, 100, 1000, "100MHz_K100"},
-    };
-
-    for (auto &spec : specs) {
-        Timer timer(spec.freq / spec.k, true);
-        std::vector<int64_t> latencies;
-        latencies.reserve(spec.ticks);
-        int overruns = 0;
-
-        for (int i = 0; i < spec.ticks; ++i) {
+        const auto t0 = Clock::now();
+        for (int i = 0; i < ticks; ++i) {
             timer.wait();
             if (timer.overrun()) {
                 ++overruns;
             }
-            latencies.push_back(timer.last_latency().count());
+            timer_lat.push_back(timer.last_latency().count());
         }
+        const auto t1 = Clock::now();
 
-        auto stats = compute_stats(latencies, overruns);
-        print_stats(spec.label, spec.freq / spec.k, stats);
-        printf("[timer_bench]   k_factor=%d total_firings=%d\n", spec.k,
-               (spec.ticks - overruns) * spec.k);
+        const auto stats = compute_stats(timer_lat, overruns);
+        set_latency_counters(state, stats, freq_hz / static_cast<double>(k));
+        state.counters["k_factor"] = static_cast<double>(k);
+        state.counters["effective_firings"] = static_cast<double>((ticks - overruns) * k);
+
+        state.SetIterationTime(std::chrono::duration<double>(t1 - t0).count());
+        benchmark::DoNotOptimize(stats.avg_ns);
     }
+
+    state.SetItemsProcessed(static_cast<int64_t>(ticks) * state.iterations());
 }
 
-// ── Main ────────────────────────────────────────────────────────────────────
+BENCHMARK(BM_Timer_HighFreqBatched)
+    ->Args({1000000, 1, 1000})
+    ->Args({10000000, 10, 1000})
+    ->Args({100000000, 100, 1000})
+    ->UseManualTime()
+    ->Iterations(1)
+    ->Unit(benchmark::kMillisecond);
 
-int main() {
-    printf("=== Pipit Timer Precision Benchmarks ===\n");
-    printf("Clock: steady_clock\n");
-
-    run_frequency_sweep();
-    run_jitter_histogram();
-    run_overrun_recovery();
-    run_wakeup_latency();
-    run_jitter_spin();
-    run_batch_vs_single();
-    run_freq_sweep_batched();
-
-    printf("\n=== Done ===\n");
-    return 0;
-}
+BENCHMARK_MAIN();

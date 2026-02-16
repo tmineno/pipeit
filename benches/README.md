@@ -14,6 +14,18 @@ Comprehensive benchmark suite for performance characterization (v0.2.1).
 
 # Custom output directory
 ./run_all.sh --output-dir /tmp/my_results
+
+# Generate a human-readable report from generated JSON files
+./run_all.sh --filter actor --filter thread --report
+./run_all.sh --report --report-bench actor_bench --report-bench thread_bench
+
+# Validate canonical JSON outputs
+./run_all.sh --filter runtime --validate
+
+# Compare current canonical outputs against a baseline directory
+./run_all.sh --filter runtime --validate \
+  --compare-baseline-dir /path/to/baselines \
+  --compare-threshold-pct 5
 ```
 
 Categories: `compiler`, `runtime`, `ringbuf`, `timer`, `thread`, `actor`, `pdl`, `affinity`, `memory`, `latency`, `perf`, `all`
@@ -22,11 +34,12 @@ Categories: `compiler`, `runtime`, `ringbuf`, `timer`, `thread`, `actor`, `pdl`,
 
 - Rust toolchain (for compiler benchmarks)
 - C++20 compiler (g++ or clang++)
-- Google Benchmark library (for C++ benchmarks except timer_bench)
+- Google Benchmark library (for C++ benchmarks)
+- `jq` (for report generation, canonical validation, and baseline comparison)
 
 ```bash
 # Ubuntu/Debian
-sudo apt install libbenchmark-dev
+sudo apt install libbenchmark-dev jq
 ```
 
 ## Benchmark Suites
@@ -89,7 +102,7 @@ c++ -std=c++20 -O3 -march=native -I ../runtime/libpipit/include \
 
 **File**: `timer_bench.cpp`
 
-Timer accuracy and jitter characterization (custom measurement, no Google Benchmark):
+Timer accuracy and jitter characterization (Google Benchmark + manual timing):
 
 - **Frequency sweep**: 1Hz to 1MHz in decade steps
 - **Jitter histogram**: 10,000 ticks at 10kHz with percentile breakdown
@@ -98,8 +111,8 @@ Timer accuracy and jitter characterization (custom measurement, no Google Benchm
 
 ```bash
 c++ -std=c++20 -O3 -march=native -I ../runtime/libpipit/include \
-    timer_bench.cpp -lpthread -o /tmp/timer_bench
-/tmp/timer_bench
+    timer_bench.cpp -lbenchmark -lpthread -o /tmp/timer_bench
+/tmp/timer_bench --benchmark_format=json --benchmark_out=/tmp/timer_bench.json
 ```
 
 ### 5. Thread Scheduling Benchmarks
@@ -187,13 +200,19 @@ Memory characteristics of Pipit runtime components:
 
 **File**: `latency_bench.cpp`
 
-Detailed latency analysis with percentile tracking (custom measurement):
+Detailed latency analysis with percentile tracking (Google Benchmark + counters):
 
 - Per-actor firing: mul, add, fft, fir, mean, c2r, rms (min/avg/p90/p99/p999/max)
 - Timer overhead vs actual work ratio
 - Ring buffer read/write vs compute time budget
 - Task wake-up to first instruction latency
 - End-to-end pipeline latency: mul -> fir -> mean
+
+```bash
+c++ -std=c++20 -O3 -march=native -I ../runtime/libpipit/include -I ../examples \
+    latency_bench.cpp -lbenchmark -lpthread -o /tmp/latency_bench
+/tmp/latency_bench --benchmark_format=json --benchmark_out=/tmp/latency_bench.json
+```
 
 ### 11. Perf-Based Analysis
 
@@ -226,13 +245,90 @@ bash perf/perf_actor.sh
 
 ## Output Format
 
+- **Canonical JSON (Phase 1)**: One file per category in `results/`
+  - `compiler.canonical.json`
+  - `runtime.canonical.json`
+  - `ringbuf.canonical.json`
+  - `timer.canonical.json`
+  - `thread.canonical.json`
+  - `actor.canonical.json`
+  - `pdl.canonical.json`
+  - `affinity.canonical.json`
+  - `memory.canonical.json`
+  - `latency.canonical.json`
+  - `perf.canonical.json`
+  - `pdl` naming: `pdl/<program>/task:<task>` and `pdl/<program>/buffer:<buffer>`
+  - `perf` naming: `perf/<scenario>/<variant>`
 - **Google Benchmark**: JSON files in `results/` (e.g., `actor_bench.json`)
 - **Criterion**: HTML reports in `../target/criterion/`
-- **Timer bench**: Text output in `results/timer_bench.txt`
-- **Latency bench**: Text output in `results/latency_bench.txt`
 - **PDL bench**: Text output in `results/pdl_bench.txt`
 - **Perf analysis**: Text/JSON in `results/perf_*.txt` and `results/perf_*.json`
 - **Flame graphs**: SVG in `results/flamegraph_*.svg` (open in browser)
+- **Human-readable summary report**: Markdown in `results/benchmark_report.md`
+- **Baseline comparison report**: Markdown in `results/baseline_comparison.md`
+
+### Human-Readable Report
+
+Convert selected benchmark JSON files into a Markdown report:
+
+```bash
+# Auto-generate report after running benchmarks
+./run_all.sh --report
+
+# Limit report to selected bench JSON files
+./run_all.sh --report --report-bench actor_bench --report-bench thread_bench
+
+# Generate report from existing JSON files only
+./json_report.sh --input-dir ./results --bench actor_bench --bench thread_bench
+```
+
+### Canonical Validation Utility
+
+Validate canonical JSON artifacts (`*.canonical.json`) with naming/shape checks:
+
+```bash
+# Validate all canonical JSON files in results/
+./validate_canonical_results.sh --input-dir ./results
+
+# Validate selected canonical JSON files
+./validate_canonical_results.sh \
+  --file ./results/runtime.canonical.json \
+  --file ./results/actor.canonical.json
+```
+
+### Baseline Comparison Utility
+
+Compare current canonical results against a baseline directory:
+
+```bash
+./compare_canonical_results.sh \
+  --baseline-dir /path/to/baselines \
+  --current-dir ./results \
+  --threshold-pct 5 \
+  --output ./results/baseline_comparison.md
+```
+
+`run_all.sh` can invoke both utilities in one run:
+
+```bash
+./run_all.sh \
+  --filter runtime \
+  --output-dir ./results \
+  --validate \
+  --compare-baseline-dir /path/to/baselines \
+  --compare-allow-missing-baseline
+```
+
+### Canonicalization Utility
+
+You can also convert individual outputs manually:
+
+```bash
+# Example: gbench JSON -> canonical JSON
+./canonicalize_results.sh --kind gbench --suite timer \
+  --input ./results/timer_bench.json \
+  --output ./results/timer.canonical.json
+```
 
 ## Expected Performance
 
