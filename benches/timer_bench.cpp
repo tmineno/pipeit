@@ -97,20 +97,18 @@ static void BM_Timer_FrequencySweep(benchmark::State &state) {
 }
 
 BENCHMARK(BM_Timer_FrequencySweep)
-    ->Args({1, 3})
-    ->Args({10, 10})
-    ->Args({100, 50})
-    ->Args({1000, 100})
-    ->Args({10000, 1000})
-    ->Args({100000, 5000})
-    ->Args({1000000, 10000})
+    ->Args({1000, 1000})
+    ->Args({10000, 2000})
+    ->Args({48000, 2000})
+    ->Args({100000, 2000})
+    ->Args({1000000, 1000})
     ->UseManualTime()
     ->Iterations(1)
     ->Unit(benchmark::kMillisecond);
 
 static void BM_Timer_JitterHistogram(benchmark::State &state) {
     constexpr double kFreqHz = 10000.0;
-    constexpr int kTicks = 10000;
+    constexpr int kTicks = 5000;
 
     for ([[maybe_unused]] auto _ : state) {
         const auto t0 = Clock::now();
@@ -174,7 +172,7 @@ static void BM_Timer_OverrunRecovery(benchmark::State &state) {
             timer.wait();
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
         timer.wait();
 
         const int64_t missed = timer.missed_count();
@@ -232,7 +230,7 @@ BENCHMARK(BM_Timer_WakeupLatency)->UseManualTime()->Iterations(1)->Unit(benchmar
 
 static void BM_Timer_JitterSpin(benchmark::State &state) {
     constexpr double kFreqHz = 10000.0;
-    constexpr int kTicks = 1000;
+    constexpr int kTicks = 2000;
     const int64_t spin_ns = state.range(0);
 
     for ([[maybe_unused]] auto _ : state) {
@@ -258,7 +256,7 @@ BENCHMARK(BM_Timer_JitterSpin)
     ->Unit(benchmark::kMillisecond);
 
 static void BM_Timer_BatchVsSingle(benchmark::State &state) {
-    constexpr int total_firings = 10000;
+    constexpr int total_firings = 20000;
     const int k = static_cast<int>(state.range(0));
     const int ticks = total_firings / k;
     const double timer_freq_hz = 10000.0 / static_cast<double>(k);
@@ -335,9 +333,9 @@ static void BM_Timer_HighFreqBatched(benchmark::State &state) {
 }
 
 BENCHMARK(BM_Timer_HighFreqBatched)
-    ->Args({1000000, 1, 1000})
-    ->Args({10000000, 10, 1000})
-    ->Args({100000000, 100, 1000})
+    ->Args({100000, 1, 2000})
+    ->Args({1000000, 10, 2000})
+    ->Args({10000000, 100, 2000})
     ->UseManualTime()
     ->Iterations(1)
     ->Unit(benchmark::kMillisecond);

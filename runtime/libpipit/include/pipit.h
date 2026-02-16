@@ -67,9 +67,6 @@ template <typename T, std::size_t Capacity, std::size_t Readers = 1> class RingB
     alignas(64) std::atomic<std::size_t> head_{0}; // absolute write cursor
     PaddedTail tails_[Readers];                    // absolute read cursors (cache-line isolated)
     std::size_t cached_min_tail_{0};               // writer-private cached min tail
-    // Writer-side debug counters (single-writer updates).
-    std::uint64_t write_slow_path_count_{0};
-    std::uint64_t write_fail_count_{0};
     T buf_[N];
 
   public:
@@ -80,7 +77,6 @@ template <typename T, std::size_t Capacity, std::size_t Readers = 1> class RingB
         // Fast path: check with cached min_tail (avoids O(Readers) acquire loads)
         std::size_t used = h - cached_min_tail_;
         if (used > Capacity || Capacity - used < count) {
-            ++write_slow_path_count_;
             // Slow path: rescan all tails
             std::size_t mt = tails_[0].value.load(std::memory_order_acquire);
             for (std::size_t i = 1; i < Readers; ++i) {
@@ -90,14 +86,10 @@ template <typename T, std::size_t Capacity, std::size_t Readers = 1> class RingB
             }
             cached_min_tail_ = mt;
             used = h - cached_min_tail_;
-            if (used > Capacity) {
-                ++write_fail_count_;
+            if (used > Capacity)
                 return false;
-            }
-            if (Capacity - used < count) {
-                ++write_fail_count_;
+            if (Capacity - used < count)
                 return false;
-            }
         }
         // Two-phase memcpy (avoids per-element modulo)
         std::size_t start = h % N;
@@ -135,13 +127,6 @@ template <typename T, std::size_t Capacity, std::size_t Readers = 1> class RingB
         std::size_t h = head_.load(std::memory_order_acquire);
         std::size_t t = tails_[reader_idx].value.load(std::memory_order_acquire);
         return h - t;
-    }
-
-    std::uint64_t debug_write_slow_path_count() const { return write_slow_path_count_; }
-    std::uint64_t debug_write_fail_count() const { return write_fail_count_; }
-    void debug_reset_write_counters() {
-        write_slow_path_count_ = 0;
-        write_fail_count_ = 0;
     }
 };
 

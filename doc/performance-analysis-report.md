@@ -1,254 +1,250 @@
-# Pipit Benchmark Performance Analysis
+# Pipit Performance Analysis Report
 
-Date: 2026-02-15 (updated after ADR-009 optimizations)
-Command: custom build + run of `timer_bench`, `latency_bench`, `thread_bench`
-Host: AMD Ryzen 9 9950X3D (16C/32T), Linux 6.6.87.2-microsoft-standard-WSL2
+Date: 2026-02-16  
+Scope: current implementation baseline after benchmark suite simplification  
+Spec reference: `doc/spec/pipit-lang-spec-v0.2.0.md` (`tick_rate`, `timer_spin`, overrun policy, SDF static scheduling)
 
-## Summary of Changes (ADR-009)
+## 1. Measurement Setup
 
-Four optimizations were implemented to reduce scheduler/timer overhead:
+- Host: AMD Ryzen 9 9950X3D (16C/32T), Linux `6.6.87.2-microsoft-standard-WSL2`
+Commands used:
 
-1. **Conditional latency measurement** — Skip second `Clock::now()` when stats disabled
-2. **Thread start barrier** — `_start` atomic flag synchronizes all task threads
-3. **Configurable K-factor** — `set tick_rate` batches multiple actor firings per OS wake
-4. **Hybrid spin-wait** — `set timer_spin` trades CPU for sub-microsecond jitter
+```bash
+./benches/run_all.sh --filter ringbuf --filter timer --filter thread --filter pdl --output-dir /tmp/pipit_perf_refresh
+cargo bench --manifest-path compiler/Cargo.toml --bench compiler_bench -- "kpi/" --sample-size 10 --measurement-time 0.5 --warm-up-time 0.1
+```
 
-## Benchmark Results
+## 2. Spec-Aligned KPI Definition
 
-### 1. Timer Overhead (No-Sleep, Pure Framework Cost)
+The following KPIs are aligned to the language/runtime model in `v0.2.0`:
 
-| Benchmark | Time/iter | Items/sec | Notes |
-|-----------|-----------|-----------|-------|
-| `BM_TimerOverhead` | 16.1 ns | 62.1M/s | Baseline (measure_latency=true) |
-| `BM_TimerOverhead_NoLatency` | 16.1 ns | 62.0M/s | measure_latency=false |
+- `KPI-R1` Runtime deadline quality: task `miss_rate_pct` by clock rate (`set overrun = drop` behavior).
+- `KPI-R2` Timer precision: jitter (`p99_ns`) and overrun counts with and without `set timer_spin`.
+- `KPI-R3` K-factor effectiveness: impact of `set tick_rate` and `K = ceil(clock_freq / tick_rate)` on overruns and CPU cost.
+- `KPI-R4` Shared buffer scalability: writer throughput plus `read_fail_pct`/`write_fail_pct` under multi-reader contention.
+- `KPI-C1` Compiler latency: parse latency and full compile latency on representative programs.
+- `KPI-C2` Compiler phase bottleneck: per-phase latency (`parse/resolve/graph/analyze/schedule/codegen`).
+- `KPI-C3` Compiler scaling: parse latency growth vs number of tasks.
+- `KPI-E2E1` End-to-end PDL health: runtime stats (`ticks`, `missed`, `avg_latency`, `max_latency`).
 
-**Finding**: On this hardware, the second `Clock::now()` cost is below measurement noise in the always-overrun (1GHz) path. The savings will be more visible at realistic frequencies where the latency calculation path differs (non-overrun ticks skip `last_latency_` update entirely when disabled).
+## 3. Current Results
 
-### 2. Empty Pipeline Variants
+### 3.1 Timer and Thread Runtime
 
-| Benchmark | Wall Time | CPU | Notes |
-|-----------|-----------|-----|-------|
-| `BM_EmptyPipeline` | 100 ms | 8.42 ms | Baseline: 10kHz, 1000 ticks, stats on |
-| `BM_EmptyPipeline_NoStats` | 100 ms | 8.37 ms | Same but measure_latency=false |
-| `BM_EmptyPipeline_Batched` | 1000 ms | 9.80 ms | K=10: 1kHz timer, 10 firings/tick, 10K total |
+Timer frequency sweep:
+
+| Frequency | Ticks | Overruns | Overrun Rate | Avg Latency | P99 Latency |
+|---|---:|---:|---:|---:|---:|
+| 1kHz | 1000 | 0 | 0.00% | 79.3us | 112.0us |
+| 10kHz | 2000 | 57 | 2.85% | 72.7us | 111.4us |
+| 48kHz | 2000 | 1511 | 75.55% | 42.5us | 93.9us |
+| 100kHz | 2000 | 1753 | 87.65% | 39.1us | 94.9us |
+| 1MHz | 1000 | 983 | 98.30% | 36.8us | 71.8us |
 
-**Finding**: `BM_EmptyPipeline_Batched` achieves **10x more actor firings** (10,000 vs 1,000) in **10x the wall time** (1s vs 100ms), with **zero overruns** vs the baseline's occasional overruns. The timer fires 1,000 times at 1kHz instead of 10,000 times at 10kHz, dramatically reducing OS sleep/wake overhead per firing.
+Jitter with `timer_spin` at 10kHz:
 
-### 3. High-Frequency K-Factor Scaling (default tick_rate=1MHz)
+| timer_spin | Overruns | Avg Latency | P99 Latency |
+|---|---:|---:|---:|
+| 0ns | 52 | 74.1us | 113.9us |
+| 10us | 18 | 63.0us | 99.1us |
+| 50us | 3 | 24.1us | 61.7us |
 
-| Frequency | K | Timer Rate | Wall Time | Overruns | Total Firings |
-|-----------|---|------------|-----------|----------|---------------|
-| 1MHz | 1 | 1MHz | 1.04 ms | 986/1000 | 14 |
-| 10MHz | 10 | 1MHz | 1.03 ms | 986/1000 | 140 |
-| 100MHz | 100 | 1MHz | 1.03 ms | 985/1000 | 1,500 |
+Batch vs single (10kHz equivalent):
 
-**Finding**: At 1MHz timer rate, nearly all ticks overrun on this system (OS cannot sustain 1µs sleep granularity). K-factor batching scales total firings linearly: K=100 delivers **107x more firings** than K=1 with same wall time.
+| Mode | Wall Time | CPU Time | Overruns |
+|---|---:|---:|---:|
+| K=1 (`BM_Timer_BatchVsSingle/1`) | 2000.07ms | 162.99ms | 542 |
+| K=10 (`BM_Timer_BatchVsSingle/10`) | 2000.08ms | 18.86ms | 0 |
 
-### 4. High-Frequency with Custom tick_rate=10kHz
+Task deadline miss rate:
 
-| Frequency | K | Timer Rate | Wall Time | Overruns | Total Firings |
-|-----------|---|------------|-----------|----------|---------------|
-| 1MHz | 100 | 10kHz | 100 ms | 23/1000 | 97,700 |
-| 10MHz | 1,000 | 10kHz | 100 ms | 11/1000 | 989,000 |
-| 100MHz | 10,000 | 10kHz | 100 ms | 32/1000 | 9,680,000 |
+| Clock | Miss Rate | Missed |
+|---|---:|---:|
+| 1kHz | 0.00% | 0 |
+| 10kHz | 2.97% | 89 |
+| 48kHz | 75.77% | 2273 |
 
-**Finding**: With tick_rate=10kHz, the OS timer fires at a sustainable 10kHz rate. Overrun rate drops from **98.6%** (1MHz native) to **2.3%** (1MHz batched). At 100MHz effective frequency, the system delivers **9.68M actor firings** in 100ms with only 3.2% overruns. This validates the K-factor batching approach for high-frequency workloads.
+K-factor batching (`effective_hz = 100kHz`):
 
-### 5. Thread Wake-up and Barrier
+| K | Timer Hz | Overruns | CPU Time |
+|---:|---:|---:|---:|
+| 1 | 100kHz | 87913 | 105.39ms |
+| 10 | 10kHz | 288 | 84.24ms |
+| 100 | 1kHz | 0 | 9.37ms |
 
-| Benchmark | Time | Items/sec |
-|-----------|------|-----------|
-| `BM_ThreadCreateJoin` | 71.5 µs | 25.0K/s |
-| `BM_ThreadWakeup_Barrier` | 78.3 µs | 23.0K/s |
+### 3.2 Shared Buffer (Ring Buffer)
 
-**Finding**: The barrier measurement includes thread creation + barrier spin + release, so it's slightly higher than raw create/join. The key benefit is **synchronized start**: all task threads begin their timers simultaneously rather than staggering by ~45µs per thread.
+Contention results:
 
-### 6. Context Switch and Task Scaling
+| Readers | Writer Throughput (items/s) | Read Fail % | Write Fail % |
+|---:|---:|---:|---:|
+| 1 | 711.3M | 75.62% | 63.22% |
+| 2 | 432.3M | 90.70% | 55.62% |
+| 4 | 229.3M | 96.44% | 34.34% |
+| 8 | 80.3M | 98.48% | 27.90% |
 
-| Benchmark | Time | CPU |
-|-----------|------|-----|
-| `BM_ContextSwitch` | 0.243 ms | 0.224 ms |
-| `BM_TaskScaling/1` | 10.2 ms | 0.059 ms |
-| `BM_TaskScaling/2` | 10.2 ms | 0.093 ms |
-| `BM_TaskScaling/4` | 10.3 ms | 0.164 ms |
-| `BM_TaskScaling/8` | 10.4 ms | 0.394 ms |
-| `BM_TaskScaling/16` | 10.8 ms | 0.892 ms |
-| `BM_TaskScaling/32` | 11.4 ms | 1.83 ms |
+Single-thread scaling:
 
-**Finding**: Context switch cost unchanged at ~0.24ms. Task scaling remains linear in CPU time. With the `_start` barrier, all threads now share a coordinated clock base which eliminates timing skew in multi-task pipelines.
+| Benchmark | Throughput (items/s) |
+|---|---:|
+| Throughput baseline | 1.44M |
+| Size scaling (256 .. 16K) | 5.71B .. 6.41B |
+| Chunk scaling 16 | 5.54B |
+| Chunk scaling 64 | 12.14B |
+| Chunk scaling 256 | 16.54B |
 
-### 7. Jitter with Spin-Wait (10kHz, 1000 ticks)
+### 3.3 Compiler
 
-| Mode | Avg Latency | Median | p99 | Overruns |
-|------|-------------|--------|-----|----------|
-| no_spin | 73,303 ns | 71,652 ns | 111,521 ns | 33 |
-| spin_10µs | 62,654 ns | 61,565 ns | 98,795 ns | 7 |
-| spin_50µs | 23,725 ns | 21,584 ns | 66,172 ns | 0 |
+Parse latency (`kpi/parse_latency`):
 
-**Finding**: Spin-wait dramatically improves jitter:
+| Scenario | Latency (range) |
+|---|---:|
+| simple | 3.67us .. 3.70us |
+| multitask | 6.00us .. 6.16us |
+| complex | 7.07us .. 7.18us |
+| modal | 7.42us .. 7.61us |
 
-- **10µs spin**: p99 drops from 112µs to 99µs, overruns from 33 to 7
-- **50µs spin**: p99 drops to 66µs, **zero overruns**, median latency 22µs (3.3x better than no-spin)
-- Trade-off: 50µs spin at 10kHz = 50% CPU utilization per task thread
+Full compile latency (`kpi/full_compile_latency`):
 
-### 8. Batch vs Single Comparison (10,000 total firings)
+| Scenario | Latency (range) |
+|---|---:|
+| simple | 8.00us .. 8.67us |
+| multitask | 20.51us .. 20.84us |
+| complex | 22.04us .. 22.52us |
+| modal | 24.86us .. 25.21us |
 
-| Mode | Wall Time | Overruns |
-|------|-----------|----------|
-| K=1 (10kHz, 10000 ticks) | 1000 ms | 251 |
-| K=10 (1kHz, 1000 ticks) | 1000 ms | 0 |
+Phase latency for complex pipeline (`kpi/phase_latency/complex`):
 
-**Finding**: Same wall time, same total firings. K=10 eliminates all 251 overruns. This confirms that batching is strictly better for throughput-oriented workloads where burst latency is acceptable.
-
-### 9. Timer Frequency Sweep
-
-| Frequency | Avg Latency | Overruns | Notes |
-|-----------|-------------|----------|-------|
-| 1Hz | 99,368 ns | 0/3 | |
-| 10Hz | 97,491 ns | 0/10 | |
-| 100Hz | 87,916 ns | 0/50 | |
-| 1kHz | 76,571 ns | 0/100 | |
-| 10kHz | 72,334 ns | 17/1000 | 1.7% overrun rate |
-| 100kHz | 38,911 ns | 4386/5000 | 87.7% overrun rate |
-| 1MHz | 36,189 ns | 9855/10000 | 98.6% overrun rate |
-
-### 10. Per-Actor Firing Latency
-
-| Actor | Avg | Median | p99 |
-|-------|-----|--------|-----|
-| mul(N=64) | 16 ns | 20 ns | 21 ns |
-| add() | 15 ns | 20 ns | 21 ns |
-| fft(N=256) | 1,504 ns | 1,473 ns | 1,653 ns |
-| fir(N=16) | 16 ns | 20 ns | 21 ns |
-| mean(N=64) | 16 ns | 20 ns | 21 ns |
-| c2r(N=256) | 16 ns | 20 ns | 21 ns |
-| rms(N=64) | 38 ns | 40 ns | 41 ns |
-
-### 11. Timer vs Work Overhead Ratio
-
-| Configuration | Timer Avg | Work Avg | Overhead Ratio | Per-Firing Timer |
-|---------------|-----------|----------|----------------|------------------|
-| K=1 @ 10kHz | 99,907 ns | 17 ns | 99.98% | 99,907 ns |
-| K=10 @ 1kHz | 999,905 ns | 18 ns | 100.00% | 99,990 ns |
-| 1MHz K=1 | 981 ns | 24 ns | 97.61% | 981 ns |
-| 10MHz K=10 | 977 ns | 24 ns | 97.60% | 97.7 ns |
-| 100MHz K=100 | 978 ns | 24 ns | 97.60% | 9.8 ns |
-
-**Finding**: The overhead ratio as measured (timer sleep time / total) naturally stays ~98-100% because timer sleep dominates regardless. The meaningful metric is **per-firing timer cost**:
-
-- At 100MHz (K=100): **9.8 ns per firing** — timer cost is amortized to near-zero
-- At 10MHz (K=10): **97.7 ns per firing** — still dominated by OS sleep granularity per batch
-- Framework overhead per firing drops linearly with K, confirming ADR-009 projections
-
-## Comparison with Baseline
-
-| Metric | Baseline (pre-ADR-009) | After ADR-009 | Improvement |
-|--------|----------------------|---------------|-------------|
-| Timer overhead ratio @ 10kHz K=1 | 99.98% | 99.98% | Same (inherent to real-time) |
-| Per-firing timer cost @ 10kHz K=10 | N/A (no batching) | 99,990 ns / 10 = 9,999 ns | 10x amortization |
-| Per-firing timer cost @ 100MHz K=100 | N/A | 9.8 ns | Near-zero framework overhead |
-| Overruns @ 10kHz K=1 | 31/1000 (3.1%) | 17/1000 (1.7%) | Run-to-run variance |
-| Overruns @ 10kHz K=10 | N/A | 0/1000 (0%) | Eliminated via batching |
-| Jitter p99 @ 10kHz (no spin) | ~112 µs | 112 µs | Baseline unchanged |
-| Jitter p99 @ 10kHz (50µs spin) | N/A | 66 µs | 41% improvement (opt-in) |
-| Overruns @ 10kHz (50µs spin) | N/A | 0/1000 | Eliminated via spin |
-| Thread wake-up | ~45 µs avg | Synchronized via `_start` barrier | No stagger |
-| High-freq 100MHz firings/100ms | N/A | 9,680,000 | New capability |
-
-## ADR-009 Exit Criteria Status
-
-| Criterion | Status | Evidence |
-|-----------|--------|----------|
-| `BM_TimerOverhead_NoLatency` shows improvement over `BM_TimerOverhead` | Inconclusive | Both ~16.1ns — hardware noise floor. Savings more apparent at realistic freqs |
-| `BM_EmptyPipeline_Batched` 10x firings in proportional time | PASS | 10K firings in 1s (K=10) vs 1K firings in 100ms (K=1), zero overruns |
-| `BM_EmptyPipeline_Freq` 1/10/100MHz runs without crash | PASS | All three frequencies tested, reports K-factor and overrun counts |
-| `run_jitter_spin()` tighter p99 with spin | PASS | p99: 112µs (no spin) → 99µs (10µs) → 66µs (50µs), overruns: 33 → 7 → 0 |
-| All 378+ existing tests pass | PASS | 378 tests passed (`cargo test`) |
-| `set tick_rate` and `set timer_spin` documented in spec §5.1 | PASS | Added to spec settings table |
-
-## ADR-010: RingBuffer Contention Fix Results
-
-Three fixes applied to `pipit::RingBuffer` (pipit.h):
-
-1. **PaddedTail**: Each reader tail on its own 64-byte cache line (was all packed in 1-2 lines)
-2. **Cached min_tail**: Writer uses cached value, O(1) amortized instead of O(Readers) per write
-3. **Two-phase memcpy**: Replaces per-element modulo copy with at-most-2 memcpy calls
-
-### Ring Buffer Contention (BM_RingBuffer_Contention)
-
-再計測（`PIPIT_BENCH_PIN=1`）で新カウンタを追加して観測:
-
-| Readers | Writer items/s | Reader tokens/s (aggregate) | read_fail_pct | write_fail_pct | write_slow_path |
-|---------|----------------|------------------------------|---------------|----------------|-----------------|
-| 2 | 30.9M | 61.9M | 95.0% | 99.85% | 1.24B |
-| 4 | 19.4M | 77.5M | 96.5% | 99.81% | 571M |
-| 8 | 13.5M | 108.4M | 99.0% | 99.76% | 251M |
-| 16 | 17.5M | 279.8M | 99.36% | 99.13% | 77.9M |
-| 32 | 0.98M | 31.5M | 99.997% | 99.83% | 25.9M |
-
-**Finding**: 「改善が見えない」主因は false sharing そのものではなく、**リトライ嵐（busy-poll）と最遅 reader 由来の writer バックプレッシャ**。  
-`read_fail_pct`/`write_fail_pct` が極端に高く、計測時間の大半が成功コピーではなく失敗リトライに使われている。  
-特に 32 readers は oversubscription により writer 側が大きく崩れる。
-
-**What is actually happening (causal chain)**:
-
-- Writer throughput は「成功した write 量」だけで算出されるが、実際のCPU時間には失敗 write/read のスピンが大量に含まれる。
-- `write_fail_pct` が 99% 台のため、writer はほぼ常時「空き待ち」で CAS/load を繰り返している。
-- 最遅 reader の tail が head 進行を止めるため、1つの遅い reader が全体の write 進行を律速する。
-- `PaddedTail` で cache line 干渉は減っても、同期ポリシー（all-readers 完了条件）と busy-poll が残る限り end-to-end は頭打ちになる。
-- 32 readers では `read_fail_pct` がほぼ 100% で、改善分より oversubscription 由来のスケジューリング損失が支配的になる。
-
-### False Sharing (BM_Memory_FalseSharing)
-
-| Readers | Writer items/s | Reader tokens/s (aggregate) | read_fail_pct | write_fail_pct | write_slow_path |
-|---------|----------------|------------------------------|---------------|----------------|-----------------|
-| 1 | 24.3M | 24.3M | 71.8% | 99.80% | 1.06B |
-| 2 | 25.0M | 50.0M | 87.7% | 99.75% | 852M |
-| 4 | 22.1M | 88.6M | 95.2% | 99.56% | 415M |
-| 8 | 14.0M | 111.8M | 97.0% | 99.45% | 220M |
-| 16 | 16.1M | 256.9M | 99.0% | 97.98% | 62.5M |
-
-**Finding**: `PaddedTail` 効果で reader 集約 throughput は増えている（1→16 readers で約 10.6x）が、writer throughput は伸びにくい。  
-理由は、all-readers 消費完了まで head を進められない設計 + リトライ中心のワークロード。  
-つまり、現状の制約は「tail の false sharing」より **同期ポリシー/再試行コスト**。
-
-**Interpretation**:
-
-- このベンチでは「false sharing を減らす最適化」は効いているが、結果指標を支配しているのは retry/backpressure 側。
-- そのため、`items/s` の改善が小さく見えても「最適化が無効」ではなく「別ボトルネックに隠れている」が正しい解釈。
-
-### Single-Threaded Performance
-
-| Benchmark | Before | After | Change |
-|-----------|--------|-------|--------|
-| SizeScaling/4K | 4.16B items/s | 5.98B items/s | +44% |
-| ChunkScaling/1 | 980M items/s | 335M items/s | -66% (memcpy overhead for single-element) |
-| ChunkScaling/64 | — | 15.0B items/s | +38% |
-| ChunkScaling/1024 | 2.53B items/s | 19.2B items/s | +7.6x |
-
-**Finding**: Two-phase memcpy dramatically improves large-chunk throughput (7.6x at chunk=1024) by enabling hardware prefetch on contiguous regions. Single-element chunks show overhead from the two-phase split logic, but this is not a real-world pattern (Pipit uses chunk sizes ≥ port token count, typically 16-256).
-
-### Memory Footprint
-
-| Layout | RB_f_4096_4r | RB_f_4096_8r | RB_f_4096_16r |
-|--------|-------------|-------------|--------------|
-| Before (packed tails) | 16,512 B | ~16,640 B | ~16,768 B |
-| After (PaddedTail) | 16,768 B | 17,024 B | 17,536 B |
-
-Padding adds 64 bytes per reader. For 16 readers: +768 bytes vs a 16KB data buffer — negligible (4.7% overhead).
-
-### ADR-010 Exit Criteria Status
-
-| Criterion | Status | Evidence |
-|-----------|--------|----------|
-| 16-reader regression ≤7x (from ~14x) | PASS | Writer throughput: 30.9M (2r) → 17.5M (16r), regression ~1.77x |
-| 8-reader false sharing latency -30% | INCONCLUSIVE | writer 指標は retry/backpressure 影響が支配。reader aggregate は 2r→8r で増加 |
-| All existing tests pass (378+) | PASS | cargo test: 98 tests passed |
-| BM_Memory_Footprint reflects new sizes | PASS | RB_f_4096_16r = 17,536 B reported |
-| BM_RingBuffer_Contention/32readers runs | PASS | 32 readers でも完走（ただし writer throughput は 0.98M/s まで低下） |
-
-## Remaining Bottlenecks
-
-1. **Affinity task-scaling front-end stalls** — IPC 0.12 with 69.85% front-end idle
-2. **Timer precision above 10kHz** — OS sleep granularity is a hard limit; spin-wait or K-factor batching are the only mitigations
-3. **Debug library warning** — Google Benchmark reports "Library was built as DEBUG" which may affect timing precision
+| Phase | Latency (range) |
+|---|---:|
+| parse | 7.10us .. 7.19us |
+| resolve | 1.43us .. 1.57us |
+| graph | 2.50us .. 3.00us |
+| analyze | 4.39us .. 6.18us |
+| schedule | 2.93us .. 3.26us |
+| codegen | 7.83us .. 8.17us |
+
+Parse scaling (`kpi/parse_scaling`):
+
+| Tasks | Parse Latency (range) |
+|---:|---:|
+| 1 | 3.72us .. 3.75us |
+| 5 | 7.60us .. 7.94us |
+| 10 | 12.11us .. 12.23us |
+| 20 | 21.18us .. 21.29us |
+| 40 | 40.39us .. 40.54us |
+
+### 3.4 End-to-End PDL
+
+`pdl_bench` summary:
+
+- `simple`: `ticks=9658`, `missed=343`, `avg_latency=75977ns`, `max_latency=227394ns`
+- `modal/adaptive`: `ticks=257`, `missed=7`, `avg_latency=82575ns`, `max_latency=193475ns`
+- `multitask/producer`: `ticks=3`, `missed=0`, `avg_latency=80537ns`
+- `multitask/consumer`: `ticks=1`, `missed=0`, `avg_latency=79852ns`
+- `sdr/capture`: `ticks=3`, `missed=1`, `avg_latency=76380ns`
+
+## 4. Bottleneck Analysis
+
+### B1. OS timer wake-up limits dominate above ~10kHz
+
+Evidence:
+
+- Overrun rate jumps from `2.85%` at 10kHz to `75.55%` at 48kHz and `87.65%` at 100kHz.
+- Task-level miss rate mirrors this (`75.77%` at 48kHz).
+
+Interpretation:
+
+- The primary bottleneck is timer scheduling granularity/jitter on normal OS scheduling.
+- At high rates, `drop` policy protects real-time progression but sacrifices iterations.
+
+### B2. Wake-up overhead is amortized only when K-factor is used
+
+Evidence:
+
+- Same effective 10kHz workload: K=1 has `542` overruns, K=10 has `0`.
+- CPU time drops from `162.99ms` (K=1) to `18.86ms` (K=10) for equivalent wall-time run.
+- At 100k effective Hz, K=100 reduces overruns to `0` and CPU time to `9.37ms`.
+
+Interpretation:
+
+- Current runtime is highly sensitive to wake frequency.
+- `tick_rate`/K-factor is the key throughput control, not optional tuning.
+
+### B3. RingBuffer multi-reader path is dominated by retry/backpressure
+
+Evidence:
+
+- Writer throughput degrades `711.3M -> 80.3M` items/s from 1 to 8 readers.
+- `read_fail_pct` rises to `98.48%`, indicating heavy spin/retry pressure.
+
+Interpretation:
+
+- The limiting factor is synchronization/retry dynamics under fan-out.
+- Single-thread raw copy path is fast (multi-billion items/s), so contention policy is the bottleneck.
+
+### B4. Compiler hot phases are parse + codegen (+ analyze variance)
+
+Evidence:
+
+- Parse and codegen are each ~7-8us in phase measurements.
+- Analyze has the widest variance band (`4.39us .. 6.18us`).
+- Parse scaling is near-linear and reaches ~40.5us at 40 tasks.
+
+Interpretation:
+
+- Frontend parsing and backend generation are the main compile-time cost centers.
+- Analyzer data-structure behavior likely drives variance on non-trivial graphs.
+
+## 5. Tuning Strategy (Prioritized)
+
+### Priority 0: Configuration defaults (no architecture change)
+
+- Define workload profiles and default `tick_rate`:
+  - low-latency profile: high `tick_rate`, low K
+  - throughput profile: lower `tick_rate`, higher K
+- Recommend `timer_spin=10us` as baseline low-risk jitter improvement.
+- Reserve `timer_spin=50us` for strict-latency deployments with CPU budget.
+
+### Priority 1: Runtime timer path
+
+- Add adaptive sleep-spin strategy:
+  - coarse sleep until `deadline - spin_window`
+  - short calibrated spin until deadline
+- Add rate guardrails in generated runtime config:
+  - warning when requested clock + host behavior implies chronic overrun.
+- Track long-run drift KPI in nightly benches (not per-PR).
+
+### Priority 2: RingBuffer contention path
+
+- Introduce bounded backoff/yield in failure loops to reduce retry storm.
+- Optimize multi-reader progress accounting for fan-out reads.
+- Add chunk-size aware guidance in docs (`64` or `256` token chunks when possible).
+
+### Priority 3: Compiler latency path
+
+- Cache actor registry/header-derived metadata across benchmark iterations.
+- Reduce allocation churn in parser/analyzer (arena/interning strategy).
+- Add phase-specific memory counters to correlate analyze variance with graph size.
+
+## 6. KPI Targets for Next Iteration
+
+| KPI | Current | Next Target |
+|---|---:|---:|
+| Runtime miss rate @10kHz | 2.97% | <=1.0% |
+| Runtime miss rate @48kHz | 75.77% | <=30% |
+| Timer p99 @10kHz (`spin=0`) | 113.9us | <=100us |
+| Timer overruns @10kHz equivalent (K=10) | 0 | keep 0 |
+| RingBuffer writer throughput @8 readers | 80.3M/s | >=120M/s |
+| RingBuffer read fail @8 readers | 98.48% | <=96% |
+| Compiler full compile (complex) | 22.04-22.52us | <=20us |
+| Parse scaling @40 tasks | 40.39-40.54us | <=36us |
+
+## 7. Conclusion
+
+Current implementation is healthy for low-rate to moderate-rate runtime workloads, but high-frequency operation is bounded by OS wake-up behavior and multi-reader contention policy. The highest-impact tuning path is:
+
+1. Make K-factor/tick-rate profile-driven by default.
+2. Improve timer wake precision with adaptive spin.
+3. Reduce ring-buffer retry pressure under contention.
+4. Trim parser/codegen/analyze overhead in compiler hot path.

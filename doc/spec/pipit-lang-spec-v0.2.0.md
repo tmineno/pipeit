@@ -1153,17 +1153,6 @@ $ ./receiver --duration 10s --probe filtered --param gain=1.5 --stats
 
 ---
 
-## 12. 参考文献
-
-1. E. A. Lee, D. G. Messerschmitt, "Static Scheduling of Synchronous Data Flow Programs for Digital Signal Processing," IEEE Trans. Computers, vol. C-36, no. 1, pp. 24–35, Jan. 1987.
-2. E. A. Lee, D. G. Messerschmitt, "Synchronous Data Flow," Proceedings of the IEEE, vol. 75, no. 9, pp. 1235–1245, Sep. 1987.
-3. G. Bilsen, M. Engels, R. Lauwereins, J. Peperstraete, "Cyclo-Static Dataflow," IEEE Trans. Signal Processing, vol. 44, no. 2, pp. 397–408, Feb. 1996.
-4. Ptolemy Project, "SDF Domain," Ptolemy Classic Almagest Documentation.
-5. C. Ptolemaeus (ed.), "Dataflow," System Design, Modeling, and Simulation using Ptolemy II, Ptolemy.org, 2014.
-6. M. Geilen, T. Basten, S. Stuijk, "Minimising Buffer Requirements of Synchronous Dataflow Graphs with Model Checking," Proc. DAC, pp. 819–824, 2005.
-
----
-
 ## 13. フレーム次元推論と多次元ベクトル化（v0.2 ドラフト）
 
 本章は v0.2 の新規仕様ドラフトである。v0.1.0 との後方互換を維持しつつ、フレームベース処理向けに「次元（shape）」を導入する。
@@ -1349,7 +1338,7 @@ clock 60Hz vision {
 
 ---
 
-## 14. 将来の拡張（v2+ 候補）
+## 将来の拡張（v2+ 候補）
 
 以下は v0.2.0 draft でも対象外とする将来候補である。
 
@@ -1361,3 +1350,14 @@ clock 60Hz vision {
 - ホットリロード（パイプライン再構成のライブ適用）
 - エラー回復戦略（タスク再起動、フォールバックモード）
 - `control` ブロックから mode 内アクターへの直接データ供給
+
+---
+
+## 参考文献
+
+1. E. A. Lee, D. G. Messerschmitt, "Static Scheduling of Synchronous Data Flow Programs for Digital Signal Processing," IEEE Trans. Computers, vol. C-36, no. 1, pp. 24–35, Jan. 1987.
+2. E. A. Lee, D. G. Messerschmitt, "Synchronous Data Flow," Proceedings of the IEEE, vol. 75, no. 9, pp. 1235–1245, Sep. 1987.
+3. G. Bilsen, M. Engels, R. Lauwereins, J. Peperstraete, "Cyclo-Static Dataflow," IEEE Trans. Signal Processing, vol. 44, no. 2, pp. 397–408, Feb. 1996.
+4. Ptolemy Project, "SDF Domain," Ptolemy Classic Almagest Documentation.
+5. C. Ptolemaeus (ed.), "Dataflow," System Design, Modeling, and Simulation using Ptolemy II, Ptolemy.org, 2014.
+6. M. Geilen, T. Basten, S. Stuijk, "Minimising Buffer Requirements of Synchronous Dataflow Graphs with Model Checking," Proc. DAC, pp. 819–824, 2005.
