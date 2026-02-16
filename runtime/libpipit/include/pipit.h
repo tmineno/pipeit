@@ -53,6 +53,28 @@ using int32 = std::int32_t;
 
 namespace pipit {
 
+namespace detail {
+
+struct ActorRuntimeContext {
+    uint64_t iteration_index = 0;
+    double task_rate_hz = 0.0;
+};
+
+inline ActorRuntimeContext &actor_runtime_context() {
+    static thread_local ActorRuntimeContext ctx{};
+    return ctx;
+}
+
+inline void set_actor_iteration_index(uint64_t iteration_index) {
+    actor_runtime_context().iteration_index = iteration_index;
+}
+
+inline void set_actor_task_rate_hz(double task_rate_hz) {
+    actor_runtime_context().task_rate_hz = task_rate_hz;
+}
+
+} // namespace detail
+
 template <typename T, std::size_t Capacity, std::size_t Readers = 1> class RingBuffer {
     static_assert(Capacity > 0, "RingBuffer capacity must be > 0");
     static_assert(Readers > 0, "RingBuffer must have at least one reader");
@@ -234,3 +256,17 @@ struct TaskStats {
 };
 
 } // namespace pipit
+
+// ── Actor runtime context API ────────────────────────────────────────────────
+
+inline uint64_t pipit_now_ns() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count());
+}
+
+inline uint64_t pipit_iteration_index() {
+    return pipit::detail::actor_runtime_context().iteration_index;
+}
+
+inline double pipit_task_rate_hz() { return pipit::detail::actor_runtime_context().task_rate_hz; }

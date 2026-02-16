@@ -332,6 +332,12 @@ impl<'a> CodegenCtx<'a> {
                 meta.freq_hz / meta.k_factor as f64,
                 spin_ns
             );
+            let _ = writeln!(
+                self.out,
+                "    pipit::detail::set_actor_task_rate_hz({:.1});",
+                meta.freq_hz
+            );
+            self.out.push_str("    uint64_t _iter_idx = 0;\n");
 
             // Feedback back-edge buffers (persist across K-loop iterations)
             self.emit_feedback_buffers(task_name, task_graph, &meta.schedule);
@@ -379,6 +385,12 @@ impl<'a> CodegenCtx<'a> {
                     "        for (int _k = 0; _k < {}; ++_k) {{",
                     meta.k_factor
                 );
+                self.out.push_str(
+                    "            pipit::detail::set_actor_iteration_index(_iter_idx++);\n",
+                );
+            } else {
+                self.out
+                    .push_str("        pipit::detail::set_actor_iteration_index(_iter_idx++);\n");
             }
 
             let indent = if meta.k_factor > 1 {
@@ -2105,6 +2117,22 @@ mod tests {
         assert!(
             cpp.contains("_stop.load"),
             "should check stop flag: {}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn runtime_context_hooks_emitted() {
+        let reg = test_registry();
+        let cpp = codegen_ok("clock 1kHz t { constant(0.0) | stdout() }", &reg);
+        assert!(
+            cpp.contains("pipit::detail::set_actor_task_rate_hz(1000.0);"),
+            "should set task rate in runtime context: {}",
+            cpp
+        );
+        assert!(
+            cpp.contains("pipit::detail::set_actor_iteration_index(_iter_idx++);"),
+            "should set iteration index per logical iteration: {}",
             cpp
         );
     }

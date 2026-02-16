@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <pipit.h>
 #include <std_actors.h>
+#include <thread>
 
 #define TEST(name)                                                                                 \
     static void test_##name();                                                                     \
@@ -148,6 +149,21 @@ TEST(decimate_single) {
     int result = actor(in, out);
     ASSERT_EQ(result, ACTOR_OK);
     ASSERT_EQ(out[0], 42.0f);
+}
+
+TEST(runtime_context_api_basic) {
+    uint64_t t0 = pipit_now_ns();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    uint64_t t1 = pipit_now_ns();
+    if (t1 < t0) {
+        fprintf(stderr, "FAIL: %s:%d: pipit_now_ns() is not monotonic\n", __FILE__, __LINE__);
+        exit(1);
+    }
+
+    pipit::detail::set_actor_iteration_index(123);
+    pipit::detail::set_actor_task_rate_hz(48000.0);
+    ASSERT_EQ(pipit_iteration_index(), 123);
+    ASSERT_EQ(pipit_task_rate_hz(), 48000.0);
 }
 
 int main() {

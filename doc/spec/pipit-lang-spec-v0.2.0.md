@@ -200,6 +200,26 @@ ACTOR(fir, IN(float, 5), OUT(float, 1)) {
 | `out` | `T[M]` | 出力バッファ（生産トークン数 M 個） |
 | パラメータ名 | 各型 | DSL 側から渡されるパラメータ |
 
+#### 標準実行コンテキスト API（時間軸）
+
+時間軸を必要とする sink アクターは、以下の標準 API を使用して実行コンテキストを取得できる。ランタイム実装はこれらを提供しなければならない（MUST）。
+
+```cpp
+uint64_t pipit_now_ns();            // monotonic clock（ns）
+uint64_t pipit_iteration_index();   // 当該タスクの論理イテレーション番号（0始まり）
+double   pipit_task_rate_hz();      // 当該タスクの target rate（clock <freq>）
+```
+
+- `pipit_now_ns()`:
+  単調増加クロック（`steady_clock` 相当）の現在時刻を ns 単位で返す。エポックは未規定（実装依存）だが、同一プロセス内で単調性を満たす。
+- `pipit_iteration_index()`:
+  タスク内の論理イテレーション番号を返す。`K > 1` の場合もイテレーションごとに 1 ずつ増加する（1ティックで K 回進む）。
+- `pipit_task_rate_hz()`:
+  DSL の `clock <freq>` で指定した target rate を返す。`drop/slip/backlog` による実効レート変動は反映しない。
+
+これらの API は読み取り専用であり、SDF のレート整合、スケジュール、最適化、FIFO 順序を変更してはならない（MUST NOT）。
+また、これらは「アクター実行時点の観測値」であり、タスク間 end-to-end 遅延やトークン生成時刻の保証を与えるものではない。
+
 ### 4.2 パラメトリックアクター
 
 DSL 側から引数を受け取るアクターは `PARAM` で宣言する。配列引数にはポインタではなく `std::span` を使用する。
