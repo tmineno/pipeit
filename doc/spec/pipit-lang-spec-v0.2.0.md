@@ -1358,6 +1358,59 @@ clock 60Hz vision {
 
 ---
 
+## 14. 外部プロセスインターフェース
+
+### 14.1 概要
+
+Pipit パイプラインと外部プロセス（オシロスコープ GUI、ロガー、テストハーネス等）間のリアルタイム信号データストリーミングを、標準化されたパケットプロトコル **PPKT (Pipit Packet Protocol)** で行う。プロトコルの完全な仕様は [ppkt-protocol-spec.md](ppkt-protocol-spec.md) を参照のこと。
+
+設計原則:
+
+- **プロセス分離**: GUI やロガーはパイプラインプロセスの外部で動作する。クラッシュ隔離・言語非依存
+- **ノンブロッキング**: 送受信ともに `O_NONBLOCK`。SDF スケジュールを一切阻害しない
+- **トランスポート非依存**: UDP (`host:port`) と Unix domain socket (`unix:///path`) を同一 API で扱う
+- **自己記述型パケット**: 各パケットが型・レート・タイムスタンプを含み、受信側に事前設定不要
+
+### 14.2 標準アクター
+
+#### `socket_write` — シンクアクター
+
+```
+ACTOR(socket_write, IN(float, N), OUT(void, 0),
+      PARAM(int, N) PARAM(std::span<const char>, addr) PARAM(int, chan_id))
+```
+
+- 入力サンプルを PPKT パケットとして送信
+- 初回ファイアリング時にソケットをオープン（遅延初期化）
+- **ノンブロッキング**: `sendto()` が `EAGAIN` を返した場合はドロップして `ACTOR_OK`
+- ソケット作成失敗のみ `ACTOR_ERROR`
+
+```pdl
+clock 48kHz audio {
+    sine(1000, 1.0) | socket_write("localhost:9100", 0)
+}
+```
+
+#### `socket_read` — ソースアクター
+
+```
+ACTOR(socket_read, IN(void, 0), OUT(float, N),
+      PARAM(int, N) PARAM(std::span<const char>, addr))
+```
+
+- PPKT パケットを受信してサンプルを出力
+- 初回ファイアリング時にソケットを bind（遅延初期化）
+- **ノンブロッキング**: データ未到着時はゼロ出力で `ACTOR_OK`（SDF スケジュール維持）
+- bind 失敗のみ `ACTOR_ERROR`
+
+```pdl
+clock 1kHz control {
+    socket_read("localhost:9200") | stdout()
+}
+```
+
+---
+
 ## 将来の拡張（v2+ 候補）
 
 以下は v0.2.0 draft でも対象外とする将来候補である。

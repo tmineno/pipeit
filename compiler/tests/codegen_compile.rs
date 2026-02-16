@@ -111,11 +111,10 @@ fn assert_inline_compiles(pdl_source: &str, test_name: &str) {
     };
 
     let root = project_root();
-    let std_actors_h = root
-        .join("runtime")
-        .join("libpipit")
-        .join("include")
-        .join("std_actors.h");
+    let include_dir = root.join("runtime").join("libpipit").join("include");
+    let std_actors_h = include_dir.join("std_actors.h");
+    let std_sink_h = include_dir.join("std_sink.h");
+    let std_source_h = include_dir.join("std_source.h");
     let runtime_include = root.join("runtime").join("libpipit").join("include");
 
     // Write PDL to temp file
@@ -131,6 +130,10 @@ fn assert_inline_compiles(pdl_source: &str, test_name: &str) {
         .arg(pdl_file.to_str().unwrap())
         .arg("-I")
         .arg(std_actors_h.to_str().unwrap())
+        .arg("-I")
+        .arg(std_sink_h.to_str().unwrap())
+        .arg("-I")
+        .arg(std_source_h.to_str().unwrap())
         .arg("--emit")
         .arg("cpp")
         .arg("-o")
@@ -732,6 +735,24 @@ fn actor_binwrite_cfloat() {
     assert_inline_compiles(
         "clock 1kHz t { constant(0.0) | binwrite(\"test.bin\", \"cfloat\") }",
         "actor_binwrite_cfloat",
+    );
+}
+
+// ── Socket actors (PPKT) ──────────────────────────────────────────────
+
+#[test]
+fn actor_socket_write() {
+    assert_inline_compiles(
+        "clock 1kHz t { stdin() | socket_write(\"localhost:9100\", 0) }",
+        "actor_socket_write",
+    );
+}
+
+#[test]
+fn actor_socket_read() {
+    assert_inline_compiles(
+        "clock 1kHz t { socket_read(\"localhost:9200\") | stdout() }",
+        "actor_socket_read",
     );
 }
 

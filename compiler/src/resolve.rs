@@ -889,11 +889,17 @@ mod tests {
             .to_path_buf();
         let std_actors = root.join("runtime/libpipit/include/std_actors.h");
         let example_actors = root.join("examples/example_actors.h");
+        let std_sink = root.join("runtime/libpipit/include/std_sink.h");
+        let std_source = root.join("runtime/libpipit/include/std_source.h");
         let mut reg = Registry::new();
         reg.load_header(&std_actors)
             .expect("failed to load std_actors.h");
         reg.load_header(&example_actors)
             .expect("failed to load example_actors.h");
+        reg.load_header(&std_sink)
+            .expect("failed to load std_sink.h");
+        reg.load_header(&std_source)
+            .expect("failed to load std_source.h");
         reg
     }
 

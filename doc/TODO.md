@@ -279,7 +279,64 @@
 
 ---
 
-## v0.2.2 - Standard Actor Library (Continuation)
+## v0.2.2 - Sink & Source Actors (External Process I/O)
+
+**Goal**: Socket-based sink/source actors for external process communication via PPKT protocol. Enables oscilloscope GUIs, loggers, and test tools as separate processes.
+
+### Protocol & Transport
+
+- [x] **PPKT protocol spec** (`doc/spec/ppkt-protocol-spec.md`):
+  - [x] 48-byte little-endian fixed header + variable payload
+  - [x] DType support: f32, i32, cf32, f64, i16, i8
+  - [x] Sequence numbering, channel multiplexing, chunking rules
+  - [x] Normative reference for all PPKT implementations
+
+- [x] **Network transport** (`runtime/libpipit/include/pipit_net.h`):
+  - [x] `PpktHeader` struct (48B, packed, `static_assert`)
+  - [x] `DatagramSender` / `DatagramReceiver` (POSIX socket wrapper)
+  - [x] Address parsing: `"host:port"` → UDP, `"unix:///path"` → IPC
+  - [x] `ppkt_send_chunked()` — automatic MTU-based sender-side chunking
+  - [x] All sockets `O_NONBLOCK` (never blocks actor thread)
+
+### Sink Actor (`runtime/libpipit/include/std_sink.h`)
+
+- [x] **`socket_write(addr, chan_id)`** — send float samples over UDP/IPC:
+  - [x] Builds PPKT packets with runtime timing context (`pipit_task_rate_hz()`, `pipit_now_ns()`, `pipit_iteration_index()`)
+  - [x] Automatic chunking for large payloads (default MTU=1472B)
+  - [x] `FLAG_FIRST_FRAME` on initial firing, lazy socket init
+  - [x] Non-blocking: drop on send failure, return `ACTOR_OK`
+
+### Source Actor (`runtime/libpipit/include/std_source.h`)
+
+- [x] **`socket_read(addr)`** — receive float samples over UDP/IPC:
+  - [x] Drain-all-keep-latest pattern (handles fast sender)
+  - [x] PPKT header validation before copying payload
+  - [x] Non-blocking: outputs zeros when no data available (`ACTOR_OK`)
+  - [x] `ACTOR_ERROR` only on fatal socket bind failure
+
+### Compiler Integration
+
+- [x] **Registry updates**: `std_sink.h` and `std_source.h` loaded in all 7 `test_registry()` functions
+- [x] **Codegen compile tests**: `actor_socket_write`, `actor_socket_read` (syntax-check generated C++)
+- [x] **Language spec**: Section 14 — actor interfaces (references `ppkt-protocol-spec.md` for protocol)
+
+### Testing
+
+- [x] **C++ unit tests** (`runtime/tests/test_net.cpp`): 17 tests
+  - [x] Header size/offset/validation, dtype sizes, address parsing
+  - [x] UDP loopback send/recv, non-blocking recv, chunked send (single/multiple/sequence)
+- [x] **Loopback integration** (`runtime/tests/test_socket_actors.cpp`): 2 tests
+  - [x] `socket_write` → raw receiver: validates PPKT header fields and payload
+  - [x] `socket_read` loopback: no-data → zeros, receive → correct samples, no-data → zeros
+
+### Future (Separate Phase)
+
+- [ ] **Oscilloscope GUI** (`tools/pipscope/`): ImGui + ImPlot standalone app receiving PPKT via UDP
+- [ ] **Function waveform generators**: `sine`, `square`, `sawtooth`, `triangle`, `noise`, `impulse`
+
+---
+
+## v0.2.3 - Standard Actor Library (Continuation)
 
 ### Phase 2: Signal Processing Basics (Medium Complexity)
 
@@ -501,7 +558,8 @@
 - **v0.1.1** completes runtime features designed for v0.1.0 - essential foundation
 - **v0.1.2** closes the first standard-library milestone (Phase 1 + docs)
 - **v0.2.0** ✅ aligned implementation with frame-dimension/vectorization plan (ADR-007, PortShape, SHAPE parsing, shape constraints, dimension inference, §13.6 shape validation, §5.7 cross-clock rate enforcement)
-- **v0.2.1-v0.2.2** continue stdlib expansion and performance baselining
+- **v0.2.2** ✅ socket-based sink/source actors with PPKT protocol for external process I/O (ADR-013, `ppkt-protocol-spec.md`)
+- **v0.2.3** continues stdlib expansion (filters, transforms, windowing)
 - **v0.3.0** keeps language evolution as design-first (spec/ADR before implementation)
 - **v0.4.0+** deferred until core is stable and well-characterized
 - Performance characterization should inform optimization priorities (measure before optimizing)
