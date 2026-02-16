@@ -340,4 +340,49 @@ BENCHMARK(BM_Timer_HighFreqBatched)
     ->Iterations(1)
     ->Unit(benchmark::kMillisecond);
 
+// ── Adaptive spin benchmark (ADR-014) ────────────────────────────────────────
+
+static void BM_Timer_AdaptiveSpin(benchmark::State &state) {
+    constexpr double kFreqHz = 10000.0;
+    constexpr int kTicks = 2000;
+    const int64_t spin_ns = state.range(0); // -1 = adaptive, >0 = fixed
+
+    for ([[maybe_unused]] auto _ : state) {
+        const auto t0 = Clock::now();
+        Timer timer(kFreqHz, true, spin_ns);
+        std::vector<int64_t> latencies;
+        latencies.reserve(kTicks);
+        int64_t overruns = 0;
+
+        for (int i = 0; i < kTicks; ++i) {
+            timer.wait();
+            if (timer.overrun()) {
+                ++overruns;
+            }
+            latencies.push_back(timer.last_latency().count());
+        }
+
+        auto stats = compute_stats(latencies, overruns);
+        const auto t1 = Clock::now();
+
+        set_latency_counters(state, stats, kFreqHz);
+        state.counters["spin_ns"] = static_cast<double>(spin_ns);
+        state.counters["adaptive"] = timer.is_adaptive() ? 1.0 : 0.0;
+        state.counters["final_spin_threshold_ns"] =
+            static_cast<double>(timer.current_spin_threshold().count());
+        state.SetIterationTime(std::chrono::duration<double>(t1 - t0).count());
+        benchmark::DoNotOptimize(stats.p99_ns);
+    }
+
+    state.SetItemsProcessed(static_cast<int64_t>(kTicks) * state.iterations());
+}
+
+BENCHMARK(BM_Timer_AdaptiveSpin)
+    ->Arg(-1)    // adaptive EWMA
+    ->Arg(10000) // fixed 10us (baseline comparison)
+    ->Arg(50000) // fixed 50us
+    ->UseManualTime()
+    ->Iterations(1)
+    ->Unit(benchmark::kMillisecond);
+
 BENCHMARK_MAIN();

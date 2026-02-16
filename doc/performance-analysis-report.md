@@ -1,16 +1,17 @@
 # Pipit Performance Analysis Report
 
-Date: 2026-02-16  
-Scope: current implementation baseline after benchmark suite simplification  
+Date: 2026-02-17
+Scope: post-ADR-014 (adaptive spin defaults + EWMA timer calibration)
 Spec reference: `doc/spec/pipit-lang-spec-v0.2.0.md` (`tick_rate`, `timer_spin`, overrun policy, SDF static scheduling)
 
 ## 1. Measurement Setup
 
 - Host: AMD Ryzen 9 9950X3D (16C/32T), Linux `6.6.87.2-microsoft-standard-WSL2`
+
 Commands used:
 
 ```bash
-./benches/run_all.sh --filter ringbuf --filter timer --filter thread --filter pdl --output-dir /tmp/pipit_perf_refresh
+./benches/run_all.sh --filter ringbuf --filter timer --filter thread --filter pdl --output-dir /tmp/pipit_perf_adaptive
 cargo bench --manifest-path compiler/Cargo.toml --bench compiler_bench -- "kpi/" --sample-size 10 --measurement-time 0.5 --warm-up-time 0.1
 ```
 
@@ -35,26 +36,27 @@ Timer frequency sweep:
 
 | Frequency | Ticks | Overruns | Overrun Rate | Avg Latency | P99 Latency |
 |---|---:|---:|---:|---:|---:|
-| 1kHz | 1000 | 0 | 0.00% | 79.3us | 112.0us |
-| 10kHz | 2000 | 57 | 2.85% | 72.7us | 111.4us |
-| 48kHz | 2000 | 1511 | 75.55% | 42.5us | 93.9us |
-| 100kHz | 2000 | 1753 | 87.65% | 39.1us | 94.9us |
-| 1MHz | 1000 | 983 | 98.30% | 36.8us | 71.8us |
+| 1kHz | 1000 | 0 | 0.00% | 79.2us | 119.5us |
+| 10kHz | 2000 | 50 | 2.50% | 72.0us | 111.1us |
+| 48kHz | 2000 | 1513 | 75.65% | 41.3us | 96.2us |
+| 100kHz | 2000 | 1754 | 87.70% | 38.0us | 90.3us |
+| 1MHz | 1000 | 984 | 98.40% | 36.8us | 71.7us |
 
 Jitter with `timer_spin` at 10kHz:
 
 | timer_spin | Overruns | Avg Latency | P99 Latency |
 |---|---:|---:|---:|
-| 0ns | 52 | 74.1us | 113.9us |
-| 10us | 18 | 63.0us | 99.1us |
-| 50us | 3 | 24.1us | 61.7us |
+| 0ns | 54 | 72.9us | 107.0us |
+| 10us (new default) | 15 | 62.1us | 98.6us |
+| 50us | 2 | 22.3us | 54.5us |
+| **auto (EWMA)** | **0** | **0.6us** | **16.8us** |
 
 Batch vs single (10kHz equivalent):
 
 | Mode | Wall Time | CPU Time | Overruns |
 |---|---:|---:|---:|
-| K=1 (`BM_Timer_BatchVsSingle/1`) | 2000.07ms | 162.99ms | 542 |
-| K=10 (`BM_Timer_BatchVsSingle/10`) | 2000.08ms | 18.86ms | 0 |
+| K=1 (`BM_Timer_BatchVsSingle/1`) | 2000.1ms | 153.5ms | 454 |
+| K=10 (`BM_Timer_BatchVsSingle/10`) | 2000.1ms | 18.4ms | 0 |
 
 Task deadline miss rate:
 
@@ -150,28 +152,50 @@ Parse scaling (`kpi/parse_scaling`):
 
 Evidence:
 
-- Overrun rate jumps from `2.85%` at 10kHz to `75.55%` at 48kHz and `87.65%` at 100kHz.
+- Overrun rate jumps from `2.50%` at 10kHz to `75.65%` at 48kHz and `87.70%` at 100kHz.
 - Task-level miss rate mirrors this (`75.77%` at 48kHz).
 
 Interpretation:
 
 - The primary bottleneck is timer scheduling granularity/jitter on normal OS scheduling.
 - At high rates, `drop` policy protects real-time progression but sacrifices iterations.
+- Re-check on the same host reproduced the pattern (`p99` around `107-111us` at 10kHz; overrun around `~75%` at 48kHz and `~88%` at 100kHz), reinforcing that wake-up jitter dominates actor compute at high rate.
+- Practical K=1 limit is near where timer `p99` approaches period: at 10kHz period is `100us` while observed `p99` is already `~110us`, so sustained operation above this tends to become overrun-heavy.
+- CPU pinning (`taskset`) showed only marginal improvement, suggesting jitter is primarily from sleep/wake scheduling path (plus virtualization overhead in WSL2/Hyper-V), not CPU migration alone.
 
 ### B2. Wake-up overhead is amortized only when K-factor is used
 
 Evidence:
 
-- Same effective 10kHz workload: K=1 has `542` overruns, K=10 has `0`.
-- CPU time drops from `162.99ms` (K=1) to `18.86ms` (K=10) for equivalent wall-time run.
+- Same effective 10kHz workload: K=1 has `454` overruns, K=10 has `0`.
+- CPU time drops from `153.5ms` (K=1) to `18.4ms` (K=10) for equivalent wall-time run.
 - At 100k effective Hz, K=100 reduces overruns to `0` and CPU time to `9.37ms`.
 
 Interpretation:
 
 - Current runtime is highly sensitive to wake frequency.
 - `tick_rate`/K-factor is the key throughput control, not optional tuning.
+- Additional timer re-runs confirm that reducing wake count is the main lever: `K=1` vs `K=10` kept similar wall time but cut CPU time by about `8.3x` and removed overruns in the 10kHz-equivalent case.
+- CPU cost per wake is similar order for `K=1` and `K=10`, so most gain comes from amortizing fixed wake-up/scheduler overhead across batched firings, not from making actor compute faster.
+- In `BM_Timer_HighFreqBatched`, different effective rates with the same timer wake rate produced nearly identical overrun levels, further indicating wake frequency (`timer_hz`) is the dominant control variable.
 
-### B3. RingBuffer multi-reader path is dominated by retry/backpressure
+### B3. Adaptive EWMA spin eliminates overruns at the cost of CPU
+
+Evidence:
+
+- Adaptive mode at 10kHz: `0` overruns, p99 latency `16.8us`, converged spin window `88.9us`.
+- Fixed 10us spin: `15` overruns, p99 `98.6us`.
+- Fixed 50us spin: `2` overruns, p99 `54.5us`.
+- Adaptive CPU cost: `105.2ms` vs `~16ms` for fixed modes (2000 ticks, 200ms wall time).
+
+Interpretation:
+
+- The EWMA algorithm converges to a spin window (~89us) that closely matches the platform's measured sleep jitter (~70-80us avg), providing near-deadline precision.
+- The trade-off is explicit: adaptive uses ~6.5x more CPU than fixed-10us, but achieves zero overruns and sub-20us p99 jitter.
+- For latency-critical workloads where zero missed deadlines matter, `set timer_spin = auto` is the recommended option.
+- For CPU-constrained workloads, the new default `timer_spin = 10000` (10us) provides a good balance: 72% fewer overruns than no spin, with negligible CPU increase.
+
+### B4. RingBuffer multi-reader path is dominated by retry/backpressure
 
 Evidence:
 
@@ -183,7 +207,7 @@ Interpretation:
 - The limiting factor is synchronization/retry dynamics under fan-out.
 - Single-thread raw copy path is fast (multi-billion items/s), so contention policy is the bottleneck.
 
-### B4. Compiler hot phases are parse + codegen (+ analyze variance)
+### B5. Compiler hot phases are parse + codegen (+ analyze variance)
 
 Evidence:
 
@@ -198,22 +222,18 @@ Interpretation:
 
 ## 5. Tuning Strategy (Prioritized)
 
-### Priority 0: Configuration defaults (no architecture change)
+### Priority 0: Configuration defaults — DONE (ADR-014)
 
-- Define workload profiles and default `tick_rate`:
-  - low-latency profile: high `tick_rate`, low K
-  - throughput profile: lower `tick_rate`, higher K
-- Recommend `timer_spin=10us` as baseline low-risk jitter improvement.
-- Reserve `timer_spin=50us` for strict-latency deployments with CPU budget.
+- [x] Changed `tick_rate` default: `1MHz` → `10kHz`. High-frequency tasks automatically get K-factor batching.
+- [x] Changed `timer_spin` default: `0` → `10000` (10us). Immediate jitter reduction with negligible CPU cost.
+- [x] Added `set timer_spin = auto` for EWMA-based adaptive spin calibration.
+- [x] Added compile-time rate guardrails: warning when effective tick period < 10us.
 
-### Priority 1: Runtime timer path
+### Priority 1: Runtime timer path — DONE (ADR-014)
 
-- Add adaptive sleep-spin strategy:
-  - coarse sleep until `deadline - spin_window`
-  - short calibrated spin until deadline
-- Add rate guardrails in generated runtime config:
-  - warning when requested clock + host behavior implies chronic overrun.
-- Track long-run drift KPI in nightly benches (not per-PR).
+- [x] Adaptive sleep-spin strategy via EWMA jitter calibration (`alpha=1/8`, safety margin `2x`, clamp `[500ns, 100us]`).
+- [x] Rate guardrails in scheduler: warning when requested clock implies chronic overrun.
+- [ ] Track long-run drift KPI in nightly benches (not per-PR).
 
 ### Priority 2: RingBuffer contention path
 
@@ -229,22 +249,27 @@ Interpretation:
 
 ## 6. KPI Targets for Next Iteration
 
-| KPI | Current | Next Target |
-|---|---:|---:|
-| Runtime miss rate @10kHz | 2.97% | <=1.0% |
-| Runtime miss rate @48kHz | 75.77% | <=30% |
-| Timer p99 @10kHz (`spin=0`) | 113.9us | <=100us |
-| Timer overruns @10kHz equivalent (K=10) | 0 | keep 0 |
-| RingBuffer writer throughput @8 readers | 80.3M/s | >=120M/s |
-| RingBuffer read fail @8 readers | 98.48% | <=96% |
-| Compiler full compile (complex) | 22.04-22.52us | <=20us |
-| Parse scaling @40 tasks | 40.39-40.54us | <=36us |
+| KPI | Baseline | Post-ADR-014 | Next Target |
+|---|---:|---:|---:|
+| Timer overruns @10kHz (spin=0) | 54 | — | — |
+| Timer overruns @10kHz (spin=10us, default) | — | 15 | <=10 |
+| Timer overruns @10kHz (adaptive) | — | **0** | keep 0 |
+| Timer p99 @10kHz (spin=0) | 107.0us | — | — |
+| Timer p99 @10kHz (spin=10us, default) | — | 98.6us | <=90us |
+| Timer p99 @10kHz (adaptive) | — | **16.8us** | <=20us |
+| Batch overruns @10kHz K=10 | 0 | 0 | keep 0 |
+| RingBuffer writer throughput @8 readers | 80.3M/s | 80.3M/s | >=120M/s |
+| RingBuffer read fail @8 readers | 98.48% | 98.48% | <=96% |
+| Compiler full compile (complex) | 22.04-22.52us | 22.04-22.52us | <=20us |
+| Parse scaling @40 tasks | 40.39-40.54us | 40.39-40.54us | <=36us |
 
 ## 7. Conclusion
 
-Current implementation is healthy for low-rate to moderate-rate runtime workloads, but high-frequency operation is bounded by OS wake-up behavior and multi-reader contention policy. The highest-impact tuning path is:
+ADR-014 changes address the two highest-priority tuning targets from the initial analysis:
 
-1. Make K-factor/tick-rate profile-driven by default.
-2. Improve timer wake precision with adaptive spin.
-3. Reduce ring-buffer retry pressure under contention.
-4. Trim parser/codegen/analyze overhead in compiler hot path.
+1. **Default tick_rate lowered to 10kHz** — high-frequency tasks (>10kHz) now automatically batch via K-factor, eliminating the most common overrun scenario without user intervention.
+2. **Default timer_spin raised to 10us** — reduces overruns by 72% (54 → 15 at 10kHz) with negligible CPU impact.
+3. **Adaptive EWMA spin (`timer_spin = auto`)** — achieves zero overruns and p99 latency of 16.8us by self-calibrating to platform jitter. Trade-off is higher CPU usage (~6.5x), appropriate for latency-critical workloads.
+4. **Compile-time rate guardrails** — warn when effective timer rate exceeds OS scheduler capability (~100kHz).
+
+Remaining bottlenecks are ring-buffer contention (Priority 2) and compiler hot-path latency (Priority 3), which are unchanged by this iteration.

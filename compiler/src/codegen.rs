@@ -324,8 +324,12 @@ impl<'a> CodegenCtx<'a> {
             );
 
             // Timer (measure_latency enabled only when stats are active;
-            //        spin_ns from `set timer_spin`, default 0 = no spin)
-            let spin_ns = self.get_set_number("timer_spin").unwrap_or(0.0) as i64;
+            //        spin_ns from `set timer_spin`, default 10us; `auto` = adaptive)
+            let spin_ns = if self.get_set_ident("timer_spin") == Some("auto") {
+                -1_i64 // sentinel for adaptive EWMA mode
+            } else {
+                self.get_set_number("timer_spin").unwrap_or(10_000.0) as i64
+            };
             let _ = writeln!(
                 self.out,
                 "    pipit::Timer _timer({:.1}, _stats, {});",
@@ -2179,9 +2183,10 @@ mod tests {
     #[test]
     fn k_factor_loop() {
         let reg = test_registry();
+        // default tick_rate = 10kHz → K = ceil(10MHz / 10kHz) = 1000
         let cpp = codegen_ok("clock 10MHz t { constant(0.0) | stdout() }", &reg);
         assert!(
-            cpp.contains("for (int _k = 0; _k < 10; ++_k)"),
+            cpp.contains("for (int _k = 0; _k < 1000; ++_k)"),
             "should have K-loop: {}",
             cpp
         );
@@ -2191,6 +2196,49 @@ mod tests {
         assert!(
             pos_const < pos_stdout,
             "constant must fire before stdout within K-loop"
+        );
+    }
+
+    // ── timer_spin tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn timer_spin_default() {
+        let reg = test_registry();
+        let cpp = codegen_ok("clock 1kHz t { constant(0.0) | stdout() }", &reg);
+        // default timer_spin = 10000 (10us)
+        assert!(
+            cpp.contains("pipit::Timer _timer(1000.0, _stats, 10000);"),
+            "default spin should be 10000ns: {}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn timer_spin_explicit() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            "set timer_spin = 5000\nclock 1kHz t { constant(0.0) | stdout() }",
+            &reg,
+        );
+        assert!(
+            cpp.contains("pipit::Timer _timer(1000.0, _stats, 5000);"),
+            "explicit spin should be 5000ns: {}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn timer_spin_auto() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            "set timer_spin = auto\nclock 1kHz t { constant(0.0) | stdout() }",
+            &reg,
+        );
+        // auto → sentinel -1 for adaptive EWMA mode
+        assert!(
+            cpp.contains("pipit::Timer _timer(1000.0, _stats, -1);"),
+            "auto spin should emit sentinel -1: {}",
+            cpp
         );
     }
 
