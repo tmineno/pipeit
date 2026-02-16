@@ -73,13 +73,27 @@ target/release/pcc examples/gain.pdl \
 - Actor error propagation with structured exit codes (0/1/2)
 - Diagnostic hints for common errors
 
-### Generated Binary
+### Runtime
 
 - `--duration` with time suffixes (`10s`, `1m`, `inf`)
 - `--param name=value` for runtime parameter override
 - `--stats` for per-task timing statistics
 - `--probe <name>` / `--probe-output <path>` for data observation
 - `--release` strips probes to zero cost
+- Adaptive spin-wait timer with EWMA calibration (ADR-014)
+
+### Standard Actors (31 actors)
+
+- **I/O**: `stdin`, `stdout`, `stderr`, `stdout_fmt`, `binread`, `binwrite`
+- **Math**: `constant`, `mul`, `add`, `sub`, `div`, `abs`, `sqrt`, `threshold`
+- **Statistics**: `mean`, `rms`, `min`, `max`
+- **DSP**: `fft`, `c2r`, `mag`, `fir`, `delay`, `decimate`
+- **Waveform generators**: `sine`, `square`, `sawtooth`, `triangle`, `noise`, `impulse`
+- **External I/O**: `socket_write`, `socket_read` (UDP/IPC via [PPKT protocol](doc/spec/ppkt-protocol-spec.md))
+
+### Tools
+
+- **pipscope** — Real-time oscilloscope GUI (ImGui + ImPlot) receiving PPKT packets via UDP
 
 ### Visualization
 
@@ -94,15 +108,22 @@ compiler/       Rust compiler (pcc)
   src/            parse → resolve → graph → analyze → schedule → codegen
   tests/          unit + integration + end-to-end coverage
 runtime/        C++ runtime library (libpipit)
-  libpipit/       Ring buffer, timer, statistics
+  libpipit/       Ring buffer, timer, statistics, networking (PPKT)
+  tests/          C++ unit tests for actors and runtime components
+tools/          Standalone tools
+  pipscope/       Real-time oscilloscope GUI (ImGui + ImPlot)
 examples/       Example .pdl files and actor headers
-doc/            Language spec, ADRs, usage guide
+doc/            Language spec, ADRs, usage guide, performance report
+benches/        Performance benchmarks (compiler, runtime, E2E)
 ```
 
 ## Documentation
 
 - [Language Spec v0.2.0](doc/spec/pipit-lang-spec-v0.2.0.md)
+- [PPKT Protocol Spec](doc/spec/ppkt-protocol-spec.md)
+- [Standard Library Reference](doc/spec/standard-library-spec.md)
 - [pcc Usage Guide](doc/pcc-usage-guide.md)
+- [Performance Analysis Report](doc/performance-analysis-report.md)
 - [Development TODO](doc/TODO.md)
 
 ## License
