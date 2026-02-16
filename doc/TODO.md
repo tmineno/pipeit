@@ -331,7 +331,13 @@
 
 ### Future (Separate Phase)
 
-- [ ] **Oscilloscope GUI** (`tools/pipscope/`): ImGui + ImPlot standalone app receiving PPKT via UDP
+- [x] **Oscilloscope GUI** (`tools/pipscope/`): ImGui + ImPlot standalone app receiving PPKT via UDP
+  - [x] PPKT receiver with per-channel sample buffers (`ppkt_receiver.h`)
+  - [x] ImGui + ImPlot waveform display with auto-channel discovery
+  - [x] Controls: Pause/Resume, Auto-Y, Samples slider (64-65536)
+  - [x] CLI: `pipscope --port <port>` / `pipscope -p <port>`
+  - [x] CMake FetchContent build (GLFW 3.4, ImGui v1.91.8, ImPlot v0.16)
+  - [x] E2E tests: 17 tests (SampleBuffer, dtype conversion, UDP loopback receiver)
 - [ ] **Function waveform generators**: `sine`, `square`, `sawtooth`, `triangle`, `noise`, `impulse`
 
 ---
