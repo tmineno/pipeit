@@ -579,6 +579,45 @@ fn actor_constant() {
 }
 
 #[test]
+fn actor_sine() {
+    assert_inline_compiles("clock 1kHz t { sine(100.0, 1.0) | stdout() }", "actor_sine");
+}
+
+#[test]
+fn actor_square() {
+    assert_inline_compiles(
+        "clock 1kHz t { square(100.0, 1.0) | stdout() }",
+        "actor_square",
+    );
+}
+
+#[test]
+fn actor_sawtooth() {
+    assert_inline_compiles(
+        "clock 1kHz t { sawtooth(100.0, 1.0) | stdout() }",
+        "actor_sawtooth",
+    );
+}
+
+#[test]
+fn actor_triangle() {
+    assert_inline_compiles(
+        "clock 1kHz t { triangle(100.0, 1.0) | stdout() }",
+        "actor_triangle",
+    );
+}
+
+#[test]
+fn actor_noise() {
+    assert_inline_compiles("clock 1kHz t { noise(1.0) | stdout() }", "actor_noise");
+}
+
+#[test]
+fn actor_impulse() {
+    assert_inline_compiles("clock 1kHz t { impulse(100) | stdout() }", "actor_impulse");
+}
+
+#[test]
 fn actor_mul() {
     assert_inline_compiles(
         "clock 1kHz t { constant(2.0) | mul(3.0) | stdout() }",

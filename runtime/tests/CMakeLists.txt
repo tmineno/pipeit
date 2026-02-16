@@ -13,6 +13,7 @@ add_executable(test_statistics test_statistics.cpp)
 add_executable(test_fft test_fft.cpp)
 add_executable(test_transform test_transform.cpp)
 add_executable(test_utility test_utility.cpp)
+add_executable(test_waveform test_waveform.cpp)
 
 # Enable testing
 enable_testing()
@@ -22,3 +23,4 @@ add_test(NAME StatisticsActors COMMAND test_statistics)
 add_test(NAME FFTActor COMMAND test_fft)
 add_test(NAME TransformActors COMMAND test_transform)
 add_test(NAME UtilityActors COMMAND test_utility)
+add_test(NAME WaveformActors COMMAND test_waveform)

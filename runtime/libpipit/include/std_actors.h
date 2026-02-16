@@ -37,6 +37,176 @@ ACTOR(constant, IN(void, 0), OUT(float, N), RUNTIME_PARAM(float, value) PARAM(in
 }
 ;
 
+/// @brief Sine wave generator
+///
+/// Generates a sinusoidal signal: `amp * sin(2 * pi * freq * t)`.
+/// Time is derived from the task clock via pipit_iteration_index() and
+/// pipit_task_rate_hz(), ensuring phase continuity across firings.
+///
+/// @param freq Frequency in Hz
+/// @param amp  Peak amplitude
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// clock 48kHz audio { sine(440.0, 1.0) | stdout() }
+/// @endcode
+ACTOR(sine, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N)) {
+    (void)in;
+    uint64_t base = pipit_iteration_index();
+    double sr = pipit_task_rate_hz();
+    for (int i = 0; i < N; ++i) {
+        double t = static_cast<double>(base + i) / sr;
+        out[i] = amp * static_cast<float>(std::sin(2.0 * M_PI * freq * t));
+    }
+    return ACTOR_OK;
+}
+}
+;
+
+/// @brief Square wave generator
+///
+/// Generates a square wave with 50% duty cycle: +amp for the first half of
+/// each period, -amp for the second half.
+///
+/// @param freq Frequency in Hz
+/// @param amp  Peak amplitude
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// clock 1kHz t { square(100.0, 1.0) | stdout() }
+/// @endcode
+ACTOR(square, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N)) {
+    (void)in;
+    uint64_t base = pipit_iteration_index();
+    double sr = pipit_task_rate_hz();
+    for (int i = 0; i < N; ++i) {
+        double t = static_cast<double>(base + i) / sr;
+        double phase = std::fmod(t * freq, 1.0);
+        if (phase < 0.0)
+            phase += 1.0;
+        out[i] = (phase < 0.5) ? amp : -amp;
+    }
+    return ACTOR_OK;
+}
+}
+;
+
+/// @brief Sawtooth wave generator
+///
+/// Generates a sawtooth wave that ramps linearly from -amp to +amp over
+/// each period.
+///
+/// @param freq Frequency in Hz
+/// @param amp  Peak amplitude
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// clock 1kHz t { sawtooth(100.0, 1.0) | stdout() }
+/// @endcode
+ACTOR(sawtooth, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N)) {
+    (void)in;
+    uint64_t base = pipit_iteration_index();
+    double sr = pipit_task_rate_hz();
+    for (int i = 0; i < N; ++i) {
+        double t = static_cast<double>(base + i) / sr;
+        double phase = std::fmod(t * freq, 1.0);
+        if (phase < 0.0)
+            phase += 1.0;
+        out[i] = amp * static_cast<float>(2.0 * phase - 1.0);
+    }
+    return ACTOR_OK;
+}
+}
+;
+
+/// @brief Triangle wave generator
+///
+/// Generates a triangle wave that ramps linearly from -amp to +amp and
+/// back over each period.
+///
+/// @param freq Frequency in Hz
+/// @param amp  Peak amplitude
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// clock 1kHz t { triangle(100.0, 1.0) | stdout() }
+/// @endcode
+ACTOR(triangle, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N)) {
+    (void)in;
+    uint64_t base = pipit_iteration_index();
+    double sr = pipit_task_rate_hz();
+    for (int i = 0; i < N; ++i) {
+        double t = static_cast<double>(base + i) / sr;
+        double phase = std::fmod(t * freq, 1.0);
+        if (phase < 0.0)
+            phase += 1.0;
+        // Triangle: rises 0→1 in first half, falls 1→0 in second half
+        // Map to [-amp, +amp]: 4*|phase-0.5| - 1
+        out[i] = amp * static_cast<float>(4.0 * std::abs(phase - 0.5) - 1.0);
+    }
+    return ACTOR_OK;
+}
+}
+;
+
+/// @brief White noise generator
+///
+/// Generates uniformly distributed pseudo-random noise in the range
+/// [-amp, +amp] using a fast xorshift32 PRNG. Deterministic for a given
+/// sequence of firings (state persists across calls).
+///
+/// @param amp Peak amplitude
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// clock 1kHz t { noise(0.5) | stdout() }
+/// @endcode
+ACTOR(noise, IN(void, 0), OUT(float, N), PARAM(float, amp) PARAM(int, N)) {
+    (void)in;
+    static uint32_t state = 2463534242u;
+    for (int i = 0; i < N; ++i) {
+        // xorshift32
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        // Map to [-1.0, 1.0]
+        float u = static_cast<float>(state) / static_cast<float>(UINT32_MAX);
+        out[i] = amp * (2.0f * u - 1.0f);
+    }
+    return ACTOR_OK;
+}
+}
+;
+
+/// @brief Impulse train generator
+///
+/// Generates a periodic impulse: outputs 1.0 every `period` samples and
+/// 0.0 otherwise. Uses pipit_iteration_index() for sample position.
+///
+/// @param period Impulse period in samples (must be > 0)
+/// @return ACTOR_OK on success
+///
+/// Example usage:
+/// @code{.pdl}
+/// clock 1kHz t { impulse(100) | stdout() }
+/// @endcode
+ACTOR(impulse, IN(void, 0), OUT(float, N), PARAM(int, period) PARAM(int, N)) {
+    (void)in;
+    uint64_t base = pipit_iteration_index();
+    for (int i = 0; i < N; ++i) {
+        uint64_t idx = base + static_cast<uint64_t>(i);
+        out[i] = (period > 0 && idx % static_cast<uint64_t>(period) == 0) ? 1.0f : 0.0f;
+    }
+    return ACTOR_OK;
+}
+}
+;
+
 /// @}
 
 /// @defgroup transform_actors Transform Actors
