@@ -9,340 +9,48 @@
 
 ---
 
-## v0.1.1 - Probe Completion & Hardening (Current)
+## v0.1.1 - Probe Completion & Hardening ✅
 
-**Goal**: Complete probe runtime wiring and harden startup/runtime behavior with full end-to-end test coverage.
-
-### Runtime Features
-
-- [x] **Probe runtime wiring and startup validation**:
-  - [x] Build runtime map from probe name → generated `_probe_<name>_enabled` flag
-  - [x] Wire `--probe <name>` to enable matching probe flags before task launch
-  - [x] On unknown `--probe <name>`: print startup error and exit code `2`
-  - [x] Support multiple `--probe` flags; duplicate names are idempotent
-  - [x] Wire `--probe-output <file>` to `_probe_output` `FILE*` before task launch
-  - [x] On `--probe-output` file open failure: print startup error and exit code `2` (hard-fail, no fallback)
-  - [x] Keep default probe output on `stderr` when `--probe-output` is not provided
-  - [x] Keep probe emission guarded for release builds (`#ifndef NDEBUG`)
-
-- [x] **Probe completion exit criteria**:
-  - [x] Probe data is emitted only for explicitly enabled probe names
-  - [x] Startup validation failures never launch worker threads
-  - [x] Probe startup and runtime behavior documented in `doc/pcc-usage-guide.md`
-
-### Quality & Testing
-
-- [x] **End-to-end tests**:
-  - [x] Test receiver.pdl compiles and runs
-  - [x] Test --stats output format (task stats + shared buffer stats)
-  - [x] Test probe emits data for enabled probe
-  - [x] Test probe remains silent when not enabled
-  - [x] Test unknown probe name exits with code `2` and startup error message
-  - [x] Test `--probe-output` missing path exits with code `2`
-  - [x] Test `--probe-output` open failure exits with code `2` and startup error message
-  - [x] Test duplicate `--probe <name>` arguments are accepted and do not duplicate control state
+- [x] Probe runtime wiring (`--probe`, `--probe-output`, startup validation, exit code 2)
+- [x] Release build guard (`#ifndef NDEBUG`)
+- [x] End-to-end test coverage (8 tests: compile/run, stats, probe enable/disable/error)
 
 ---
 
-## v0.1.2 - Standard Actor Library
+## v0.1.2 - Standard Actor Library ✅
 
-**Goal**: Provide well-tested, documented actors for common signal processing tasks. Prioritize simple, high-value actors before complex ones.
-
-### Phase 1: Essential I/O & Math (Simple, High Value) ✅ COMPLETE
-
-- [x] **File I/O** (MEDIUM complexity):
-  - [x] `binread(path, dtype)` - Binary file reader (int16, int32, float, cfloat)
-  - [x] `binwrite(path, dtype)` - Binary file writer
-  - [x] Error handling for file operations (ACTOR_ERROR on failure)
-  - [x] Unit tests with known input/output files
-
-- [x] **Standard I/O** (LOW complexity):
-  - [x] Enhance `stdout()` with format options (hex, scientific notation) → `stdout_fmt(format)`
-  - [x] `stderr()` - Write to stderr for error reporting
-  - [x] `stdin()` - Read from stdin (interactive pipelines)
-
-- [x] **Basic arithmetic** (LOW complexity):
-  - [x] `sub()` - Subtraction
-  - [x] `div()` - Division
-  - [x] `abs()` - Absolute value
-  - [x] `sqrt()` - Square root
-  - [x] Unit tests for each (edge cases: zero, negative, inf, NaN)
-
-- [x] **Basic statistics** (LOW-MEDIUM complexity):
-  - [x] `mean(N)` - Running mean over N samples
-  - [x] `rms(N)` - RMS over N samples
-  - [x] `min(N)` - Minimum over window
-  - [x] `max(N)` - Maximum over window
-  - [x] Unit tests with known sequences
-
-**Phase 1 Summary:**
-
-- 25 standard actors implemented in `runtime/libpipit/include/std_actors.h`
-- 85 integration tests + 58 C++ runtime tests (143 total for stdlib)
-- All actors have both compilation and runtime test coverage
-
-### Documentation ✅ COMPLETE
-
-- [x] **Documentation generation**:
-  - [x] Convert existing comments to Doxygen format (`/// @brief`, `@param`, `@return`, `@code{.pdl}`)
-  - [x] Create `scripts/gen-stdlib-doc.py` to parse Doxygen comments and generate flat markdown
-  - [x] Generate `doc/spec/standard-library-spec.md` from `std_actors.h`
-  - [x] Add `gen-stdlib-doc` pre-commit hook (triggers on `std_actors.h` changes)
+- [x] 25 standard actors (I/O, math, statistics, DSP) in `std_actors.h`
+- [x] 143 total tests (85 integration + 58 C++ runtime)
+- [x] Doxygen docs + auto-generated `standard-library-spec.md` (pre-commit hook)
 
 ---
 
 ## v0.2.0 - Frame Dimension Inference & Vectorization Alignment ✅
 
-**Goal**: Align compiler/runtime architecture with `doc/spec/pipit-lang-spec-v0.2.0.md` shape inference plan before adding more medium/high complexity actors.
-
-### Spec & Scope Lock
-
-- [x] **Freeze v0.2.0 shape model** (`doc/spec/pipit-lang-spec-v0.2.0.md`):
-  - [x] Confirm shape semantics: `rate = product(shape)` with flat runtime buffers
-  - [x] Confirm backward compatibility: `IN(T, N)` / `OUT(T, N)` as rank-1 shorthand
-  - [x] Confirm call-site shape constraint syntax: `actor(...)[d0, d1, ...]`
-  - [x] Confirm compile-time-only dimension policy (literal/const only; no runtime param)
-  - [x] Create ADR for accepted v0.2.0 constraints and non-goals (`doc/adr/007-shape-inference-v020.md`)
-
-### Compiler Alignment (Current Impl Gap Closure)
-
-- [x] **Registry metadata evolution** (`compiler/src/registry.rs`):
-  - [x] Introduce shape-aware port metadata (`PortShape` type alongside `TokenCount`)
-  - [x] Support `SHAPE(...)` parsing in `IN/OUT` scanner
-  - [x] Preserve compatibility with existing actor headers using scalar count form
-
-- [x] **Parser/AST updates for shape constraints**:
-  - [x] Extend actor-call grammar to accept optional shape constraints (`[d0, d1, ...]`)
-  - [x] Store shape constraint AST on actor call nodes (`ShapeConstraint`, `ShapeDim`)
-  - [x] Restrict shape constraint elements to compile-time integers / const refs
-
-- [x] **Analyze/Schedule updates** (`compiler/src/analyze.rs`, `compiler/src/schedule.rs`):
-  - [x] Add shape-aware rate resolution (`resolve_port_rate`)
-  - [x] Resolve symbolic dimensions from args or shape constraints before SDF balance solving
-  - [x] Emit explicit errors for runtime param used as shape dimension
-  - [x] Keep existing multi-input per-edge consumption semantics with divisibility checks
-
-- [x] **Codegen updates** (`compiler/src/codegen.rs`):
-  - [x] Use resolved shape product for buffer sizes and actor call strides
-  - [x] Ensure generated C++ remains flat-buffer ABI compatible
-  - [x] Keep old actor declarations compiling without source changes
-
-### Diagnostics & Tests
-
-- [x] **Diagnostics**:
-  - [x] Add dedicated error messages for:
-    - [x] runtime param used as shape dimension (`"runtime param '$N' cannot be used as frame dimension"`)
-    - [x] unknown name in shape constraint (`"unknown name 'X' in shape constraint"`)
-    - [x] unresolved frame dimension (§13.6: actor with no args, no shape constraint, no inference)
-    - [x] conflicting frame constraint (§13.6: inferred shape vs explicit shape mismatch)
-    - [x] cross-clock rate mismatch error for pipeline tasks (§5.7: `Pw × fw ≠ Cr × fr`)
-
-- [x] **Test coverage**:
-  - [x] Add parser tests for `actor()[...]` syntax (7 tests)
-  - [x] Add registry tests for `SHAPE(...)` port declarations (9 tests)
-  - [x] Add resolve tests for shape constraint validation (6 tests)
-  - [x] Add analysis tests for dimension inference success/failure cases (3 tests)
-  - [x] Add analysis tests for shape constraint validation (3 tests: unresolved dim, conflicting shape, matching ok)
-  - [x] Add analysis tests for Phase 4/5/6 (5 tests: cross-clock rate, buffer size, memory pool)
-  - [x] Strengthen existing analysis test assertions with concrete rv values (balance, shape inference)
-  - [x] Add codegen compile tests covering inferred vs explicit shape constraints (3 tests)
-  - [x] Add migration tests proving v0.1-style programs remain unchanged (all 92 codegen tests pass)
-  - [x] Fix runtime actor tests for frame-rate variant actors (constant, mul, c2r now require N=1)
-
-- [x] **Done criteria for v0.2.0**:
-  - [x] `doc/spec/pipit-lang-spec-v0.2.0.md` and implementation behavior match
-  - [x] No regression in existing examples/tests (353 tests total, all passing)
-  - [x] Shape constraint diagnostics implemented in resolve and analyze phases
+- [x] PortShape model: `rate = product(shape)`, flat runtime buffers (ADR-007)
+- [x] `SHAPE(...)` registry parsing, `actor(...)[d0, d1, ...]` call-site syntax
+- [x] Shape-aware rate resolution in analyze/schedule/codegen
+- [x] SDF edge shape inference (§13.3.3) with passthrough tracing
+- [x] 5 diagnostic error types (runtime param as dim, unknown name, unresolved, conflicting, cross-clock)
+- [x] 353 tests passing, full backward compatibility with v0.1-style programs
 
 ---
 
-## v0.2.1 - Performance Characterization & Spec Sheet
+## v0.2.1 - Performance Characterization & Spec Sheet ✅
 
-**Goal**: Establish comprehensive performance baselines and identify bottlenecks. Measure what exists before optimizing.
-
-### KPI Suite Finalization (2026-02-16)
-
-- [x] Consolidate benchmark scope to spec-aligned KPI suites:
-  - [x] Keep: `compiler`, `ringbuf`, `timer`, `thread`, `pdl`
-  - [x] Remove non-essential suites from `benches/`: `runtime`, `actor`, `affinity`, `memory`, `latency`, `perf`
-  - [x] Consolidate benchmark/report flow into single script: `benches/run_all.sh`
-  - [x] Remove unused schema and legacy telemetry/report helper scripts
-  - [x] Tighten benchmark conditions to representative runtime ranges (1kHz–10MHz effective, 1–8 readers)
-  - [x] Document finalized KPI definitions and conditions in `benches/README.md`
-  - [x] Document benchmark consolidation decision in ADR-012 (`doc/adr/012-benchmark-suite-kpi-consolidation.md`)
-
-### Benchmark Suites (Final)
-
-- [x] **Compiler benchmarks** (`compiler/benches/compiler_bench.rs`):
-  - [x] Parse latency KPI for representative scenarios (`simple`, `multitask`, `complex`, `modal`)
-  - [x] Full compile latency KPI (`parse -> resolve -> graph -> analyze -> schedule -> codegen`)
-  - [x] Phase latency breakdown KPI (`parse`, `resolve`, `graph`, `analyze`, `schedule`, `codegen`)
-  - [x] Parse scaling KPI (1/5/10/20/40 tasks)
-
-- [x] **Ring buffer stress tests** (`benches/ringbuf_bench.cpp`):
-  - [x] High throughput: 1M tokens write+read (writer+reader threads)
-  - [x] Multi-reader contention: 1, 2, 4, 8 readers
-  - [x] Buffer size scaling: 256, 1K, 4K, 16K tokens
-  - [x] Chunk size scaling: 16, 64, 256 tokens per transfer
-
-- [x] **Timer precision benchmarks** (`benches/timer_bench.cpp`):
-  - [x] Frequency sweep: 1kHz, 10kHz, 48kHz, 100kHz, 1MHz
-  - [x] Jitter measurement with percentile stats and overrun counts
-  - [x] Spin-wait precision trade-off (`timer_spin`: 0/10us/50us)
-  - [x] Batch vs single comparison (`K=1` vs `K=10`)
-  - [x] High-frequency batched behavior (`K=1/10/100`)
-  - [ ] Long-running stability: 24-hour drift test (deferred — too long for CI)
-
-- [x] **Task scheduling overhead** (`benches/thread_bench.cpp`):
-  - [x] Deadline miss rate KPI (`BM_TaskDeadline`)
-  - [x] Task scaling KPI (`BM_TaskScaling`)
-  - [x] K-factor batching KPI (`BM_KFactorBatching`)
-  - [x] High-frequency tick-rate KPI (`BM_HighFreqTickRate`)
-
-- [x] **End-to-end workloads** (`benches/pdl/`):
-  - [x] Modal/control workload — `modal.pdl`
-  - [x] Multi-task workload — `multitask.pdl`
-  - [x] SDR workload — `sdr_receiver.pdl`
-  - [x] Simple baseline workload — `simple.pdl`
-
-- [x] **De-scoped from active workflow**:
-  - [x] Remove legacy perf helper scripts and telemetry-only benchmark paths
-  - [x] Remove legacy standalone report scripts and canonical schema validation path
-
-- [ ] **Comparison with alternatives** (deferred — requires GNU Radio setup):
-  - [ ] GNU Radio: Same pipeline, compare throughput
-  - [ ] Pure C++ hand-written: Measure framework overhead
-  - [ ] Theoretical maximum (FLOPS, memory bandwidth)
-
-### Documentation
-
-- [ ] **Performance spec sheet** (`doc/performance-analysis-report.md`):
-  - [x] Hardware tested (CPU, cache, RAM, OS)
-  - [x] Compiler performance (parse time, memory, codegen size)
-  - [x] Runtime performance (ring buffer, timer, task overhead)
-  - [x] Scaling characteristics (tasks, pipeline depth, buffer sizes)
-  - [x] Real-world workload benchmarks
-  - [ ] Comparison table (Pipit vs GNU Radio vs hand-coded)
-  - [x] Known limitations (frequency limits, buffer constraints)
-
-- [ ] **Performance tuning guide** (`doc/performance-analysis-report.md`):
-  - [x] Buffer sizing guidelines
-  - [x] Thread/task mapping best practices
-  - [x] Overrun policy selection criteria
-  - [ ] CPU affinity and NUMA considerations
-  - [ ] Compiler optimization flags
-
-- [x] **Benchmark automation**:
-  - [x] Add `benches/run_all.sh` wrapper to run all benchmark suites
-  - [x] Consolidate run/report/json->md workflow in single script (ADR-012)
-  - [x] JSON output format for runtime benchmark results
-  - [ ] Regression detection (compare against baseline)
-  - [ ] CI integration: Track performance over commits
-
-### Optimization Backlog (From 2026-02-15 Benchmark Analysis)
-
-- [x] **Scheduler/timer overhead reduction** (HIGH impact) — ADR-009:
-  - [x] Reduce empty-pipeline baseline cost (`BM_EmptyPipeline`) by optimizing task loop wake/sleep transitions (conditional latency measurement + K-factor batching)
-  - [x] Reduce context-switch and wake-up overhead (`BM_ContextSwitch`, `thread_wakeup`) (thread start barrier `_start` + configurable `set tick_rate`)
-  - [x] Add batched timer wake processing option for high-frequency schedules (10kHz+) (`set tick_rate = <freq>`, K = ceil(task_freq / tick_rate))
-  - [x] Define target: lower `timer.wait() @10kHz` overhead share below 95% of timer+work budget (K=10 → ~7% framework overhead per firing; see ADR-009)
-
-- [x] **Ring buffer contention optimization** (HIGH impact) — ADR-010:
-  - [x] Rework multi-reader tail publication to reduce atomic contention (PaddedTail: each tail gets own 64-byte cache line)
-  - [x] Add cache-line padding/alignment review for reader metadata (alignas(64) PaddedTail struct)
-  - [x] Evaluate batched read/write publish strategy (cached min_tail: O(1) amortized writer, two-phase memcpy)
-  - [x] Define target: cut 16-reader latency regression by at least 2x (see ADR-010 benchmarks)
-
-- [x] **Memory false-sharing and bandwidth tuning** (HIGH impact) — ADR-010:
-  - [x] Eliminate false-sharing hotspots in memory benchmarks (PaddedTail eliminates tails_ false sharing)
-  - [x] Audit memory layout and allocation alignment for hot runtime structs (head_ and each tail on separate cache lines)
-  - [x] Tune working-set access patterns for large chunk/cacheline scenarios (two-phase memcpy replaces per-element modulo)
-  - [x] Define target: reduce 8-reader false-sharing latency by at least 30% (see ADR-010 benchmarks)
-
-- [ ] **Affinity task-scaling optimization** (HIGH impact):
-  - [ ] Investigate front-end stalls in `perf_affinity.sh` task-scaling path (IPC ~0.12, frontend idle ~69.85%)
-  - [ ] Reduce branchy control flow and instruction footprint in affinity scheduling fast-path
-  - [ ] Add microbench variant isolating affinity setup cost vs steady-state processing cost
-  - [ ] Define target: improve task-scaling IPC to >0.5 without throughput regression
-
-- [ ] **Timer precision and overrun behavior** (MEDIUM impact):
-  - [ ] Improve overrun handling for 100kHz/1MHz stress path (currently high overrun rates)
-  - [ ] Add configurable overrun policy benchmark matrix (drop/merge/catch-up) for latency vs throughput trade-offs
-  - [ ] Add long-running drift/stability benchmark harness (non-CI nightly)
-
-- [ ] **Benchmark harness correctness and reproducibility** (HIGH priority for trustworthy data):
-  - [x] Fix compiler benchmark invocation (`--output-format` incompatibility) so compiler section is truly measured
-  - [x] Fix PDL benchmark compile failures so end-to-end workloads emit runtime stats
-  - [ ] Make flamegraph step robust in offline environments (preinstalled tools path or graceful skip with instructions)
-  - [ ] Add release/perf build mode requirement checks and report when debug libraries skew results
-  - [ ] Add optional ASLR/state pinning guidance for reproducible local perf runs
+- [x] KPI benchmark suite (ADR-012) + performance analysis report
+- [x] Scheduler/timer overhead reduction (ADR-009, K-factor batching)
+- [x] Ring buffer contention optimization (ADR-010, PaddedTail, two-phase memcpy)
+- [x] Adaptive spin-wait timer with EWMA calibration (ADR-014)
 
 ---
 
-## v0.2.2 - Sink & Source Actors (External Process I/O)
+## v0.2.2 - Sink & Source Actors (External Process I/O) ✅
 
-**Goal**: Socket-based sink/source actors for external process communication via PPKT protocol. Enables oscilloscope GUIs, loggers, and test tools as separate processes.
-
-### Protocol & Transport
-
-- [x] **PPKT protocol spec** (`doc/spec/ppkt-protocol-spec.md`):
-  - [x] 48-byte little-endian fixed header + variable payload
-  - [x] DType support: f32, i32, cf32, f64, i16, i8
-  - [x] Sequence numbering, channel multiplexing, chunking rules
-  - [x] Normative reference for all PPKT implementations
-
-- [x] **Network transport** (`runtime/libpipit/include/pipit_net.h`):
-  - [x] `PpktHeader` struct (48B, packed, `static_assert`)
-  - [x] `DatagramSender` / `DatagramReceiver` (POSIX socket wrapper)
-  - [x] Address parsing: `"host:port"` → UDP, `"unix:///path"` → IPC
-  - [x] `ppkt_send_chunked()` — automatic MTU-based sender-side chunking
-  - [x] All sockets `O_NONBLOCK` (never blocks actor thread)
-
-### Sink Actor (`runtime/libpipit/include/std_sink.h`)
-
-- [x] **`socket_write(addr, chan_id)`** — send float samples over UDP/IPC:
-  - [x] Builds PPKT packets with runtime timing context (`pipit_task_rate_hz()`, `pipit_now_ns()`, `pipit_iteration_index()`)
-  - [x] Automatic chunking for large payloads (default MTU=1472B)
-  - [x] `FLAG_FIRST_FRAME` on initial firing, lazy socket init
-  - [x] Non-blocking: drop on send failure, return `ACTOR_OK`
-
-### Source Actor (`runtime/libpipit/include/std_source.h`)
-
-- [x] **`socket_read(addr)`** — receive float samples over UDP/IPC:
-  - [x] Drain-all-keep-latest pattern (handles fast sender)
-  - [x] PPKT header validation before copying payload
-  - [x] Non-blocking: outputs zeros when no data available (`ACTOR_OK`)
-  - [x] `ACTOR_ERROR` only on fatal socket bind failure
-
-### Compiler Integration
-
-- [x] **Registry updates**: `std_sink.h` and `std_source.h` loaded in all 7 `test_registry()` functions
-- [x] **Codegen compile tests**: `actor_socket_write`, `actor_socket_read` (syntax-check generated C++)
-- [x] **Language spec**: Section 14 — actor interfaces (references `ppkt-protocol-spec.md` for protocol)
-
-### Testing
-
-- [x] **C++ unit tests** (`runtime/tests/test_net.cpp`): 17 tests
-  - [x] Header size/offset/validation, dtype sizes, address parsing
-  - [x] UDP loopback send/recv, non-blocking recv, chunked send (single/multiple/sequence)
-- [x] **Loopback integration** (`runtime/tests/test_socket_actors.cpp`): 2 tests
-  - [x] `socket_write` → raw receiver: validates PPKT header fields and payload
-  - [x] `socket_read` loopback: no-data → zeros, receive → correct samples, no-data → zeros
-
-### Future (Separate Phase)
-
-- [x] **Oscilloscope GUI** (`tools/pipscope/`): ImGui + ImPlot standalone app receiving PPKT via UDP
-  - [x] PPKT receiver with per-channel sample buffers (`ppkt_receiver.h`)
-  - [x] ImGui + ImPlot waveform display with auto-channel discovery
-  - [x] Controls: Pause/Resume, Auto-Y, Samples slider (64-65536)
-  - [x] CLI: `pipscope --port <port>` / `pipscope -p <port>`
-  - [x] CMake FetchContent build (GLFW 3.4, ImGui v1.91.8, ImPlot v0.16)
-  - [x] E2E tests: 17 tests (SampleBuffer, dtype conversion, UDP loopback receiver)
-- [x] **Function waveform generators**: `sine`, `square`, `sawtooth`, `triangle`, `noise`, `impulse`
-  - [x] 6 source actors in `std_actors.h` (phase via `pipit_iteration_index()` / `pipit_task_rate_hz()`)
-  - [x] 12 runtime unit tests (`test_waveform.cpp`)
-  - [x] 6 codegen compile tests (`codegen_compile.rs`)
-  - [x] stdlib docs auto-generated (`standard-library-spec.md`, 29 actors total)
+- [x] PPKT protocol (ADR-013) + `pipit_net.h` transport layer
+- [x] `socket_write`/`socket_read` actors (non-blocking UDP/IPC, sender-side chunking)
+- [x] Oscilloscope GUI (`tools/pipscope/`): ImGui + ImPlot, PPKT receiver
+- [x] Waveform generators: sine, square, sawtooth, triangle, noise, impulse (6 actors)
 
 ---
 
@@ -424,6 +132,19 @@
   - [ ] Split `actors.h` into categories: `io.h`, `filters.h`, `math.h`, etc.
   - [ ] Maintain `actors.h` as umbrella include
   - [ ] Consider `--actor-path` for automatic discovery
+
+### Performance & Benchmarking (deferred from v0.2.1)
+
+- [ ] **Benchmark automation**:
+  - [ ] Regression detection (statistical comparison with baseline)
+  - [ ] CI integration (benchmark on merge to main)
+  - [ ] Flamegraph integration, build mode assertions, ASLR control
+- [ ] **Performance tuning guide**:
+  - [ ] CPU affinity / NUMA placement guidance
+  - [ ] Compiler optimization flags documentation
+- [ ] **Extended testing**:
+  - [ ] Long-running 24-hour drift test
+  - [ ] Comparison with alternatives (GNU Radio, hand-coded C++)
 
 ---
 
@@ -565,11 +286,7 @@
 
 ## Notes
 
-- **v0.1.1** completes runtime features designed for v0.1.0 - essential foundation
-- **v0.1.2** closes the first standard-library milestone (Phase 1 + docs)
-- **v0.2.0** ✅ aligned implementation with frame-dimension/vectorization plan (ADR-007, PortShape, SHAPE parsing, shape constraints, dimension inference, §13.6 shape validation, §5.7 cross-clock rate enforcement)
-- **v0.2.2** ✅ socket-based sink/source actors with PPKT protocol for external process I/O (ADR-013, `ppkt-protocol-spec.md`)
-- **v0.2.3** continues stdlib expansion (filters, transforms, windowing)
+- **v0.2.3** continues stdlib expansion (filters, transforms, windowing) + deferred benchmark/perf items from v0.2.1
 - **v0.3.0** keeps language evolution as design-first (spec/ADR before implementation)
 - **v0.4.0+** deferred until core is stable and well-characterized
 - Performance characterization should inform optimization priorities (measure before optimizing)
