@@ -110,7 +110,7 @@ c2r()
 **Signature:**
 
 ```cpp
-ACTOR(fir, IN(float, N), OUT(float, 1), PARAM(int, N) PARAM(std::span<const float>, coeff))
+ACTOR(fir, IN(float, N), OUT(float, 1), PARAM(std::span<const float>, coeff) PARAM(int, N))
 ```
 
 **Returns:** ACTOR_OK on success

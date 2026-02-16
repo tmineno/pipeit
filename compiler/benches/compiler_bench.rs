@@ -28,7 +28,7 @@ const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]
 param gain = 1.0
 
 define preprocess() {
-    mul($gain) | fir(5, coeff)
+    mul($gain) | fir(coeff)
 }
 
 clock 20kHz producer {

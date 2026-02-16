@@ -230,13 +230,15 @@ ACTOR(fft, IN(float, N), OUT(cfloat, N), PARAM(int, N)) {
 }
 
 ACTOR(fir, IN(float, N), OUT(float, 1),
-      PARAM(int, N),
-      PARAM(std::span<const float>, coeff)) {
+      PARAM(std::span<const float>, coeff),
+      PARAM(int, N)) {
     float y = 0;
     for (int i = 0; i < N; i++) y += coeff[i] * in[i];
     out[0] = y;
 }
 ```
+
+`fir` の旧引数順（例: `fir(5, coeff)`）は v0.2 系では移行対象であり、`fir(coeff)` または `fir(coeff, 5)` を使用する。
 
 #### パラメータの所有権と寿命
 
@@ -1033,8 +1035,8 @@ ACTOR(mag, IN(cfloat, 1), OUT(float, 1)) {
 }
 
 ACTOR(fir, IN(float, N), OUT(float, 1),
-      PARAM(int, N),
-      PARAM(std::span<const float>, coeff)) {
+      PARAM(std::span<const float>, coeff),
+      PARAM(int, N)) {
     float y = 0;
     for (int i = 0; i < N; i++) y += coeff[i] * in[i];
     out[0] = y;
@@ -1210,8 +1212,8 @@ $ ./receiver --duration 10s --probe filtered --param gain=1.5 --stats
 ACTOR(frame_gain,
       IN(float, SHAPE(N)),
       OUT(float, SHAPE(N)),
-      PARAM(int, N),
-      RUNTIME_PARAM(float, gain)) {
+      RUNTIME_PARAM(float, gain),
+      PARAM(int, N)) {
     for (int i = 0; i < N; ++i) out[i] = in[i] * gain;
     return ACTOR_OK;
 }
@@ -1231,6 +1233,8 @@ ACTOR(img_norm,
 - shape 内で参照される識別子（例: `N`, `H`, `W`, `C`）は**次元パラメータ**である
 - 次元パラメータは `PARAM(int, name)` で受け取る（`RUNTIME_PARAM` は不可）
 - 次元パラメータはコンパイル時定数として確定しなければならない
+- 次元パラメータは `ACTOR(...)` の `PARAM` 列の**末尾に連続して配置**することを推奨する
+  - v0.2 系コンパイラはこの規約違反を warning で通知し、将来バージョンで error 化される可能性がある
 
 #### 13.3.3 次元パラメータの推論（暗黙解決）
 
@@ -1241,8 +1245,8 @@ ACTOR(img_norm,
 ACTOR(frame_gain,
       IN(float, SHAPE(N)),
       OUT(float, SHAPE(N)),
-      PARAM(int, N),
-      RUNTIME_PARAM(float, gain)) {
+      RUNTIME_PARAM(float, gain),
+      PARAM(int, N)) {
     for (int i = 0; i < N; ++i) out[i] = in[i] * gain;
     return ACTOR_OK;
 }
@@ -1377,7 +1381,7 @@ Pipit パイプラインと外部プロセス（オシロスコープ GUI、ロ�
 
 ```
 ACTOR(socket_write, IN(float, N), OUT(void, 0),
-      PARAM(int, N) PARAM(std::span<const char>, addr) PARAM(int, chan_id))
+      PARAM(std::span<const char>, addr) PARAM(int, chan_id) PARAM(int, N))
 ```
 
 - 入力サンプルを PPKT パケットとして送信
@@ -1395,7 +1399,7 @@ clock 48kHz audio {
 
 ```
 ACTOR(socket_read, IN(void, 0), OUT(float, N),
-      PARAM(int, N) PARAM(std::span<const char>, addr))
+      PARAM(std::span<const char>, addr) PARAM(int, N))
 ```
 
 - PPKT パケットを受信してサンプルを出力

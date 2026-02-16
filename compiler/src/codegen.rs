@@ -1530,8 +1530,9 @@ impl<'a> CodegenCtx<'a> {
                 }
             } else if param.kind == ParamKind::Param {
                 // No arg at this index — try to infer dimension param from shape constraint
-                if let Some(val) =
-                    self.resolve_dim_param_from_shape(&param.name, meta, shape_constraint)
+                if let Some(val) = self
+                    .resolve_dim_param_from_shape(&param.name, meta, shape_constraint)
+                    .or_else(|| self.infer_dim_param_from_span_args(&param.name, meta, args))
                 {
                     parts.push(val.to_string());
                 } else if let Some(array_arg) = last_array_const {
@@ -1761,15 +1762,47 @@ impl<'a> CodegenCtx<'a> {
                     if from_arg.is_some() {
                         from_arg
                     } else {
-                        shape_constraint
+                        let from_shape = shape_constraint
                             .and_then(|sc| sc.dims.get(i))
-                            .and_then(|sd| self.resolve_shape_dim(sd))
+                            .and_then(|sd| self.resolve_shape_dim(sd));
+                        if from_shape.is_some() {
+                            from_shape
+                        } else {
+                            self.infer_dim_param_from_span_args(sym, actor_meta, actor_args)
+                        }
                     }
                 }
             };
             product = product.checked_mul(val?)?;
         }
         Some(product)
+    }
+
+    fn infer_dim_param_from_span_args(
+        &self,
+        dim_name: &str,
+        actor_meta: &ActorMeta,
+        actor_args: &[Arg],
+    ) -> Option<u32> {
+        // Only applies to compile-time integer dimension params.
+        let dim_param = actor_meta.params.iter().find(|p| p.name == dim_name)?;
+        if dim_param.kind != ParamKind::Param || dim_param.param_type != ParamType::Int {
+            return None;
+        }
+        for (idx, param) in actor_meta.params.iter().enumerate() {
+            if param.kind != ParamKind::Param {
+                continue;
+            }
+            if !matches!(param.param_type, ParamType::SpanFloat | ParamType::SpanChar) {
+                continue;
+            }
+            if let Some(arg) = actor_args.get(idx) {
+                if let Some(n) = self.resolve_arg_to_u32(arg) {
+                    return Some(n);
+                }
+            }
+        }
+        None
     }
 
     fn resolve_shape_dim(&self, dim: &ShapeDim) -> Option<u32> {

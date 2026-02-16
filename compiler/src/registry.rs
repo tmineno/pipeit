@@ -748,15 +748,15 @@ mod tests {
     #[test]
     fn parse_multi_param() {
         let a = scan_one(
-            "ACTOR(fir, IN(float, N), OUT(float, 1), PARAM(int, N), PARAM(std::span<const float>, coeff)) { return ACTOR_OK; }",
+            "ACTOR(fir, IN(float, N), OUT(float, 1), PARAM(std::span<const float>, coeff), PARAM(int, N)) { return ACTOR_OK; }",
         );
         assert_eq!(a.params.len(), 2);
         assert_eq!(a.params[0].kind, ParamKind::Param);
-        assert_eq!(a.params[0].param_type, ParamType::Int);
-        assert_eq!(a.params[0].name, "N");
+        assert_eq!(a.params[0].param_type, ParamType::SpanFloat);
+        assert_eq!(a.params[0].name, "coeff");
         assert_eq!(a.params[1].kind, ParamKind::Param);
-        assert_eq!(a.params[1].param_type, ParamType::SpanFloat);
-        assert_eq!(a.params[1].name, "coeff");
+        assert_eq!(a.params[1].param_type, ParamType::Int);
+        assert_eq!(a.params[1].name, "N");
     }
 
     #[test]

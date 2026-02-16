@@ -152,15 +152,15 @@ ACTOR(mag, IN(cfloat, SHAPE(N)), OUT(float, SHAPE(N)), PARAM(int, N)) {
 ///
 /// Applies FIR filter with given coefficients.
 ///
-/// @param N Filter length (must match coefficient array size)
 /// @param coeff Filter coefficients
+/// @param N Filter length (must match coefficient array size)
 /// @return ACTOR_OK on success
 ///
 /// Example usage:
 /// @code{.pdl}
 /// fir([0.1, 0.2, 0.4, 0.2, 0.1])
 /// @endcode
-ACTOR(fir, IN(float, N), OUT(float, 1), PARAM(int, N) PARAM(std::span<const float>, coeff)) {
+ACTOR(fir, IN(float, N), OUT(float, 1), PARAM(std::span<const float>, coeff) PARAM(int, N)) {
     float y = 0;
     for (int i = 0; i < N; i++)
         y += coeff[i] * in[i];

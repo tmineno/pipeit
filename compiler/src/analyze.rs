@@ -14,7 +14,7 @@
 //                produce `Diagnostic` entries.
 // Side effects: none.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chumsky::span::Span as _;
 
@@ -63,6 +63,7 @@ pub fn analyze(
     ctx.check_types();
     ctx.infer_shapes_from_edges();
     ctx.check_shape_constraints();
+    ctx.check_dimension_param_order();
     ctx.solve_balance_equations();
     ctx.check_feedback_delays();
     ctx.check_cross_clock_rates();
@@ -131,6 +132,15 @@ impl<'a> AnalyzeCtx<'a> {
             span,
             message,
             hint: None,
+        });
+    }
+
+    fn warning_with_hint(&mut self, span: Span, message: String, hint: String) {
+        self.diagnostics.push(Diagnostic {
+            level: DiagLevel::Warning,
+            span,
+            message,
+            hint: Some(hint),
         });
     }
 
@@ -301,9 +311,15 @@ impl<'a> AnalyzeCtx<'a> {
                         from_arg
                     } else {
                         // 2. Try resolving from shape constraint at call site
-                        shape_constraint
+                        let from_shape = shape_constraint
                             .and_then(|sc| sc.dims.get(i))
-                            .and_then(|sd| self.resolve_shape_dim(sd))
+                            .and_then(|sd| self.resolve_shape_dim(sd));
+                        if from_shape.is_some() {
+                            from_shape
+                        } else {
+                            // 3. Fallback: infer from already-bound span args
+                            self.infer_dim_param_from_span_args(sym, actor_meta, actor_args)
+                        }
                     }
                 }
             };
@@ -681,15 +697,47 @@ impl<'a> AnalyzeCtx<'a> {
                     if from_arg.is_some() {
                         from_arg
                     } else {
-                        shape_constraint
+                        let from_shape = shape_constraint
                             .and_then(|sc| sc.dims.get(i))
-                            .and_then(|sd| self.resolve_shape_dim(sd))
+                            .and_then(|sd| self.resolve_shape_dim(sd));
+                        if from_shape.is_some() {
+                            from_shape
+                        } else {
+                            self.infer_dim_param_from_span_args(sym, meta, args)
+                        }
                     }
                 }
             };
             dims.push(val?);
         }
         Some(dims)
+    }
+
+    fn infer_dim_param_from_span_args(
+        &self,
+        dim_name: &str,
+        actor_meta: &ActorMeta,
+        actor_args: &[Arg],
+    ) -> Option<u32> {
+        // Only applies to compile-time integer dimension params.
+        let dim_param = actor_meta.params.iter().find(|p| p.name == dim_name)?;
+        if dim_param.kind != ParamKind::Param || dim_param.param_type != ParamType::Int {
+            return None;
+        }
+        for (idx, param) in actor_meta.params.iter().enumerate() {
+            if param.kind != ParamKind::Param {
+                continue;
+            }
+            if !matches!(param.param_type, ParamType::SpanFloat | ParamType::SpanChar) {
+                continue;
+            }
+            if let Some(arg) = actor_args.get(idx) {
+                if let Some(n) = self.resolve_arg_to_u32(arg) {
+                    return Some(n);
+                }
+            }
+        }
+        None
     }
 
     // ── Phase 0b: Shape constraint validation (§13.6) ───────────────────
@@ -814,6 +862,77 @@ impl<'a> AnalyzeCtx<'a> {
                 }
             }
         }
+    }
+
+    // ── Phase 0c: Dimension PARAM order advisory ───────────────────────
+
+    fn check_dimension_param_order(&mut self) {
+        let mut checked: HashSet<String> = HashSet::new();
+        for task_graph in self.graph.tasks.values() {
+            for sub in subgraphs_of(task_graph) {
+                for node in &sub.nodes {
+                    let actor_name = match &node.kind {
+                        NodeKind::Actor { name, .. } => name,
+                        _ => continue,
+                    };
+                    if !checked.insert(actor_name.clone()) {
+                        continue;
+                    }
+                    let Some(meta) = self.actor_meta(actor_name) else {
+                        continue;
+                    };
+                    let dim_param_indices = self.inferred_dimension_param_indices(meta);
+                    if dim_param_indices.is_empty() {
+                        continue;
+                    }
+                    let suffix_start = meta.params.len() - dim_param_indices.len();
+                    let dims_at_suffix = dim_param_indices
+                        .iter()
+                        .enumerate()
+                        .all(|(offset, idx)| *idx == suffix_start + offset);
+                    if dims_at_suffix {
+                        continue;
+                    }
+
+                    let dim_names = dim_param_indices
+                        .iter()
+                        .map(|idx| meta.params[*idx].name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    self.warning_with_hint(
+                        node.span,
+                        format!(
+                            "actor '{}' declares inferred dimension PARAM(s) [{}] before non-dimension parameters",
+                            actor_name, dim_names
+                        ),
+                        "move inferred dimension PARAM(int, ...) to the end of ACTOR(...) parameters"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+
+    fn inferred_dimension_param_indices(&self, meta: &ActorMeta) -> Vec<usize> {
+        let mut dim_names: HashSet<&str> = HashSet::new();
+        for dim in meta.in_shape.dims.iter().chain(meta.out_shape.dims.iter()) {
+            if let TokenCount::Symbolic(sym) = dim {
+                dim_names.insert(sym.as_str());
+            }
+        }
+        if dim_names.is_empty() {
+            return Vec::new();
+        }
+        meta.params
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                p.kind == ParamKind::Param
+                    && p.param_type == ParamType::Int
+                    && dim_names.contains(p.name.as_str())
+            })
+            .map(|(idx, _)| idx)
+            .collect()
     }
 
     // ── Phase 1: Type checking ──────────────────────────────────────────
@@ -2049,6 +2168,66 @@ mod tests {
         assert!(
             has_error(&result, "conflicting frame constraint"),
             "should error about conflicting frame constraint: {:#?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn dimension_param_order_warning() {
+        let mut reg = test_registry();
+        let tmp = std::env::temp_dir().join(format!(
+            "pipit_bad_dim_order_{}_{}.h",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock before UNIX_EPOCH")
+                .as_nanos()
+        ));
+        std::fs::write(
+            &tmp,
+            concat!(
+                "ACTOR(bad_dim_order, IN(float, SHAPE(N)), OUT(float, SHAPE(N)),\n",
+                "      PARAM(int, N) RUNTIME_PARAM(float, gain)) {\n",
+                "    for (int i = 0; i < N; ++i) out[i] = in[i] * gain;\n",
+                "    return ACTOR_OK;\n",
+                "}\n",
+            ),
+        )
+        .expect("write temp actor header");
+        reg.load_header(&tmp).expect("load temp actor header");
+        let _ = std::fs::remove_file(&tmp);
+
+        let result = analyze_source(
+            "param gain = 1.0\nclock 1kHz t {\n    constant(0.0) | bad_dim_order(4, $gain) | stdout()\n}",
+            &reg,
+        );
+        let has_warning = result.diagnostics.iter().any(|d| {
+            d.level == DiagLevel::Warning
+                && d.message.contains("bad_dim_order")
+                && d.message.contains("inferred dimension PARAM")
+        });
+        assert!(
+            has_warning,
+            "expected dimension param order warning, got: {:#?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn dimension_param_order_no_warning_for_fir() {
+        let reg = test_registry();
+        let result = analyze_source(
+            "const coeff = [0.1, 0.2, 0.3]\nclock 1kHz t {\n    constant(0.0) | fir(coeff) | stdout()\n}",
+            &reg,
+        );
+        let has_fir_warning = result.diagnostics.iter().any(|d| {
+            d.level == DiagLevel::Warning
+                && d.message.contains("actor 'fir'")
+                && d.message.contains("inferred dimension PARAM")
+        });
+        assert!(
+            !has_fir_warning,
+            "did not expect fir dimension param order warning, got: {:#?}",
             result.diagnostics
         );
     }

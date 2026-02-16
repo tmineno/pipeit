@@ -163,6 +163,78 @@ fn assert_inline_compiles(pdl_source: &str, test_name: &str) {
     );
 }
 
+/// Run pcc on inline PDL source and assert that either pcc or C++ compilation fails.
+fn assert_inline_fails(pdl_source: &str, test_name: &str) {
+    let cxx = match find_cxx_compiler() {
+        Some(c) => c,
+        None => {
+            eprintln!("SKIP: no C++ compiler found");
+            return;
+        }
+    };
+
+    let root = project_root();
+    let include_dir = root.join("runtime").join("libpipit").join("include");
+    let std_actors_h = include_dir.join("std_actors.h");
+    let std_sink_h = include_dir.join("std_sink.h");
+    let std_source_h = include_dir.join("std_source.h");
+    let runtime_include = root.join("runtime").join("libpipit").join("include");
+
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_dir = std::env::temp_dir();
+    let pdl_file = tmp_dir.join(format!("pipit_inline_fail_{}.pdl", n));
+    std::fs::write(&pdl_file, pdl_source).expect("write pdl temp");
+
+    let pcc = pcc_binary();
+    let n2 = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let cpp_out = std::env::temp_dir().join(format!("pipit_gen_inline_fail_{}.cpp", n2));
+    let gen = Command::new(&pcc)
+        .arg(pdl_file.to_str().unwrap())
+        .arg("-I")
+        .arg(std_actors_h.to_str().unwrap())
+        .arg("-I")
+        .arg(std_sink_h.to_str().unwrap())
+        .arg("-I")
+        .arg(std_source_h.to_str().unwrap())
+        .arg("--emit")
+        .arg("cpp")
+        .arg("-o")
+        .arg(cpp_out.to_str().unwrap())
+        .output()
+        .expect("failed to run pcc");
+
+    let _ = std::fs::remove_file(&pdl_file);
+    if !gen.status.success() {
+        let _ = std::fs::remove_file(&cpp_out);
+        return;
+    }
+
+    let cpp = std::fs::read_to_string(&cpp_out).expect("failed to read generated cpp");
+    let _ = std::fs::remove_file(&cpp_out);
+    assert!(!cpp.is_empty(), "empty output for '{}'", test_name);
+
+    let n3 = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_cpp = tmp_dir.join(format!("pipit_fail_cxx_{}.cpp", n3));
+    std::fs::write(&tmp_cpp, &cpp).expect("write cpp temp");
+    let out = Command::new(&cxx)
+        .arg("-std=c++20")
+        .arg("-fsyntax-only")
+        .arg("-I")
+        .arg(runtime_include.to_str().unwrap())
+        .arg("-I")
+        .arg(root.join("examples").to_str().unwrap())
+        .arg(tmp_cpp.to_str().unwrap())
+        .output()
+        .expect("failed to run C++ compiler");
+    let _ = std::fs::remove_file(&tmp_cpp);
+    assert!(
+        !out.status.success(),
+        "expected failure for '{}', but C++ compile succeeded.\nSource:\n{}",
+        test_name,
+        cpp
+    );
+}
+
 /// Run pcc on inline PDL source and return generated C++ source.
 fn generate_inline_cpp(pdl_source: &str, test_name: &str) -> String {
     let root = project_root();
@@ -316,8 +388,16 @@ fn const_scalar() {
 #[test]
 fn const_array() {
     assert_inline_compiles(
-        "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\nclock 1kHz t { constant(0.0) | fir(5, coeff) | stdout() }",
+        "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\nclock 1kHz t { constant(0.0) | fir(coeff) | stdout() }",
         "const_array",
+    );
+}
+
+#[test]
+fn fir_legacy_argument_order_rejected() {
+    assert_inline_fails(
+        "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\nclock 1kHz t { constant(0.0) | fir(5, coeff) | stdout() }",
+        "fir_legacy_argument_order",
     );
 }
 
@@ -461,10 +541,11 @@ fn inter_task_buffer_rate_mismatch() {
 fn modal_switch() {
     assert_inline_compiles(
         concat!(
+            "const taps = [0.25, 0.25, 0.25, 0.25]\n",
             "clock 1kHz t {\n",
             "  control { constant(0.0) | threshold(0.5) -> ctrl }\n",
-            "  mode sync { constant(0.0) | fir(4, [0.25, 0.25, 0.25, 0.25]) | stdout() }\n",
-            "  mode data { constant(0.0) | fir(4, [0.25, 0.25, 0.25, 0.25]) | stdout() }\n",
+            "  mode sync { constant(0.0) | fir(taps) | stdout() }\n",
+            "  mode data { constant(0.0) | fir(taps) | stdout() }\n",
             "  switch(ctrl, sync, data)\n",
             "}\n",
         ),
@@ -540,7 +621,10 @@ fn actor_mag() {
 #[test]
 fn actor_fir() {
     assert_inline_compiles(
-        "clock 1kHz t { constant(0.0) | delay(3, 0.0) | fir(3, [0.33, 0.33, 0.34]) | stdout() }",
+        concat!(
+            "const taps = [0.33, 0.33, 0.34]\n",
+            "clock 1kHz t { constant(0.0) | delay(3, 0.0) | fir(taps, 3) | stdout() }",
+        ),
         "actor_fir",
     );
 }
@@ -811,7 +895,7 @@ fn const_param_fork_probe() {
             "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
             "param gain = 1.0\n",
             "clock 48kHz t {\n",
-            "  constant(0.0) | mul($gain) | :raw | fir(5, coeff) | ?debug | stdout()\n",
+            "  constant(0.0) | mul($gain) | :raw | fir(coeff) | ?debug | stdout()\n",
             "  :raw | stdout()\n",
             "}\n",
         ),
@@ -1017,7 +1101,8 @@ fn overrun_policy_slip() {
 fn shared_buffer_io_uses_pointer_offsets_in_repetition_loops() {
     let cpp = generate_inline_cpp(
         concat!(
-            "clock 1MHz w { constant(0.0) | fft(256) | c2r() | fir(5, [0.1, 0.2, 0.4, 0.2, 0.1]) -> sig }\n",
+            "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
+            "clock 1MHz w { constant(0.0) | fft(256) | c2r() | fir(coeff) -> sig }\n",
             "clock 1MHz r { @sig | decimate(256) | stdout() }\n",
         ),
         "shared_io_offsets",

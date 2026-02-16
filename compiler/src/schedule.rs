@@ -20,7 +20,7 @@ use chumsky::span::Span as _;
 use crate::analyze::AnalyzedProgram;
 use crate::ast::*;
 use crate::graph::*;
-use crate::registry::{ActorMeta, PortShape, Registry, TokenCount};
+use crate::registry::{ActorMeta, ParamKind, ParamType, PortShape, Registry, TokenCount};
 use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -457,15 +457,47 @@ impl<'a> ScheduleCtx<'a> {
                     if from_arg.is_some() {
                         from_arg
                     } else {
-                        shape_constraint
+                        let from_shape = shape_constraint
                             .and_then(|sc| sc.dims.get(i))
-                            .and_then(|sd| self.resolve_shape_dim(sd))
+                            .and_then(|sd| self.resolve_shape_dim(sd));
+                        if from_shape.is_some() {
+                            from_shape
+                        } else {
+                            self.infer_dim_param_from_span_args(sym, actor_meta, actor_args)
+                        }
                     }
                 }
             };
             product = product.checked_mul(val?)?;
         }
         Some(product)
+    }
+
+    fn infer_dim_param_from_span_args(
+        &self,
+        dim_name: &str,
+        actor_meta: &ActorMeta,
+        actor_args: &[Arg],
+    ) -> Option<u32> {
+        // Only applies to compile-time integer dimension params.
+        let dim_param = actor_meta.params.iter().find(|p| p.name == dim_name)?;
+        if dim_param.kind != ParamKind::Param || dim_param.param_type != ParamType::Int {
+            return None;
+        }
+        for (idx, param) in actor_meta.params.iter().enumerate() {
+            if param.kind != ParamKind::Param {
+                continue;
+            }
+            if !matches!(param.param_type, ParamType::SpanFloat | ParamType::SpanChar) {
+                continue;
+            }
+            if let Some(arg) = actor_args.get(idx) {
+                if let Some(n) = self.resolve_arg_to_u32(arg) {
+                    return Some(n);
+                }
+            }
+        }
+        None
     }
 
     fn resolve_shape_dim(&self, dim: &ShapeDim) -> Option<u32> {
@@ -1019,7 +1051,7 @@ mod tests {
         let meta = result.schedule.tasks.get("t").unwrap();
         let sched = get_pipeline_schedule(meta);
         assert_eq!(sched.firings.len(), 3, "constant, fir, stdout");
-        // fir PARAM(int, N): args[0] = ConstRef("coeff") → array len=5 → N=5
+        // fir(coeff): N is inferred from bound span argument `coeff` length (=5).
         // IN(float, 5), OUT(float, 1)
         // constant gets inferred [5] → all rv=1, constant produces 5 per firing
         assert_eq!(sched.firings[0].repetition_count, 1, "constant fires 1x");
