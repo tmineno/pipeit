@@ -108,3 +108,9 @@ fn runtime_utility_actors() {
     let build_dir = build_runtime_tests().expect("Failed to build runtime tests");
     run_test(&build_dir, "test_utility").expect("Utility tests failed");
 }
+
+#[test]
+fn runtime_timer_adaptive() {
+    let build_dir = build_runtime_tests().expect("Failed to build runtime tests");
+    run_test(&build_dir, "test_timer").expect("Timer adaptive tests failed");
+}

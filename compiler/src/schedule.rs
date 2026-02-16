@@ -130,6 +130,15 @@ impl<'a> ScheduleCtx<'a> {
         });
     }
 
+    fn warning(&mut self, span: Span, message: String) {
+        self.diagnostics.push(Diagnostic {
+            level: DiagLevel::Warning,
+            span,
+            message,
+            hint: None,
+        });
+    }
+
     fn build_result(self) -> ScheduleResult {
         ScheduleResult {
             schedule: ScheduledProgram {
@@ -215,8 +224,22 @@ impl<'a> ScheduleCtx<'a> {
             }
         };
 
-        let tick_rate_hz = self.get_set_freq("tick_rate").unwrap_or(1_000_000.0);
+        let tick_rate_hz = self.get_set_freq("tick_rate").unwrap_or(10_000.0);
         let k = compute_k_factor(freq_hz, tick_rate_hz);
+
+        // Rate guardrails (ADR-014): warn when effective timer rate is unsustainable
+        let timer_hz = freq_hz / k as f64;
+        let period_ns = 1_000_000_000.0 / timer_hz;
+        if period_ns < 10_000.0 {
+            self.warning(
+                task.freq_span,
+                format!(
+                    "effective tick period is {:.0}ns ({:.0}Hz); \
+                     most OS schedulers cannot sustain rates above ~100kHz reliably",
+                    period_ns, timer_hz
+                ),
+            );
+        }
 
         self.task_schedules.insert(
             task_name.to_string(),
@@ -737,9 +760,10 @@ mod tests {
     #[test]
     fn k_factor_high_freq() {
         let reg = test_registry();
+        // default tick_rate = 10kHz → K = ceil(10MHz / 10kHz) = 1000
         let result = schedule_ok("clock 10MHz t {\n    constant(0.0) | stdout()\n}", &reg);
         let meta = result.schedule.tasks.get("t").unwrap();
-        assert_eq!(meta.k_factor, 10);
+        assert_eq!(meta.k_factor, 1000);
     }
 
     #[test]
@@ -753,9 +777,10 @@ mod tests {
     #[test]
     fn k_factor_1mhz_boundary() {
         let reg = test_registry();
+        // default tick_rate = 10kHz → K = ceil(1MHz / 10kHz) = 100
         let result = schedule_ok("clock 1MHz t {\n    constant(0.0) | stdout()\n}", &reg);
         let meta = result.schedule.tasks.get("t").unwrap();
-        assert_eq!(meta.k_factor, 1);
+        assert_eq!(meta.k_factor, 100);
     }
 
     #[test]
@@ -1154,6 +1179,66 @@ mod tests {
             errors.is_empty(),
             "feedback.pdl schedule errors: {:#?}",
             errors
+        );
+    }
+
+    // ── Rate guardrail tests ─────────────────────────────────────────────
+
+    #[test]
+    fn guardrail_warns_high_effective_rate() {
+        let reg = test_registry();
+        // tick_rate = 1MHz with 1MHz task → K=1, period=1us < 10us → warning
+        let result = schedule_ok(
+            "set tick_rate = 1MHz\nclock 1MHz t {\n    constant(0.0) | stdout()\n}",
+            &reg,
+        );
+        let warnings: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Warning)
+            .collect();
+        assert!(
+            !warnings.is_empty(),
+            "should warn when effective tick period < 10us"
+        );
+        assert!(
+            warnings[0].message.contains("100kHz"),
+            "warning should mention 100kHz threshold: {}",
+            warnings[0].message
+        );
+    }
+
+    #[test]
+    fn guardrail_no_warning_normal_rate() {
+        let reg = test_registry();
+        // default tick_rate = 10kHz with 10kHz task → K=1, period=100us > 10us → no warning
+        let result = schedule_ok("clock 10kHz t {\n    constant(0.0) | stdout()\n}", &reg);
+        let warnings: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Warning)
+            .collect();
+        assert!(
+            warnings.is_empty(),
+            "should not warn at normal rates: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn guardrail_no_warning_batched_high_freq() {
+        let reg = test_registry();
+        // default tick_rate = 10kHz with 1MHz task → K=100, timer_hz=10kHz, period=100us → no warning
+        let result = schedule_ok("clock 1MHz t {\n    constant(0.0) | stdout()\n}", &reg);
+        let warnings: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Warning)
+            .collect();
+        assert!(
+            warnings.is_empty(),
+            "batched high-freq should not warn: {:?}",
+            warnings
         );
     }
 }

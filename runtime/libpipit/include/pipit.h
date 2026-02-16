@@ -165,11 +165,25 @@ class Timer {
     bool measure_latency_;
     Nanos spin_threshold_{0};
 
+    // Adaptive spin state (EWMA-based jitter calibration, ADR-014)
+    bool adaptive_ = false;
+    Nanos ewma_jitter_{0};
+    static constexpr int64_t kMinSpinNs = 500;     // floor: 500ns
+    static constexpr int64_t kMaxSpinNs = 100'000; // ceiling: 100us
+    static constexpr int64_t kInitSpinNs = 10'000; // bootstrap: 10us
+
   public:
     explicit Timer(double freq_hz, bool measure_latency = true, int64_t spin_ns = 0)
         : period_(std::chrono::duration_cast<Nanos>(std::chrono::duration<double>(1.0 / freq_hz))),
-          next_(Clock::now() + period_), measure_latency_(measure_latency),
-          spin_threshold_(spin_ns) {}
+          next_(Clock::now() + period_), measure_latency_(measure_latency) {
+        if (spin_ns < 0) {
+            // Adaptive mode: EWMA calibration (sentinel -1)
+            adaptive_ = true;
+            spin_threshold_ = Nanos{kInitSpinNs};
+        } else {
+            spin_threshold_ = Nanos{spin_ns};
+        }
+    }
 
     void wait() {
         auto now = Clock::now();
@@ -180,7 +194,28 @@ class Timer {
                 if (now < sleep_target) {
                     std::this_thread::sleep_until(sleep_target);
                 }
+                // Record wake point for adaptive calibration
+                auto wake_point = Clock::now();
+                // Spin to deadline
                 while (Clock::now() < next_) { /* spin */
+                }
+
+                if (adaptive_) {
+                    // Jitter = how late we woke vs requested sleep_target
+                    auto jitter_ns =
+                        std::chrono::duration_cast<Nanos>(wake_point - sleep_target).count();
+                    if (jitter_ns < 0)
+                        jitter_ns = 0;
+                    // EWMA update: ewma += (sample - ewma) / 8  (alpha = 1/8)
+                    auto delta = jitter_ns - ewma_jitter_.count();
+                    ewma_jitter_ += Nanos{delta / 8};
+                    // spin_threshold = clamp(2 * ewma, min, max)
+                    auto new_spin = ewma_jitter_.count() * 2;
+                    if (new_spin < kMinSpinNs)
+                        new_spin = kMinSpinNs;
+                    if (new_spin > kMaxSpinNs)
+                        new_spin = kMaxSpinNs;
+                    spin_threshold_ = Nanos{new_spin};
                 }
             } else {
                 std::this_thread::sleep_until(next_);
@@ -201,6 +236,10 @@ class Timer {
     bool overrun() const { return overrun_; }
 
     Nanos last_latency() const { return last_latency_; }
+
+    // Adaptive spin observability
+    bool is_adaptive() const { return adaptive_; }
+    Nanos current_spin_threshold() const { return spin_threshold_; }
 
     // For backlog policy: how many ticks we've fallen behind
     int64_t missed_count() const {

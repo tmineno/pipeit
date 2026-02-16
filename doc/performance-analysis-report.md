@@ -157,6 +157,9 @@ Interpretation:
 
 - The primary bottleneck is timer scheduling granularity/jitter on normal OS scheduling.
 - At high rates, `drop` policy protects real-time progression but sacrifices iterations.
+- Re-check on the same host reproduced the pattern (`p99` around `107-111us` at 10kHz; overrun around `~75%` at 48kHz and `~88%` at 100kHz), reinforcing that wake-up jitter dominates actor compute at high rate.
+- Practical K=1 limit is near where timer `p99` approaches period: at 10kHz period is `100us` while observed `p99` is already `~110us`, so sustained operation above this tends to become overrun-heavy.
+- CPU pinning (`taskset`) showed only marginal improvement, suggesting jitter is primarily from sleep/wake scheduling path (plus virtualization overhead in WSL2/Hyper-V), not CPU migration alone.
 
 ### B2. Wake-up overhead is amortized only when K-factor is used
 
@@ -170,6 +173,9 @@ Interpretation:
 
 - Current runtime is highly sensitive to wake frequency.
 - `tick_rate`/K-factor is the key throughput control, not optional tuning.
+- Additional timer re-runs confirm that reducing wake count is the main lever: `K=1` vs `K=10` kept similar wall time but cut CPU time by about `8.5x` and removed overruns in the 10kHz-equivalent case.
+- CPU cost per wake is similar order for `K=1` and `K=10`, so most gain comes from amortizing fixed wake-up/scheduler overhead across batched firings, not from making actor compute faster.
+- In `BM_Timer_HighFreqBatched`, different effective rates with the same timer wake rate produced nearly identical overrun levels, further indicating wake frequency (`timer_hz`) is the dominant control variable.
 
 ### B3. RingBuffer multi-reader path is dominated by retry/backpressure
 

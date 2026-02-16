@@ -292,8 +292,8 @@ set overrun = drop
 | `mem` | SIZE | `64MB` | 共有メモリプールの最大サイズ |
 | `scheduler` | IDENT | `static` | スケジューリングアルゴリズム (`round_robin`, `static`) |
 | `overrun` | IDENT | `drop` | オーバーラン時のポリシー（§5.4.3 参照） |
-| `tick_rate` | FREQ | `1MHz` | OSタイマーのウェイク周波数。K = ceil(タスク周波数 / tick_rate)。高周波タスクのバッチ処理に使用 |
-| `timer_spin` | NUMBER | `0` | デッドライン前のスピンウェイト時間（ナノ秒）。CPU使用量と引き換えにタイマー精度を向上 |
+| `tick_rate` | FREQ | `10kHz` | OSタイマーのウェイク周波数。K = ceil(タスク周波数 / tick_rate)。高周波タスクのバッチ処理に使用 |
+| `timer_spin` | NUMBER or `auto` | `10000` | デッドライン前のスピンウェイト時間（ナノ秒）。`auto` でEWMAベースの適応的スピン調整を有効化。CPU使用量と引き換えにタイマー精度を向上 |
 
 #### `tick_rate` — K ファクタバッチ処理
 
@@ -302,8 +302,8 @@ set overrun = drop
 ##### K=1（デフォルト: tick_rate ≥ タスク周波数）
 
 ```
-set tick_rate = 1MHz    # デフォルト
-clock 10kHz task { ... }  # K = ceil(10kHz / 1MHz) = 1
+set tick_rate = 10kHz    # デフォルト
+clock 10kHz task { ... }  # K = ceil(10kHz / 10kHz) = 1
 
 Time ──►
         ├── 100µs ──┤── 100µs ──┤── 100µs ──┤── 100µs ──┤
@@ -398,6 +398,17 @@ clock 10kHz task { ... }
                                                   │A │
                                                   └──┘
 ```
+
+##### `timer_spin = auto` — 適応的スピンウェイト（EWMA）
+
+`set timer_spin = auto` を指定すると、ランタイムはウェイクアップジッタを自動的に計測し、スピンウィンドウを動的に調整する。
+
+- **ブートストラップ**: 初期スピン閾値は 10us（固定デフォルトと同一）。
+- **EWMA更新**: 各 `sleep_until()` 後、実測ジッタを指数移動平均で追跡（alpha = 1/8、整数演算）。
+- **安全マージン**: `spin_threshold = clamp(2 × ewma, 500ns, 100us)`。
+- **オーバーヘッド**: 1 ティックあたり約 2ns（整数減算 + 8 による除算）。
+
+プラットフォーム毎のスリープ粒度に自動適応するため、手動チューニングが不要になる。
 
 ### 5.2 定数定義
 
