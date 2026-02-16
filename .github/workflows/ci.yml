@@ -40,6 +40,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install clang-format
+        run: pip install clang-format==19.1.6
+
       - name: Format
         run: |
           find runtime/ examples/ -name '*.h' -o -name '*.cpp' | \
