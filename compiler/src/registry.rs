@@ -291,6 +291,14 @@ fn scan_actors(source: &str, file: &Path) -> Result<Vec<ActorMeta>, RegistryErro
                 }
             }
 
+            // Skip ACTOR inside preprocessor directives (#define ACTOR ...)
+            let line_start = stripped[..abs_idx].rfind('\n').map_or(0, |i| i + 1);
+            let line_prefix = stripped[line_start..abs_idx].trim_start();
+            if line_prefix.starts_with('#') {
+                pos = abs_idx + 6;
+                continue;
+            }
+
             // Extract balanced parentheses content
             let paren_start = abs_idx + 5; // index of '('
             match extract_balanced(bytes, paren_start, b'(', b')') {
@@ -903,6 +911,20 @@ ACTOR(real, IN(float, 1), OUT(float, 1)) { return ACTOR_OK; }
     fn skip_block_comments() {
         let src = r#"
 /* ACTOR(commented_out, IN(float, 1), OUT(float, 1)) { } */
+ACTOR(real, IN(float, 1), OUT(float, 1)) { return ACTOR_OK; }
+"#;
+        let path = PathBuf::from("test.h");
+        let actors = scan_actors(src, &path).unwrap();
+        assert_eq!(actors.len(), 1);
+        assert_eq!(actors[0].name, "real");
+    }
+
+    #[test]
+    fn skip_preprocessor_define() {
+        // #define ACTOR(...) should not be parsed as an actor definition
+        let src = r#"
+#define ACTOR(name, in_spec, out_spec, ...) \
+    struct Actor_##name { int operator()(); }
 ACTOR(real, IN(float, 1), OUT(float, 1)) { return ACTOR_OK; }
 "#;
         let path = PathBuf::from("test.h");

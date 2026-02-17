@@ -12,7 +12,7 @@ pcc <source.pdl> -I <actors.h> [options]
 
 | Flag | Description |
 |------|-------------|
-| `-I <path>` | Actor header file (C++ with `ACTOR` macros) — repeatable |
+| `-I <path>` | Actor header file or search directory (C++ with `ACTOR` macros) — repeatable |
 | `--actor-path <dir>` | Search directory for actor headers — repeatable |
 | `-o, --output <path>` | Output file path (default: `a.out` for exe, `-` for other formats) |
 | `--emit <format>` | Output stage: `exe` (default), `cpp`, `schedule`, `graph-dot`, `timing-chart` |
@@ -41,6 +41,9 @@ pcc examples/gain.pdl -I examples/actors.h --emit cpp -o gain.cpp
 
 # Compile directly to executable (default)
 pcc examples/gain.pdl -I examples/actors.h -o gain
+
+# Use -I with a directory (discovers all headers recursively)
+pcc examples/gain.pdl -I examples/ -o gain
 
 # Use actor search path for automatic header discovery
 pcc examples/gain.pdl --actor-path examples -o gain

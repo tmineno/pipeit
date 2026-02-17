@@ -33,7 +33,7 @@ struct Cli {
     #[arg(short, long, default_value = "a.out")]
     output: PathBuf,
 
-    /// Actor header file (repeatable)
+    /// Actor header file or search directory (repeatable)
     #[arg(short = 'I', long = "include")]
     include: Vec<PathBuf>,
 
@@ -364,7 +364,18 @@ fn main() {
 fn load_actor_registry(
     cli: &Cli,
 ) -> Result<(pcc::registry::Registry, Vec<PathBuf>), (String, i32)> {
-    let include_headers = canonicalize_all(&cli.include, EXIT_USAGE_ERROR)?;
+    // -I accepts both files and directories; expand directories into headers.
+    let canonicalized_includes = canonicalize_all(&cli.include, EXIT_USAGE_ERROR)?;
+    let mut include_headers = Vec::new();
+    for path in canonicalized_includes {
+        if path.is_dir() {
+            let mut discovered = BTreeSet::new();
+            discover_headers_recursive(&path, &mut discovered)?;
+            include_headers.extend(discovered);
+        } else {
+            include_headers.push(path);
+        }
+    }
     let actor_path_headers = discover_actor_headers(&cli.actor_path)?;
 
     let mut include_registry = pcc::registry::Registry::new();

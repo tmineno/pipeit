@@ -342,6 +342,40 @@ fn example_file_feedback() {
     assert_pdl_file_compiles("feedback.pdl");
 }
 
+// ── -I with directory path ──────────────────────────────────────────────
+
+#[test]
+fn include_directory_path() {
+    // -I with a directory should discover all headers recursively
+    let root = project_root();
+    let pdl_path = root.join("examples").join("gain.pdl");
+    let runtime_include = root.join("runtime").join("libpipit").join("include");
+
+    let pcc = pcc_binary();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let cpp_out = std::env::temp_dir().join(format!("pipit_gen_dir_{}.cpp", n));
+    let gen = Command::new(&pcc)
+        .arg(pdl_path.to_str().unwrap())
+        .arg("-I")
+        .arg(runtime_include.to_str().unwrap())
+        .arg("-I")
+        .arg(root.join("examples").to_str().unwrap())
+        .arg("--emit")
+        .arg("cpp")
+        .arg("-o")
+        .arg(cpp_out.to_str().unwrap())
+        .output()
+        .expect("failed to run pcc");
+
+    let _ = std::fs::remove_file(&cpp_out);
+
+    assert!(
+        gen.status.success(),
+        "pcc failed with -I <directory>:\n{}",
+        String::from_utf8_lossy(&gen.stderr)
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 2. Inline feature tests — each targets a single language construct
 // ═══════════════════════════════════════════════════════════════════════════
