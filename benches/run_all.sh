@@ -35,7 +35,7 @@ usage() {
 Usage: run_all.sh [options]
 
 Core options:
-  --filter <category>      Repeatable. Categories: compiler, ringbuf, timer, thread, pdl, all
+  --filter <category>      Repeatable. Categories: compiler, ringbuf, timer, thread, pdl, e2e, all
   --output-dir <path>      Output directory for benchmark artifacts and report
 
 Report options:
@@ -289,7 +289,7 @@ run_benchmarks() {
     echo ""
 
     if should_run "compiler"; then
-        echo "[1/5] Compiler benchmarks"
+        echo "[1/6] Compiler benchmarks"
         if cargo bench --manifest-path "$PROJECT_ROOT/compiler/Cargo.toml" \
             --bench compiler_bench -- --output-format bencher \
             >"$BENCH_OUTPUT_DIR/compiler_bench.txt" 2>&1; then
@@ -302,7 +302,7 @@ run_benchmarks() {
     fi
 
     if should_run "ringbuf"; then
-        echo "[2/5] Ring buffer benchmarks"
+        echo "[2/6] Ring buffer benchmarks"
         if build_and_run_gbench "$SCRIPT_DIR/ringbuf_bench.cpp" "ringbuf_bench"; then
             run_section "ringbuf" "pass"
         else
@@ -313,7 +313,7 @@ run_benchmarks() {
     fi
 
     if should_run "timer"; then
-        echo "[3/5] Timer benchmarks"
+        echo "[3/6] Timer benchmarks"
         if build_and_run_gbench "$SCRIPT_DIR/timer_bench.cpp" "timer_bench"; then
             run_section "timer" "pass"
         else
@@ -324,7 +324,7 @@ run_benchmarks() {
     fi
 
     if should_run "thread"; then
-        echo "[4/5] Thread benchmarks"
+        echo "[4/6] Thread benchmarks"
         if build_and_run_gbench "$SCRIPT_DIR/thread_bench.cpp" "thread_bench"; then
             run_section "thread" "pass"
         else
@@ -334,8 +334,19 @@ run_benchmarks() {
         echo ""
     fi
 
+    if should_run "e2e"; then
+        echo "[5/6] E2E max throughput benchmarks"
+        if build_and_run_gbench "$SCRIPT_DIR/e2e_bench.cpp" "e2e_bench"; then
+            run_section "e2e" "pass"
+        else
+            run_section "e2e" "fail"
+            FINAL_EXIT=1
+        fi
+        echo ""
+    fi
+
     if should_run "pdl"; then
-        echo "[5/5] End-to-end PDL benchmarks"
+        echo "[6/6] End-to-end PDL benchmarks"
 
         pdl_pass=0
         pdl_fail=0

@@ -1,7 +1,7 @@
 # Pipit Performance Analysis Report
 
-Date: 2026-02-17
-Scope: post-ADR-014 (adaptive spin defaults + EWMA timer calibration)
+Date: 2026-02-18
+Scope: post-ADR-014 (adaptive spin defaults + EWMA timer calibration) + E2E max throughput
 Spec reference: `doc/spec/pipit-lang-spec-v0.2.0.md` (`tick_rate`, `timer_spin`, overrun policy, SDF static scheduling)
 
 ## 1. Measurement Setup
@@ -12,6 +12,7 @@ Commands used:
 
 ```bash
 ./benches/run_all.sh --filter ringbuf --filter timer --filter thread --filter pdl --output-dir /tmp/pipit_perf_adaptive
+./benches/run_all.sh --filter e2e
 cargo bench --manifest-path compiler/Cargo.toml --bench compiler_bench -- "kpi/" --sample-size 10 --measurement-time 0.5 --warm-up-time 0.1
 ```
 
@@ -27,6 +28,8 @@ The following KPIs are aligned to the language/runtime model in `v0.2.0`:
 - `KPI-C2` Compiler phase bottleneck: per-phase latency (`parse/resolve/graph/analyze/schedule/codegen`).
 - `KPI-C3` Compiler scaling: parse latency growth vs number of tasks.
 - `KPI-E2E1` End-to-end PDL health: runtime stats (`ticks`, `missed`, `avg_latency`, `max_latency`).
+- `KPI-E2E2` Pipeline max throughput: CPU-bound ceiling (samples/s) for `constant → mul → mul` chain, no timer.
+- `KPI-E2E3` Socket loopback max throughput: sustained receiver throughput (samples/s) through PPKT/UDP localhost.
 
 ## 3. Current Results
 
@@ -146,6 +149,35 @@ Parse scaling (`kpi/parse_scaling`):
 - `multitask/consumer`: `ticks=1`, `missed=0`, `avg_latency=79852ns`
 - `sdr/capture`: `ticks=3`, `missed=1`, `avg_latency=76380ns`
 
+### 3.5 E2E Max Throughput
+
+Pipeline: `constant(1.0) | mul(2.0) | mul(0.5)` — actor structs fired in tight loop, no timer pacing.
+Benchmark: `benches/e2e_bench.cpp` (`BM_E2E_PipelineOnly`, `BM_E2E_SocketLoopback`).
+
+Pipeline only (CPU-bound ceiling):
+
+| Chunk Size | Throughput (samples/s) | Bandwidth |
+|---:|---:|---:|
+| 1 | 584M | 2.2 GB/s |
+| 64 | 18.8G | 70.2 GB/s |
+| 256 | 18.3G | 68.2 GB/s |
+| 1024 | 16.1G | 60.0 GB/s |
+
+Pipeline + UDP socket loopback (`localhost:19876`, non-blocking, MTU-chunked PPKT, 2s steady-state):
+
+| Chunk Size | TX Rate (samples/s) | RX Rate (samples/s) | RX Bandwidth | Loss |
+|---:|---:|---:|---:|---:|
+| 64 | 152M | 9.2M | 35 MB/s | 93.9% |
+| 256 | 644M | 37.9M | 145 MB/s | 94.1% |
+| 1024 | 1.02G | 50.5M | 193 MB/s | 95.0% |
+
+Notes:
+
+- Kernel socket buffer: `rmem_max = 212992` (208KB). Benchmark requests `SO_RCVBUF = 16MB`; kernel caps at `2 × rmem_max ≈ 416KB`.
+- Loss is inherent to UDP with no flow control — sender saturates the kernel buffer ~10-20× faster than the receiver can drain.
+- RX rate (received samples/s) is the meaningful metric — it represents the max sustained throughput achievable through the PPKT/UDP path.
+- Pipeline-only throughput at N≥64 is ~300× higher than socket loopback, confirming that PPKT serialization + UDP syscalls are the dominant cost when sockets are in the path.
+
 ## 4. Bottleneck Analysis
 
 ### B1. OS timer wake-up limits dominate above ~10kHz
@@ -207,7 +239,24 @@ Interpretation:
 - The limiting factor is synchronization/retry dynamics under fan-out.
 - Single-thread raw copy path is fast (multi-billion items/s), so contention policy is the bottleneck.
 
-### B5. Compiler hot phases are parse + codegen (+ analyze variance)
+### B5. Socket I/O is ~300× slower than in-process pipeline
+
+Evidence:
+
+- Pipeline-only: `18.8G` samples/s at N=64 (L1/L2 cache-resident, vectorizable multiply loop).
+- Socket loopback RX: `9.2M` samples/s at N=64, `50.5M` at N=1024.
+- Larger chunks amortize per-packet syscall overhead: N=1024 achieves `5.5×` higher RX throughput than N=64.
+- ~94-95% packet loss at all chunk sizes — sender produces ~10-20× faster than the kernel can deliver.
+
+Interpretation:
+
+- The bottleneck is `sendto`/`recvfrom` syscall overhead plus kernel buffer copy, not PPKT serialization.
+- At N=64, each MTU-sized packet carries ~356 samples (1424 bytes payload). The receiver processes ~26K packets/s, consistent with typical non-blocking UDP `recvfrom` overhead on WSL2 (~38us per successful recv including packet validation and pipeline compute).
+- At N=1024, MTU chunking splits each firing into 3 packets. The receiver processes ~47K packets/s, achieving higher sample throughput per packet due to amortized header overhead.
+- The `rmem_max = 208KB` kernel limit is the primary constraint on burst absorption. Increasing `rmem_max` (via sysctl) would reduce loss and improve sustained throughput.
+- For real-time pipelines running at practical rates (≤10MHz with K-factor), socket throughput (~50M samples/s) is sufficient. The socket path is designed for monitoring/visualization (pipscope), not as a high-throughput data plane.
+
+### B6. Compiler hot phases are parse + codegen (+ analyze variance)
 
 Evidence:
 
@@ -262,6 +311,10 @@ Interpretation:
 | RingBuffer read fail @8 readers | 98.48% | 98.48% | <=96% |
 | Compiler full compile (complex) | 22.04-22.52us | 22.04-22.52us | <=20us |
 | Parse scaling @40 tasks | 40.39-40.54us | 40.39-40.54us | <=36us |
+| Pipeline throughput N=64 (no timer) | — | 18.8G/s | >=18G/s |
+| Pipeline throughput N=1024 (no timer) | — | 16.1G/s | >=16G/s |
+| Socket loopback RX N=64 | — | 9.2M/s | >=9M/s |
+| Socket loopback RX N=1024 | — | 50.5M/s | >=50M/s |
 
 ## 7. Conclusion
 
@@ -273,3 +326,8 @@ ADR-014 changes address the two highest-priority tuning targets from the initial
 4. **Compile-time rate guardrails** — warn when effective timer rate exceeds OS scheduler capability (~100kHz).
 
 Remaining bottlenecks are ring-buffer contention (Priority 2) and compiler hot-path latency (Priority 3), which are unchanged by this iteration.
+
+E2E max throughput benchmarks (`benches/e2e_bench.cpp`) establish the throughput ceiling:
+
+1. **Pipeline-only ceiling: ~16-19G samples/s** — actor chain (`constant → mul → mul`) at N≥64 is memory-bandwidth bound (~60-70 GB/s), well within L1/L2 cache throughput. Per-firing cost is ~3ns at N=64.
+2. **Socket loopback ceiling: ~9-50M samples/s** — PPKT/UDP path is ~300× slower than in-process, dominated by `sendto`/`recvfrom` syscall overhead. Larger chunk sizes (N=1024) amortize per-packet cost for ~5.5× improvement over N=64. This throughput is sufficient for the monitoring/visualization use case (pipscope).
