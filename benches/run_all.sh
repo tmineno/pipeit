@@ -345,13 +345,11 @@ run_benchmarks() {
         STD_ACTORS_HEADER="$RUNTIME_INCLUDE/std_actors.h"
         EXAMPLE_ACTORS_HEADER="$EXAMPLES_DIR/example_actors.h"
 
-        if [ ! -f "$PCC" ]; then
-            echo "  Building pcc..."
-            if ! cargo build --release -p pcc --manifest-path "$PROJECT_ROOT/Cargo.toml" >/dev/null 2>&1; then
-                echo "  pcc build failed"
-                run_section "pdl" "fail"
-                FINAL_EXIT=1
-            fi
+        echo "  Building pcc..."
+        if ! cargo build --release -p pcc --manifest-path "$PROJECT_ROOT/Cargo.toml" >/dev/null 2>&1; then
+            echo "  pcc build failed"
+            run_section "pdl" "fail"
+            FINAL_EXIT=1
         fi
 
         if [ -f "$PCC" ]; then
@@ -378,8 +376,15 @@ run_benchmarks() {
                     fi
 
                     echo "  Running $name..."
-                    "$exe" --duration 1s --stats 2>&1 | grep -E '^\[stats\]|ticks=|avg_latency=' || true
-                    pdl_pass=$((pdl_pass + 1))
+                    pdl_stderr_log="$BUILD_DIR/${name}_runtime.stderr"
+                    if "$exe" --duration 1s --stats > /dev/null 2>"$pdl_stderr_log"; then
+                        grep -E '^\[stats\]|ticks=|avg_latency=' "$pdl_stderr_log" || true
+                        pdl_pass=$((pdl_pass + 1))
+                    else
+                        echo "  FAIL: $name (runtime exited non-zero)"
+                        cat "$pdl_stderr_log"
+                        pdl_fail=$((pdl_fail + 1))
+                    fi
                     echo ""
                 done
                 echo "=== PDL Summary ==="

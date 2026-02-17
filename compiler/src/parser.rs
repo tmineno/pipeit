@@ -70,6 +70,13 @@ where
     'tokens: 'src,
     I: ValueInput<'tokens, Token = Token, Span = SimpleSpan>,
 {
+    let classify_number = |span: SimpleSpan| {
+        let lexeme = &source[span.start()..span.end()];
+        let is_int_literal =
+            !lexeme.contains('.') && !lexeme.contains('e') && !lexeme.contains('E');
+        (span, is_int_literal)
+    };
+
     // ── Newlines ──
 
     let nl = just(Token::Newline).repeated().ignored();
@@ -89,7 +96,10 @@ where
     let scalar = {
         let ident_scalar = ident.clone().map(Scalar::Ident);
         select! {
-            Token::Number(n) = e => Scalar::Number(n, e.span()),
+            Token::Number(n) = e => {
+                let (span, is_int_literal) = classify_number(e.span());
+                Scalar::Number(n, span, is_int_literal)
+            },
             Token::Freq(f) = e => Scalar::Freq(f, e.span()),
             Token::Size(s) = e => Scalar::Size(s, e.span()),
             Token::StringLit(s) = e => Scalar::StringLit(s, e.span()),
@@ -127,7 +137,10 @@ where
             .map_with(|scalars, e| Arg::Value(Value::Array(scalars, e.span())));
 
         let literal_arg = select! {
-            Token::Number(n) = e => Arg::Value(Value::Scalar(Scalar::Number(n, e.span()))),
+            Token::Number(n) = e => {
+                let (span, is_int_literal) = classify_number(e.span());
+                Arg::Value(Value::Scalar(Scalar::Number(n, span, is_int_literal)))
+            },
             Token::Freq(f) = e => Arg::Value(Value::Scalar(Scalar::Freq(f, e.span()))),
             Token::Size(s) = e => Arg::Value(Value::Scalar(Scalar::Size(s, e.span()))),
             Token::StringLit(s) = e => Arg::Value(Value::Scalar(Scalar::StringLit(s, e.span()))),
@@ -163,8 +176,9 @@ where
     // ── Shape constraint: '[' shape_dim (',' shape_dim)* ']' ──
 
     let shape_dim = select! {
-        Token::Number(n) = e => ShapeDim::Literal(n as u32, e.span()),
+        Token::Number(n) if n > 0.0 && n.fract() == 0.0 && n <= u32::MAX as f64 => n,
     }
+    .map_with(|n, e| ShapeDim::Literal(n as u32, e.span()))
     .or(ident.clone().map(ShapeDim::ConstRef));
 
     let shape_constraint = shape_dim
@@ -358,6 +372,8 @@ where
 
     let modal_body = control_block
         .then_ignore(nl.clone())
+        .or_not()
+        .then_ignore(nl.clone())
         .then(
             mode_block
                 .then_ignore(nl.clone())
@@ -367,7 +383,14 @@ where
         )
         .then(switch_stmt)
         .then_ignore(nl.clone())
-        .map_with(|((control, modes), switch), e| {
+        .map_with(|((control_opt, modes), switch), e| {
+            let control = control_opt.unwrap_or(ControlBlock {
+                body: PipelineBody {
+                    lines: Vec::new(),
+                    span: e.span(),
+                },
+                span: e.span(),
+            });
             TaskBody::Modal(ModalBody {
                 control,
                 modes,
@@ -525,7 +548,7 @@ mod tests {
             panic!("expected Const")
         };
         assert_eq!(c.name.name, "threshold");
-        assert!(matches!(c.value, Value::Scalar(Scalar::Number(v, _)) if v == 0.5));
+        assert!(matches!(c.value, Value::Scalar(Scalar::Number(v, _, _)) if v == 0.5));
     }
 
     #[test]
@@ -546,7 +569,7 @@ mod tests {
             panic!("expected Param")
         };
         assert_eq!(p.name.name, "gain");
-        assert!(matches!(p.value, Scalar::Number(v, _) if v == 1.0));
+        assert!(matches!(p.value, Scalar::Number(v, _, _) if v == 1.0));
     }
 
     // ── define_stmt ──
@@ -701,7 +724,7 @@ mod tests {
         };
         assert_eq!(a.args.len(), 3);
         assert!(
-            matches!(&a.args[0], Arg::Value(Value::Scalar(Scalar::Number(n, _))) if *n == 42.0)
+            matches!(&a.args[0], Arg::Value(Value::Scalar(Scalar::Number(n, _, _))) if *n == 42.0)
         );
         assert!(matches!(&a.args[1], Arg::ParamRef(id) if id.name == "p"));
         assert!(matches!(&a.args[2], Arg::ConstRef(id) if id.name == "c"));
@@ -737,7 +760,7 @@ mod tests {
         };
         assert_eq!(a.args.len(), 3);
         assert!(
-            matches!(&a.args[0], Arg::Value(Value::Scalar(Scalar::Number(n, _))) if *n == 42.0)
+            matches!(&a.args[0], Arg::Value(Value::Scalar(Scalar::Number(n, _, _))) if *n == 42.0)
         );
         assert!(matches!(&a.args[1], Arg::TapRef(id) if id.name == "fb"));
         assert!(matches!(&a.args[2], Arg::ParamRef(id) if id.name == "p"));
@@ -783,6 +806,20 @@ mod tests {
         let TaskBody::Modal(m) = &t.body else {
             panic!("expected Modal")
         };
+        assert!(matches!(&m.switch.source, SwitchSource::Param(id) if id.name == "sel"));
+    }
+
+    #[test]
+    fn switch_param_source_without_control_block() {
+        let src = "clock 10MHz rx {\n  mode a {\n    foo()\n  }\n  mode b {\n    bar()\n  }\n  switch($sel, a, b)\n}";
+        let s = parse_one_stmt(src);
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        let TaskBody::Modal(m) = &t.body else {
+            panic!("expected Modal")
+        };
+        assert!(m.control.body.lines.is_empty());
         assert!(matches!(&m.switch.source, SwitchSource::Param(id) if id.name == "sel"));
     }
 
@@ -1001,5 +1038,26 @@ mod tests {
             .expect("expected shape constraint");
         assert_eq!(sc.dims.len(), 1);
         assert!(matches!(&sc.dims[0], ShapeDim::Literal(256, _)));
+    }
+
+    #[test]
+    fn shape_constraint_rejects_non_positive_or_fractional_literals() {
+        let (_, zero_errs) = parse_all("clock 1kHz t {\n  fft()[0]\n}");
+        assert!(
+            !zero_errs.is_empty(),
+            "shape dim 0 should be rejected as parse error"
+        );
+
+        let (_, neg_errs) = parse_all("clock 1kHz t {\n  fft()[-1]\n}");
+        assert!(
+            !neg_errs.is_empty(),
+            "negative shape dim should be rejected as parse error"
+        );
+
+        let (_, frac_errs) = parse_all("clock 1kHz t {\n  fft()[1.5]\n}");
+        assert!(
+            !frac_errs.is_empty(),
+            "fractional shape dim should be rejected as parse error"
+        );
     }
 }

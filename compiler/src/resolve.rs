@@ -656,13 +656,13 @@ impl<'a> ResolveCtx<'a> {
         match &switch.source {
             SwitchSource::Buffer(ident) => {
                 if !control_buffers.contains(&ident.name) {
-                    self.error(
+                    // External/shared ctrl source: validate writer existence in post-pass.
+                    // (supports forward refs where writer task appears later)
+                    self.pending_buffer_reads.push((
+                        ident.name.clone(),
+                        task_name.to_string(),
                         ident.span,
-                        format!(
-                            "switch source buffer '{}' is not written by the control block in task '{}'",
-                            ident.name, task_name
-                        ),
-                    );
+                    ));
                 }
             }
             SwitchSource::Param(ident) => {
@@ -688,17 +688,16 @@ impl<'a> ResolveCtx<'a> {
             }
         }
 
-        // Validate default
+        // v0.2 soft-deprecation: keep parsing legacy `default` clause but
+        // treat it as metadata only (warn + ignore at runtime).
         if let Some(default) = &switch.default {
-            if !modes.contains_key(&default.name) {
-                self.error(
-                    default.span,
-                    format!(
-                        "switch default mode '{}' is not defined in task '{}'",
-                        default.name, task_name
-                    ),
-                );
-            }
+            self.warning(
+                default.span,
+                format!(
+                    "deprecated switch default clause in task '{}' is ignored in v0.2",
+                    task_name
+                ),
+            );
         }
 
         // Validate mode index coverage: every defined mode must appear in
@@ -878,6 +877,15 @@ mod tests {
             .diagnostics
             .iter()
             .filter(|d| d.level == DiagLevel::Error)
+            .collect()
+    }
+
+    /// Get warnings only from a ResolveResult.
+    fn warnings(result: &ResolveResult) -> Vec<&Diagnostic> {
+        result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Warning)
             .collect()
     }
 
@@ -1225,6 +1233,37 @@ mod tests {
     }
 
     #[test]
+    fn switch_default_clause_warned_and_ignored() {
+        let reg = test_registry();
+        let result = resolve_source(
+            concat!(
+                "clock 1kHz t {\n",
+                "    control {\n        constant(0.0) | detect() -> ctrl\n    }\n",
+                "    mode a {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode b {\n        constant(0.0) | stdout()\n    }\n",
+                "    switch(ctrl, a, b) default missing_legacy_mode\n",
+                "}"
+            ),
+            &reg,
+        );
+        let errs = errors(&result);
+        assert!(
+            errs.is_empty(),
+            "default clause should not be semantic error in v0.2: {:#?}",
+            errs
+        );
+        let warns = warnings(&result);
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.message.contains("deprecated switch default clause")
+                    && w.message.contains("ignored in v0.2")),
+            "expected deprecation warning for default clause: {:#?}",
+            warns
+        );
+    }
+
+    #[test]
     fn switch_undefined_mode_error() {
         let reg = test_registry();
         let result = resolve_source(
@@ -1257,6 +1296,62 @@ mod tests {
                 "}"
             ),
             &reg,
+        );
+    }
+
+    #[test]
+    fn switch_param_source_without_control_block() {
+        let reg = test_registry();
+        let _ = resolve_ok_with(
+            concat!(
+                "param sel = 0\n",
+                "clock 1kHz t {\n",
+                "    mode a {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode b {\n        constant(0.0) | stdout()\n    }\n",
+                "    switch($sel, a, b) default a\n",
+                "}"
+            ),
+            &reg,
+        );
+    }
+
+    #[test]
+    fn switch_external_buffer_source_without_control_block() {
+        let reg = test_registry();
+        let _ = resolve_ok_with(
+            concat!(
+                "clock 1kHz producer {\n",
+                "    constant(0.0) | detect() -> ctrl\n",
+                "}\n",
+                "clock 1kHz t {\n",
+                "    mode a {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode b {\n        constant(0.0) | stdout()\n    }\n",
+                "    switch(ctrl, a, b) default a\n",
+                "}"
+            ),
+            &reg,
+        );
+    }
+
+    #[test]
+    fn switch_buffer_source_missing_supplier_error() {
+        let reg = test_registry();
+        let result = resolve_source(
+            concat!(
+                "clock 1kHz t {\n",
+                "    mode a {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode b {\n        constant(0.0) | stdout()\n    }\n",
+                "    switch(ctrl, a, b) default a\n",
+                "}"
+            ),
+            &reg,
+        );
+        let errs = errors(&result);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("shared buffer '@ctrl' has no writer")),
+            "expected missing switch supplier error, got: {:#?}",
+            errs
         );
     }
 

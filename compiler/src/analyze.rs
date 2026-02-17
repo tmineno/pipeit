@@ -126,15 +126,6 @@ impl<'a> AnalyzeCtx<'a> {
         });
     }
 
-    fn warning(&mut self, span: Span, message: String) {
-        self.diagnostics.push(Diagnostic {
-            level: DiagLevel::Warning,
-            span,
-            message,
-            hint: None,
-        });
-    }
-
     fn warning_with_hint(&mut self, span: Span, message: String, hint: String) {
         self.diagnostics.push(Diagnostic {
             level: DiagLevel::Warning,
@@ -337,7 +328,7 @@ impl<'a> AnalyzeCtx<'a> {
                 let stmt = &self.program.statements[entry.stmt_index];
                 if let StatementKind::Const(c) = &stmt.kind {
                     match &c.value {
-                        Value::Scalar(Scalar::Number(n, _)) => Some(*n as u32),
+                        Value::Scalar(Scalar::Number(n, _, _)) => Some(*n as u32),
                         _ => None,
                     }
                 } else {
@@ -350,14 +341,14 @@ impl<'a> AnalyzeCtx<'a> {
     /// Resolve an Arg to a u32 value (for token count resolution).
     fn resolve_arg_to_u32(&self, arg: &Arg) -> Option<u32> {
         match arg {
-            Arg::Value(Value::Scalar(Scalar::Number(n, _))) => Some(*n as u32),
+            Arg::Value(Value::Scalar(Scalar::Number(n, _, _))) => Some(*n as u32),
             Arg::Value(Value::Array(elems, _)) => Some(elems.len() as u32),
             Arg::ConstRef(ident) => {
                 let entry = self.resolved.consts.get(&ident.name)?;
                 let stmt = &self.program.statements[entry.stmt_index];
                 if let StatementKind::Const(c) = &stmt.kind {
                     match &c.value {
-                        Value::Scalar(Scalar::Number(n, _)) => Some(*n as u32),
+                        Value::Scalar(Scalar::Number(n, _, _)) => Some(*n as u32),
                         Value::Array(elems, _) => Some(elems.len() as u32),
                         _ => None,
                     }
@@ -381,18 +372,22 @@ impl<'a> AnalyzeCtx<'a> {
         None
     }
 
-    /// Get `set mem` limit in bytes from the AST.
-    fn get_mem_limit(&self) -> Option<(u64, Span)> {
+    /// Get memory pool limit in bytes.
+    ///
+    /// Returns:
+    /// - (`set mem` value, Some(span)) when explicitly configured.
+    /// - (64MB, None) when omitted (spec default).
+    fn get_mem_limit(&self) -> (u64, Option<Span>) {
         for stmt in &self.program.statements {
             if let StatementKind::Set(set) = &stmt.kind {
                 if set.name.name == "mem" {
                     if let SetValue::Size(bytes, span) = &set.value {
-                        return Some((*bytes, *span));
+                        return (*bytes, Some(*span));
                     }
                 }
             }
         }
-        None
+        (64 * 1024 * 1024, None)
     }
 
     // ── Phase 0: Shape inference from SDF edges (§13.3.3) ────────────────
@@ -1235,18 +1230,7 @@ impl<'a> AnalyzeCtx<'a> {
                             edge.reader_task,
                             reader_rate,
                         );
-                        // Modal task writers have variable throughput (mode
-                        // switching), so rate mismatch is advisory only.
-                        // Pipeline tasks get a hard error per §5.7.
-                        let writer_is_modal = matches!(
-                            self.graph.tasks.get(&edge.writer_task),
-                            Some(TaskGraph::Modal { .. })
-                        );
-                        if writer_is_modal {
-                            self.warning(span, msg);
-                        } else {
-                            self.error(span, msg);
-                        }
+                        self.error(span, msg);
                     }
                 }
             }
@@ -1299,16 +1283,21 @@ impl<'a> AnalyzeCtx<'a> {
     // ── Phase 6: Memory pool check ──────────────────────────────────────
 
     fn check_memory_pool(&mut self) {
-        if let Some((limit, span)) = self.get_mem_limit() {
-            if self.total_memory > limit {
-                self.error(
-                    span,
-                    format!(
-                        "shared memory pool exceeded: required {} bytes, available {} bytes (set mem)",
-                        self.total_memory, limit
-                    ),
-                );
-            }
+        let (limit, span_opt) = self.get_mem_limit();
+        if self.total_memory > limit {
+            let span = span_opt.unwrap_or(self.program.span);
+            let limit_src = if span_opt.is_some() {
+                "set mem"
+            } else {
+                "default mem (64MB)"
+            };
+            self.error(
+                span,
+                format!(
+                    "shared memory pool exceeded: required {} bytes, available {} bytes ({})",
+                    self.total_memory, limit, limit_src
+                ),
+            );
         }
     }
 
@@ -1522,29 +1511,18 @@ fn lcm(a: u64, b: u64) -> u64 {
 /// Infer a ParamType from a scalar value.
 fn infer_param_type(scalar: &Scalar) -> Option<ParamType> {
     match scalar {
-        Scalar::Number(n, _) => {
-            if *n == (*n as i64) as f64 {
-                Some(ParamType::Int)
-            } else {
-                Some(ParamType::Float)
-            }
-        }
+        Scalar::Number(_, _, is_int_literal) => Some(if *is_int_literal {
+            ParamType::Int
+        } else {
+            ParamType::Float
+        }),
         _ => None,
     }
 }
 
-/// Check if inferred param type is compatible with expected actor param type.
-/// Allows implicit Int→Float and Int→Double promotion (standard C/C++ behavior).
+/// Check if inferred param type exactly matches expected actor param type.
 fn param_type_compatible(inferred: &ParamType, expected: &ParamType) -> bool {
-    matches!(
-        (inferred, expected),
-        (ParamType::Float, ParamType::Float)
-            | (ParamType::Float, ParamType::Double)
-            | (ParamType::Double, ParamType::Double)
-            | (ParamType::Int, ParamType::Int)
-            | (ParamType::Int, ParamType::Float)
-            | (ParamType::Int, ParamType::Double)
-    )
+    inferred == expected
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -1930,6 +1908,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cross_clock_rate_mismatch_modal_writer_is_error() {
+        let reg = test_registry();
+        let result = analyze_source(
+            concat!(
+                "clock 10kHz producer {\n",
+                "    control {\n        constant(0.0) | detect() -> ctrl\n    }\n",
+                "    mode a {\n        constant(0.0) -> sig\n    }\n",
+                "    mode b {\n        constant(0.0) -> sig\n    }\n",
+                "    switch(ctrl, a, b)\n",
+                "}\n",
+                "clock 1kHz consumer {\n",
+                "    @sig | stdout()\n",
+                "}\n",
+            ),
+            &reg,
+        );
+        assert!(
+            has_error(&result, "rate mismatch"),
+            "expected modal-writer rate mismatch error, got: {:#?}",
+            result.diagnostics
+        );
+    }
+
     // ── Phase 5/6: Buffer size and memory pool tests ────────────────────
 
     #[test]
@@ -2000,13 +2002,17 @@ mod tests {
     }
 
     #[test]
-    fn param_type_int_to_float_promoted() {
+    fn param_type_int_to_float_mismatch_error() {
         let reg = test_registry();
-        // param gain = 1 (int), mul has RUNTIME_PARAM(float, gain)
-        // Int → Float promotion is allowed
-        analyze_ok(
+        // param gain = 1 (int), mul has RUNTIME_PARAM(float, gain) -> mismatch
+        let result = analyze_source(
             "param gain = 1\nclock 1kHz t {\n    constant(0.0) | mul($gain) | stdout()\n}",
             &reg,
+        );
+        assert!(
+            has_error(&result, "type mismatch"),
+            "expected param type mismatch error, got: {:#?}",
+            result.diagnostics
         );
     }
 
