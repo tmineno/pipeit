@@ -54,97 +54,55 @@
 
 ---
 
-## v0.2.3 - Standard Actor Library (Continuation)
+## v0.2.3 - Type System Ergonomics (Polymorphism)
 
-### Phase 2: Signal Processing Basics (Medium Complexity)
+**Goal**: Remove duplicated actor implementations caused by wire-type variation and reduce explicit type plumbing in PDL.
 
-- [ ] **Simple filters** (MEDIUM complexity):
-  - [ ] `lpf(cutoff, order)` - Low-pass filter (Butterworth)
-  - [ ] `hpf(cutoff, order)` - High-pass filter
-  - [ ] `notch(freq, q)` - Notch filter
-  - [ ] Test with known signal characteristics
+### Phase 1: Spec & Design (must complete first)
 
-- [ ] **Basic transforms** (MEDIUM-HIGH complexity):
-  - [ ] `ifft(N)` - Inverse FFT
-  - [ ] `rfft(N)` - Real FFT (optimize for real input)
-  - [ ] Validate against reference implementations (e.g., FFTW)
+- [ ] **Actor polymorphism model**:
+  - [ ] Define generic actor call syntax (`actor<float>(...)`)
+  - [ ] Define inferred call form (`actor(...)` with type inferred from context)
+  - [ ] Define ambiguity rules (when explicit type args are required)
+  - [ ] Define compatibility with shape constraints (`actor<T>(...)[N]`)
+  - [ ] **Create ADR**: Monomorphization strategy and diagnostics policy
 
-- [ ] **Windowing** (LOW-MEDIUM complexity):
-  - [ ] `window(N, type)` - Window functions (hann, hamming, blackman)
-  - [ ] Test window properties (energy, side lobe levels)
+- [ ] **Principal type inference for const/param**:
+  - [ ] Infer principal numeric type from initializer and usage constraints
+  - [ ] Keep explicit override syntax for future compatibility
+  - [ ] Specify mixed numeric literal resolution in arrays and call arguments
 
-### Phase 3: Advanced Signal Processing (High Complexity)
+- [ ] **Implicit conversions (safe widening only)**:
+  - [ ] Allow only `int32 -> float -> double`
+  - [ ] Keep lossy / semantic conversions explicit (`double -> float`, `cfloat -> float`, etc.)
+  - [ ] Add warnings for suspicious narrowing in explicit conversions
 
-- [ ] **WAV file I/O** (MEDIUM-HIGH complexity):
-  - [ ] `wavread(path)` - WAV file reader (streaming, 16/24/32-bit PCM)
-  - [ ] `wavwrite(path)` - WAV file writer (configurable sample rate, channels)
-  - [ ] Handle WAV header parsing, endianness
+### Phase 2: Compiler Implementation
 
-- [ ] **Advanced filters** (HIGH complexity):
-  - [ ] `iir(b_coeff, a_coeff)` - IIR filter (biquad sections)
-  - [ ] `bpf(low, high, order)` - Band-pass filter
-  - [ ] Numerical stability testing
+- [ ] **Frontend updates**:
+  - [ ] Parser/AST support for generic actor calls
+  - [ ] Resolver support for polymorphic actor symbols
+  - [ ] Generic argument validation and arity checks
 
-- [ ] **Resampling** (HIGH complexity):
-  - [ ] `resample(M, N)` - Rational resampling (upsample M, downsample N)
-  - [ ] `interp(N)` - Interpolation (zero-insert + LPF)
-  - [ ] `downsample(N)` - Downsampling (LPF + decimate)
+- [ ] **Type engine updates**:
+  - [ ] Constraint collection + unification for actor I/O and arguments
+  - [ ] Principal type computation for `const`/`param`
+  - [ ] Deterministic implicit widening insertion (safe edges only)
+  - [ ] Ambiguity diagnostics with concrete fix suggestions
+  - [ ] Lowering certificate generation (`Lower(G)->(G', Cert)`)
+  - [ ] Obligation verifier for L1-L5 (type/rate/shape/mono/no-fallback)
 
-- [ ] **Advanced transforms** (HIGH complexity):
-  - [ ] `dct(N)` - Discrete Cosine Transform
-  - [ ] `hilbert(N)` - Hilbert transform (analytic signal)
-  - [ ] `stft(N, hop)` - Short-Time Fourier Transform
-  - [ ] `istft(N, hop)` - Inverse STFT
+- [ ] **Monomorphization + codegen**:
+  - [ ] Materialize typed instances (`foo<float>`, `foo<double>`) once per program
+  - [ ] Define `TypedScheduledIR` as single downstream contract
+  - [ ] Ensure schedule/analysis/codegen consume the same typed graph
+  - [ ] Make codegen syntax-directed from IR (no re-inference / no fallback typing)
+  - [ ] Preserve existing runtime/ABI behavior for non-generic actors
 
-- [ ] **Advanced statistics** (MEDIUM complexity):
-  - [ ] `var(N)` - Variance
-  - [ ] `std(N)` - Standard deviation
-  - [ ] `xcorr(N)` - Cross-correlation
-  - [ ] `acorr(N)` - Auto-correlation
-  - [ ] `convolve(N, kernel)` - Convolution
-
-- [ ] **Control flow** (MEDIUM complexity):
-  - [ ] `gate(threshold)` - Pass/block based on signal level
-  - [ ] `clipper(min, max)` - Hard clipping
-  - [ ] `limiter(threshold)` - Soft limiting
-  - [ ] `agc(target, attack, release)` - Automatic Gain Control
-
-### Infrastructure & Documentation
-
-- [ ] **Testing infrastructure**:
-  - [ ] Per-actor unit test framework
-  - [ ] Test harness for actor correctness
-  - [ ] Edge case testing (zero, infinity, NaN)
-  - [ ] Performance tests (measure ns/firing)
-
-- [ ] **Actor documentation**:
-  - [ ] API reference template
-  - [ ] Usage examples for each actor
-  - [ ] Performance characteristics
-  - [ ] Known limitations
-
-- [ ] **Example pipelines**:
-  - [ ] Audio effects (basic filters, gain)
-  - [ ] SDR examples (if filters/transforms complete)
-  - [ ] Simple sensor processing
-
-- [ ] **Actor header organization**:
-  - [ ] Split `actors.h` into categories: `io.h`, `filters.h`, `math.h`, etc.
-  - [ ] Maintain `actors.h` as umbrella include
-  - [ ] Consider `--actor-path` for automatic discovery
-
-### Performance & Benchmarking (deferred from v0.2.1)
-
-- [ ] **Benchmark automation**:
-  - [ ] Regression detection (statistical comparison with baseline)
-  - [ ] CI integration (benchmark on merge to main)
-  - [ ] Flamegraph integration, build mode assertions, ASLR control
-- [ ] **Performance tuning guide**:
-  - [ ] CPU affinity / NUMA placement guidance
-  - [ ] Compiler optimization flags documentation
-- [ ] **Extended testing**:
-  - [ ] Long-running 24-hour drift test
-  - [ ] Comparison with alternatives (GNU Radio, hand-coded C++)
+- [ ] **Tests**:
+  - [ ] Positive/negative type inference tests
+  - [ ] Ambiguity and mismatch diagnostic golden tests
+  - [ ] Codegen compile tests for multiple instantiations per actor
 
 ---
 
@@ -205,6 +163,98 @@
 ## v0.3.x - Ecosystem & Quality of Life
 
 **Goal**: Make Pipit easier to use and deploy in real projects.
+
+### Standard Actor Library Expansion (migrated from former v0.2.3)
+
+#### Phase 2: Signal Processing Basics (Medium Complexity)
+
+- [ ] **Simple filters** (MEDIUM complexity):
+  - [ ] `lpf(cutoff, order)` - Low-pass filter (Butterworth)
+  - [ ] `hpf(cutoff, order)` - High-pass filter
+  - [ ] `notch(freq, q)` - Notch filter
+  - [ ] Test with known signal characteristics
+
+- [ ] **Basic transforms** (MEDIUM-HIGH complexity):
+  - [ ] `ifft(N)` - Inverse FFT
+  - [ ] `rfft(N)` - Real FFT (optimize for real input)
+  - [ ] Validate against reference implementations (e.g., FFTW)
+
+- [ ] **Windowing** (LOW-MEDIUM complexity):
+  - [ ] `window(N, type)` - Window functions (hann, hamming, blackman)
+  - [ ] Test window properties (energy, side lobe levels)
+
+#### Phase 3: Advanced Signal Processing (High Complexity)
+
+- [ ] **WAV file I/O** (MEDIUM-HIGH complexity):
+  - [ ] `wavread(path)` - WAV file reader (streaming, 16/24/32-bit PCM)
+  - [ ] `wavwrite(path)` - WAV file writer (configurable sample rate, channels)
+  - [ ] Handle WAV header parsing, endianness
+
+- [ ] **Advanced filters** (HIGH complexity):
+  - [ ] `iir(b_coeff, a_coeff)` - IIR filter (biquad sections)
+  - [ ] `bpf(low, high, order)` - Band-pass filter
+  - [ ] Numerical stability testing
+
+- [ ] **Resampling** (HIGH complexity):
+  - [ ] `resample(M, N)` - Rational resampling (upsample M, downsample N)
+  - [ ] `interp(N)` - Interpolation (zero-insert + LPF)
+  - [ ] `downsample(N)` - Downsampling (LPF + decimate)
+
+- [ ] **Advanced transforms** (HIGH complexity):
+  - [ ] `dct(N)` - Discrete Cosine Transform
+  - [ ] `hilbert(N)` - Hilbert transform (analytic signal)
+  - [ ] `stft(N, hop)` - Short-Time Fourier Transform
+  - [ ] `istft(N, hop)` - Inverse STFT
+
+- [ ] **Advanced statistics** (MEDIUM complexity):
+  - [ ] `var(N)` - Variance
+  - [ ] `std(N)` - Standard deviation
+  - [ ] `xcorr(N)` - Cross-correlation
+  - [ ] `acorr(N)` - Auto-correlation
+  - [ ] `convolve(N, kernel)` - Convolution
+
+- [ ] **Control flow** (MEDIUM complexity):
+  - [ ] `gate(threshold)` - Pass/block based on signal level
+  - [ ] `clipper(min, max)` - Hard clipping
+  - [ ] `limiter(threshold)` - Soft limiting
+  - [ ] `agc(target, attack, release)` - Automatic Gain Control
+
+#### Infrastructure & Documentation
+
+- [ ] **Testing infrastructure**:
+  - [ ] Per-actor unit test framework
+  - [ ] Test harness for actor correctness
+  - [ ] Edge case testing (zero, infinity, NaN)
+  - [ ] Performance tests (measure ns/firing)
+
+- [ ] **Actor documentation**:
+  - [ ] API reference template
+  - [ ] Usage examples for each actor
+  - [ ] Performance characteristics
+  - [ ] Known limitations
+
+- [ ] **Example pipelines**:
+  - [ ] Audio effects (basic filters, gain)
+  - [ ] SDR examples (if filters/transforms complete)
+  - [ ] Simple sensor processing
+
+- [ ] **Actor header organization**:
+  - [ ] Split `actors.h` into categories: `io.h`, `filters.h`, `math.h`, etc.
+  - [ ] Maintain `actors.h` as umbrella include
+  - [ ] Consider `--actor-path` for automatic discovery
+
+#### Performance & Benchmarking (deferred from v0.2.1)
+
+- [ ] **Benchmark automation**:
+  - [ ] Regression detection (statistical comparison with baseline)
+  - [ ] CI integration (benchmark on merge to main)
+  - [ ] Flamegraph integration, build mode assertions, ASLR control
+- [ ] **Performance tuning guide**:
+  - [ ] CPU affinity / NUMA placement guidance
+  - [ ] Compiler optimization flags documentation
+- [ ] **Extended testing**:
+  - [ ] Long-running 24-hour drift test
+  - [ ] Comparison with alternatives (GNU Radio, hand-coded C++)
 
 ### Runtime Improvements
 
@@ -286,7 +336,8 @@
 
 ## Notes
 
-- **v0.2.3** continues stdlib expansion (filters, transforms, windowing) + deferred benchmark/perf items from v0.2.1
+- **v0.2.3** is now dedicated to polymorphism + principal type inference + safe numeric widening
+- **v0.3.x** now includes former v0.2.3 stdlib expansion backlog
 - **v0.3.0** keeps language evolution as design-first (spec/ADR before implementation)
 - **v0.4.0+** deferred until core is stable and well-characterized
 - Performance characterization should inform optimization priorities (measure before optimizing)

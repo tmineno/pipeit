@@ -68,7 +68,7 @@ Refer to [pipit-lang-spec-v0.2.0](pipit-lang-spec-v0.2.0.md) for the full langua
                                                   ▼
                          ┌─────────────────────────────────────────────┐
                          │          System C++ Compiler (--cc)         │
-                         │          g++ / clang++ -O2 -lpipit          │
+                         │          g++ / clang++ -std=c++17 -lpthread │
                          └────────────────────────┬────────────────────┘
                                                   │
                               ┌────────────────┐  │  ┌────────────────┐
@@ -83,13 +83,16 @@ Refer to [pipit-lang-spec-v0.2.0](pipit-lang-spec-v0.2.0.md) for the full langua
 |--------|---------------|
 | `lexer` | Tokenize `.pdl` source (§2) |
 | `parser` | Build AST from token stream (§10 BNF) |
-| `actor_registry` | Read `ACTOR` macro metadata from C++ headers (§4) |
+| `registry` | Read `ACTOR` macro metadata from C++ headers (§4) |
 | `resolve` | Name resolution — actors, consts, params, buffers, taps |
+| `type inference / monomorphization` | Solve type constraints, apply safe widening, instantiate polymorphic actors |
+| `ir` | Build typed/lowered IR consumed by all downstream phases |
+| `lowering verifier` | Check proof obligations (type/rate/shape preservation) for lowering |
 | `graph` | SDF graph construction — tap expansion, define inlining, inter-task edges |
-| `analysis` | Static analysis — type check, balance equations, buffer sizing, CSDF |
+| `analyze` | Static analysis — type check, balance equations, buffer sizing, CSDF |
 | `schedule` | Schedule generation — topological order, K determination, batching, rate-domain fusion planning |
-| `codegen` | C++ code emission — schedule loops, ring buffers, main() |
-| `diag` | Diagnostic infrastructure — errors, warnings, source locations |
+| `codegen` | C++ code emission from typed scheduled IR (no type re-inference) |
+| `timing` | Timing chart emission (`--emit timing-chart`) |
 
 ### 4.2 Data flow between modules
 
@@ -99,23 +102,32 @@ Refer to [pipit-lang-spec-v0.2.0](pipit-lang-spec-v0.2.0.md) for the full langua
                             ▼
                         parser ─▶ AST
                                    │
-actors.h ─▶ actor_registry ─▶ Registry
+actors.h ─▶ registry ─▶ Registry
                                    │
                             ┌──────┴──────┐
                             ▼             ▼
                         resolve(AST, Registry) ─▶ ResolvedAST
                                                        │
                                                        ▼
-                                                 graph(ResolvedAST) ─▶ SDFGraph
-                                                                          │
-                                                                          ▼
-                                                                   analysis(SDFGraph) ─▶ AnalyzedGraph
-                                                                                             │
-                                                                                             ▼
-                                                                                       schedule(AnalyzedGraph) ─▶ Schedule
-                                                                                                                     │
-                                                                                                                     ▼
-                                                                                                               codegen(Schedule) ─▶ C++ source
+                         type_infer_mono(ResolvedAST, Registry) ─▶ TypedAST
+                                                        │
+                                                        ▼
+                                 lower_typed(TypedAST) ─▶ LoweredTypedIR + Cert
+                                                        │
+                                                        ▼
+                                    verify_lowering(Cert, LoweredTypedIR)
+                                                        │
+                                                        ▼
+                                             graph(LoweredTypedIR) ─▶ SDFGraph
+                                                                        │
+                                                                        ▼
+                                                                 analyze(SDFGraph) ─▶ AnalyzedGraph
+                                                                                           │
+                                                                                           ▼
+                                                                                     schedule(AnalyzedGraph) ─▶ TypedScheduledIR
+                                                                                                                    │
+                                                                                                                    ▼
+                                                                                                      codegen(TypedScheduledIR) ─▶ C++ source
 ```
 
 ---
@@ -132,7 +144,7 @@ pcc example.pdl [OPTIONS]
 
 ### 5.2 Actor headers (`-I`)
 
-One or more C++ header files containing `ACTOR` macro definitions. `pcc` reads only the `constexpr` registration functions generated by these macros — it does not parse general C++ code.
+One or more C++ header files containing `ACTOR` macro definitions. `pcc` reads only actor metadata declared by these macros — it does not parse general C++ code.
 
 ```
 pcc example.pdl -I ./actors.h -I ./extra_actors.h
@@ -188,6 +200,30 @@ Dump the constructed SDF graph with repetition vectors and buffer sizes. For deb
 pcc example.pdl -I actors.h --emit graph
 ```
 
+### 6.5 `--emit graph-dot`: Graphviz DOT dump
+
+Emit Graphviz DOT format for visualization tooling.
+
+```
+pcc example.pdl -I actors.h --emit graph-dot
+```
+
+### 6.6 `--emit schedule`: PASS schedule dump
+
+Emit firing order and repetition counts after scheduling.
+
+```
+pcc example.pdl -I actors.h --emit schedule
+```
+
+### 6.7 `--emit timing-chart`: Mermaid Gantt timing chart
+
+Emit a Mermaid Gantt chart derived from schedule + graph.
+
+```
+pcc example.pdl -I actors.h --emit timing-chart
+```
+
 ---
 
 ## 7. CLI Interface
@@ -201,10 +237,10 @@ pcc <source.pdl> [OPTIONS]
 | `-o <path>` | PATH | `a.out` | Output file path |
 | `-I <file>` | PATH (repeatable) | — | Actor header file |
 | `--actor-path <dir>` | PATH (repeatable) | — | Actor search directory |
-| `--emit <stage>` | `exe` \| `cpp` \| `ast` \| `graph` | `exe` | Output stage |
+| `--emit <stage>` | `exe` \| `cpp` \| `ast` \| `graph` \| `graph-dot` \| `schedule` \| `timing-chart` | `exe` | Output stage |
 | `--release` | flag | off | Release build: strip probes, enable optimizations |
 | `--cc <compiler>` | STRING | `c++` | C++ compiler command |
-| `--cflags <flags>` | STRING | `-O2` | Additional C++ compiler flags |
+| `--cflags <flags>` | STRING | mode-dependent (`-O0 -g` debug, `-O2` release) | Additional C++ compiler flags |
 | `--verbose` | flag | off | Print compiler phases and timing |
 | `--version` | flag | — | Print version and exit |
 | `--help` | flag | — | Print usage and exit |
@@ -215,6 +251,7 @@ pcc <source.pdl> [OPTIONS]
 |----------|-----------------|----------------------|
 | Probe instrumentation | Included | Stripped (zero cost) |
 | C++ optimization | `-O0 -g` | `-O2` |
+| C++ standard | `-std=c++17` | `-std=c++17` |
 | Runtime assertions | Enabled | Disabled |
 
 When `--cflags` is explicitly provided, it overrides the default optimization flags for both modes.
@@ -223,7 +260,7 @@ When `--cflags` is explicitly provided, it overrides the default optimization fl
 
 ## 8. Actor Discovery
 
-`pcc` discovers actor metadata through the `constexpr` registration functions generated by the `ACTOR` macro. The discovery process:
+`pcc` discovers actor metadata by scanning `ACTOR(...)` macro declarations in headers. The discovery process:
 
 1. Read files specified by `-I` flags
 2. Scan directories specified by `--actor-path` for headers
@@ -251,7 +288,7 @@ source.pdl + actors.h
   │     └─ Tokenize .pdl source, build AST
   │
   ├─ 2. Actor Loading
-  │     └─ Read constexpr registration info from ACTOR macros
+  │     └─ Read registration info from ACTOR macros
   │        (name, in/out type, token counts, params)
   │
   ├─ 3. Name Resolution
@@ -261,14 +298,25 @@ source.pdl + actors.h
   │     ├─ const / param names: global scope
   │     └─ Collision detection (no duplicates in same namespace)
   │
-  ├─ 4. SDF Graph Construction               [--emit graph]
+  ├─ 4. Type Inference & Monomorphization
+  │     ├─ Solve actor/pipeline type constraints
+  │     ├─ Apply safe numeric widening (int32->float->double)
+  │     ├─ Resolve polymorphic actor calls
+  │     └─ Materialize concrete actor instances
+  │
+  ├─ 5. Typed Lowering + Verification
+  │     ├─ Rewrite to explicit lowered IR (insert widening nodes)
+  │     ├─ Emit lowering certificate (Cert)
+  │     └─ Verify proof obligations before proceeding
+  │
+  ├─ 6. SDF Graph Construction               [--emit graph, --emit graph-dot]
   │     ├─ Expand taps to fork nodes
   │     ├─ Inline-expand define sub-pipelines
   │     ├─ Convert shared buffers to inter-task edges
   │     ├─ Build control subgraph as independent sub-graph
   │     └─ Build each mode block as independent sub-graph
   │
-  ├─ 5. Static Analysis
+  ├─ 7. Static Analysis
   │     ├─ Type compatibility at pipe endpoints
   │     ├─ SDF balance equation solving → repetition vector
   │     ├─ Feedback loop delay verification
@@ -277,34 +325,37 @@ source.pdl + actors.h
   │     ├─ ctrl supplier verification
   │     └─ Buffer size computation (safe upper bound)
   │
-  ├─ 6. Schedule Generation
+  ├─ 8. Schedule Generation                  [--emit schedule, --emit timing-chart]
   │     ├─ Per-task topological order (PASS construction)
   │     ├─ K (iterations/tick) determination
   │     ├─ Rate-domain (fusion-domain) detection
   │     └─ Batching optimization for high target rates
   │
-  ├─ 7. C++ Code Generation                  [--emit cpp]
+  ├─ 9. C++ Code Generation                  [--emit cpp]
   │     ├─ Ring buffer static allocation
-  │     ├─ Per-task schedule loop
+  │     ├─ Per-task schedule loop (from TypedScheduledIR)
   │     ├─ Runtime parameter double-buffering
   │     ├─ Overrun detection and statistics
+  │     ├─ No type fallback / no type re-inference
   │     ├─ Probe instrumentation (stripped in --release)
   │     └─ main() with CLI argument parser
   │
-  └─ 8. C++ Compilation                      [--emit exe]
-        └─ Invoke cc -O2 -lpipit → executable
+  └─ 10. C++ Compilation                     [--emit exe]
+        └─ Invoke cc -std=c++17 (-O0/-O2) -lpthread → executable
 ```
 
 | Phase | Description | Can emit here |
 |-------|-------------|---------------|
 | 1. Lex & Parse | Tokenize `.pdl`, build AST | `--emit ast` |
-| 2. Actor Loading | Read `constexpr` registration info from headers | |
+| 2. Actor Loading | Read `ACTOR` registration info from headers | |
 | 3. Name Resolution | Resolve actors, consts, params, buffers, taps | |
-| 4. SDF Graph Construction | Expand taps, inline defines, build inter-task edges | `--emit graph` |
-| 5. Static Analysis | Type check, balance equations, buffer sizing | |
-| 6. Schedule Generation | Topological order, K determination, rate-domain detection, batching | |
-| 7. C++ Code Generation | Emit C++ source with runtime integration | `--emit cpp` |
-| 8. C++ Compilation | Invoke system compiler, link `libpipit` | `--emit exe` |
+| 4. Type Inference & Monomorphization | Resolve polymorphic calls and safe widening | |
+| 5. Typed Lowering + Verification | Lower polymorphism/implicit widening to explicit IR and verify obligations | |
+| 6. SDF Graph Construction | Expand taps, inline defines, build inter-task edges | `--emit graph`, `--emit graph-dot` |
+| 7. Static Analysis | Type check, balance equations, buffer sizing | |
+| 8. Schedule Generation | Topological order, K determination, rate-domain detection, batching | `--emit schedule`, `--emit timing-chart` |
+| 9. C++ Code Generation | Emit C++ source from TypedScheduledIR (no re-inference) | `--emit cpp` |
+| 10. C++ Compilation | Invoke system compiler, link `libpipit` | `--emit exe` |
 
 ### 9.1 Rate-domain (fusion-domain) optimization
 
@@ -333,6 +384,49 @@ When fusion is applied, generated code MUST preserve:
 #### 9.1.3 Non-requirement
 
 Fusion is optional. If eligibility is not met, `pcc` may emit the unfused per-node loop form.
+
+---
+
+### 9.2 Typed IR and Verified Lowering (Normative)
+
+To prevent semantic drift introduced by polymorphism and implicit widening,
+`pcc` MUST perform lowering with explicit proof obligations.
+
+#### 9.2.1 Lowering contract
+
+Lowering is defined as:
+
+```
+Lower(G_typed) -> (G_lowered, Cert)
+```
+
+- `G_typed`: graph after type inference / monomorphization
+- `G_lowered`: graph where all implicit widening is explicit and all actors are concrete
+- `Cert`: machine-checkable evidence for the obligations below
+
+If any obligation fails, compilation MUST stop with an error.
+
+#### 9.2.2 Obligations (must hold)
+
+- `L1 Type consistency`: every edge in `G_lowered` has identical source/target endpoint types.
+- `L2 Widening safety`: inserted conversion nodes are only from the allowed chain
+  `int32 -> float -> double`.
+- `L3 Rate/shape preservation`: inserted widening nodes are 1:1 and MUST NOT alter
+  token rate or shape constraints.
+- `L4 Monomorphization soundness`: each polymorphic call is rewritten to exactly one
+  concrete actor instance selected by solved type substitution.
+- `L5 No fallback typing`: unresolved or ambiguous types MUST be diagnostics; silent
+  fallback types are forbidden.
+
+#### 9.2.3 Backend contract
+
+`codegen` MUST consume `TypedScheduledIR` and MUST NOT:
+
+- re-run type inference
+- infer fallback wire types
+- reinterpret unresolved parameter types
+
+`codegen` is a syntax-directed serialization from IR to C++.
 
 ---
 
@@ -365,6 +459,8 @@ Errors are classified by phase (see lang spec §7.1 for the full catalog):
 | Syntax | Unexpected token, missing `}` |
 | Name resolution | Unknown actor, undefined buffer |
 | Type mismatch | Pipe endpoint types differ |
+| Type inference | Ambiguous polymorphic call, unsatisfied type constraints |
+| Lowering verification | Obligation failure in typed lowering (L1-L5) |
 | Rate mismatch | Cross-clock `Pw × fw ≠ Cr × fr` |
 | SDF | Balance equation unsolvable, missing delay |
 | Constraint | Multiple writers, unused tap |
@@ -379,7 +475,22 @@ error: type mismatch at pipe 'fft -> fir'
     adc(0) | fft(256) | fir(coeff) -> signal
                         ^^^^^^^^^^
   fft outputs cfloat[256], but fir expects float[5]
-  hint: insert a conversion actor (e.g. c2r)
+  hint: insert an explicit conversion actor (e.g. c2r)
+```
+
+```text
+error: ambiguous polymorphic actor call 'fir(...)'
+  at example.pdl:18:21
+    constant(0.0) | fir(coeff) | stdout()
+                    ^^^^^^^^^^
+  candidates: fir<float>, fir<double>
+  hint: specify type arguments explicitly, e.g. fir<float>(coeff)
+```
+
+```text
+error: lowering verification failed (L3 rate/shape preservation)
+  inserted widening node changed token rate at edge 'a -> b'
+  hint: report as compiler bug; no code was generated
 ```
 
 ---
@@ -400,11 +511,15 @@ error: type mismatch at pipe 'fft -> fir'
 When `--emit cpp` is used, the generated file contains:
 
 1. **Includes**: `<pipit.h>`, actor headers, standard library headers
-2. **Static storage**: `const` arrays, ring buffer allocations, parameter initial values
-3. **Task functions**: One function per task containing the schedule loop
-4. **Mode dispatch** (if CSDF): Control subgraph execution + mode switch logic
-5. **Double-buffer swap points**: Runtime parameter updates at iteration boundaries
-6. **`main()`**: CLI argument parser (`--duration`, `--threads`, `--param`, `--probe`, `--stats`), thread launch, signal handler, graceful shutdown
+2. **Monomorphized actor aliases** (if polymorphism used): concrete typed actor instances
+3. **Static storage**: `const` arrays, ring buffer allocations, parameter initial values
+4. **Task functions**: One function per task containing the schedule loop
+5. **Mode dispatch** (if CSDF): Control subgraph execution + mode switch logic
+6. **Double-buffer swap points**: Runtime parameter updates at iteration boundaries
+7. **`main()`**: CLI argument parser (`--duration`, `--threads`, `--param`, `--probe`, `--stats`), thread launch, signal handler, graceful shutdown
+
+Code generation MUST be fully driven by `TypedScheduledIR` emitted from phase 8.
+Type fallback at this stage is non-conforming.
 
 The generated code depends only on:
 
@@ -441,25 +556,39 @@ pcc example.pdl --emit ast
 pcc example.pdl -I actors.h --emit graph | grep "repetition_vector"
 pcc example.pdl -I actors.h --emit graph | grep "buffer_size"
 
-# 5. Type mismatch produces actionable error
+# 5. graph-dot / schedule / timing-chart emits complete
+pcc example.pdl -I actors.h --emit graph-dot | grep "digraph"
+pcc example.pdl -I actors.h --emit schedule | grep "task"
+pcc example.pdl -I actors.h --emit timing-chart | grep "gantt"
+
+# 6. Type mismatch produces actionable error
 echo 'clock 1kHz t { adc(0) | fir(coeff) -> out }' > bad.pdl
 pcc bad.pdl -I actors.h 2>&1 | grep "error: type mismatch"
 
-# 6. Missing actor header produces name resolution error
+# 7. Ambiguous polymorphic call requests explicit type args
+echo 'const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]
+clock 1kHz t { constant(0.0) | fir(coeff) | stdout() }' > ambiguous.pdl
+pcc ambiguous.pdl -I actors.h 2>&1 | grep "error: ambiguous polymorphic actor call"
+
+# 8. Lowering verification failures abort compilation
+# (compiler-internal check; expected only in negative compiler tests)
+pcc lowering_bug_case.pdl -I actors.h 2>&1 | grep "error: lowering verification failed"
+
+# 9. Missing actor header produces name resolution error
 pcc example.pdl 2>&1 | grep "error:"
 
-# 7. Release build strips probes
+# 10. Release build strips probes
 pcc example.pdl -I actors.h --release -o example_rel
 # (verify no probe symbols in binary)
 
-# 8. Version and help flags
+# 11. Version and help flags
 pcc --version
 pcc --help
 
-# 9. CSDF example compiles
+# 12. CSDF example compiles
 pcc receiver.pdl -I actors.h -o receiver
 test -x ./receiver
 
-# 10. Invalid flag returns exit code 2
+# 13. Invalid flag returns exit code 2
 pcc --invalid-flag; test $? -eq 2
 ```

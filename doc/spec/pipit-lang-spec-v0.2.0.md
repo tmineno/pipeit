@@ -11,7 +11,7 @@ Pipit は、共有メモリ上に SDF (Synchronous Dataflow) セマンティク�
 - **共有メモリ通信**: タスク間のデータ受け渡しは共有メモリ上のリングバッファを介して行う
 - **クロック駆動**: 各タスクは明示的な target rate で駆動される
 - **直感的な構文**: 最小限の特殊記号とキーワードにより、低い学習コストで記述可能
-- **暗黙変換なし**: 型変換・レート変換はすべて明示的なアクター挿入を要求する
+- **安全優先の型変換**: 意味保存できる数値拡張のみ暗黙化し、意味変換は明示アクターを要求する
 
 ### 1.2 ターゲット環境
 
@@ -27,7 +27,7 @@ Pipit のソースファイル (`.pdl`) は専用コンパイラ `pcc` によっ
 source.pdl → pcc → source_gen.cpp → g++/clang++ → executable
 ```
 
-`pcc` の CLI インターフェース、コンパイル処理フロー、エラー出力形式の詳細は現行仕様 [pcc-spec-v0.1.0](pcc-spec-v0.1.0.md) を参照。
+`pcc` の CLI インターフェース、コンパイル処理フロー、エラー出力形式の詳細は現行仕様 [pcc-spec-v0.2.0](pcc-spec-v0.2.0.md) を参照。
 
 ### 1.4 用語定義
 
@@ -66,6 +66,7 @@ source.pdl → pcc → source_gen.cpp → g++/clang++ → executable
 | `:name` | タップ | パイプライン内のフォーク（分岐）ポイント |
 | `?name` | プローブ | デバッグ用の非侵入的観測点 |
 | `$name` | パラメータ参照 | ランタイムパラメータの参照 |
+| `<...>` | 型引数 | polymorphic actor の型実引数 |
 | `#` | コメント | 行末コメント |
 
 ### 2.4 キーワード
@@ -131,7 +132,10 @@ set  const  param  define  clock  mode  control  switch  default  delay
 
 ### 3.1 概要
 
-Pipit はパイプライン記述側に型注釈を持たない。型情報はアクター定義（C++ 側）の `ACTOR` マクロが生成する `constexpr` 登録関数から取得される。コンパイラ `pcc` はこの登録情報を参照し、パイプライン接続の型整合性を静的に検証する。
+Pipit の型情報は、アクター定義（C++ 側）の `ACTOR` マクロが生成する `constexpr` 登録関数から取得される。`pcc` はこの登録情報を参照し、パイプライン接続の型整合性を静的に検証する。v0.2.3 以降、アクター呼び出しは以下の 2 形式を許容する。
+
+- 明示型引数付き: `actor<float>(...)`
+- 型引数省略: `actor(...)`（制約解決で一意に定まる場合のみ）
 
 ### 3.2 基本型
 
@@ -145,24 +149,72 @@ Pipit はパイプライン記述側に型注釈を持たない。型情報は�
 | `cfloat` | 複素浮動小数点数 | `std::complex<float>` |
 | `cdouble` | 複素倍精度浮動小数点数 | `std::complex<double>` |
 
-### 3.3 型推論規則
+### 3.3 型推論規則（v0.2.3 追補）
 
-パイプ `A | B` において、アクター `A` の出力型とアクター `B` の入力型が一致しなければコンパイルエラーとなる。
+型推論は、(1) actor シグネチャ、(2) パイプ接続制約、(3) 引数（literal/const/param）の3系統の制約を統合して行う。
+
+- 一意に解ける場合: 推論結果を採用する
+- 解が存在しない場合: 型不整合エラー
+- 複数解が残る場合: 曖昧性エラー（明示型引数を要求）
+
+`const` / `param` の数値主型は以下の順序で解く。
+
+```
+int32 < float < double
+```
+
+- 整数リテラルは `int32` を初期候補とする
+- 小数点を含むリテラルは `float` を初期候補とする
+- 使用箇所制約で必要なら最小限の上位型に拡張する
 
 ```
 error: type mismatch at pipe 'fft -> fir'
   fft outputs cfloat[256], but fir expects float[5]
-  hint: insert a conversion actor (e.g. c2r)
+  hint: insert an explicit conversion actor (e.g. c2r)
 ```
 
 ### 3.4 型変換
 
-暗黙の型変換は一切行わない。型が異なる場合、ユーザーは明示的に変換アクターを挿入しなければならない。
+暗黙変換は「情報損失がない数値拡張」に限定して許可する。許可される暗黙変換は次のみ。
+
+```
+int32 -> float -> double
+```
+
+以下は暗黙変換しない（明示変換を要求する）。
+
+- 狭窄変換: `double -> float`, `float -> int32`
+- 実数/複素の意味変換: `cfloat -> float`, `float -> cfloat`
+- それ以外の未定義変換
 
 ```
 adc(0) | fft(256) | c2r() | fir(coeff) -> signal
 #                   ^^^^^ cfloat → float 変換アクター
 ```
+
+### 3.5 アクター多相（polymorphism）
+
+同一アルゴリズムに対して複数の入出力型を許容するため、actor 呼び出しは型引数を持てる。
+
+```pdl
+const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]
+
+clock 1kHz t {
+    constant(0.0) | fir<float>(coeff) | stdout()
+}
+```
+
+型引数省略時は推論を試みる。
+
+```pdl
+const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]
+
+clock 1kHz t {
+    constant(0.0) | fir(coeff) | stdout()   # 型引数は文脈から推論
+}
+```
+
+推論が曖昧な場合はエラーとし、明示型引数を要求する。
 
 ---
 
@@ -182,6 +234,38 @@ ACTOR(fir, IN(float, 5), OUT(float, 1)) {
     out[0] = y;
 }
 ```
+
+#### polymorphism 対応の実装例（v0.2.3）
+
+polymorphic actor は、アルゴリズム本体を C++ テンプレートで共通化し、`ACTOR` マクロは具体型ごとに薄いラッパを定義する。
+
+```cpp
+#include <pipit.h>
+
+template <typename T>
+static int scale_kernel(const T* in, T* out, T gain, int N) {
+    for (int i = 0; i < N; ++i) out[i] = in[i] * gain;
+    return ACTOR_OK;
+}
+
+ACTOR(scale_f32, IN(float, N), OUT(float, N), PARAM(float, gain) PARAM(int, N)) {
+    return scale_kernel<float>(in, out, gain, N);
+}
+
+ACTOR(scale_f64, IN(double, N), OUT(double, N), PARAM(double, gain) PARAM(int, N)) {
+    return scale_kernel<double>(in, out, gain, N);
+}
+```
+
+PDL 側では polymorphic call を使用できる。
+
+```pdl
+clock 1kHz t {
+    constant(1.0) | scale<float>(2.0) | stdout()
+}
+```
+
+`pcc` は `scale<T>` 呼び出しを型解決後に concrete actor へモノモーフ化する（具体名のマッピング方式は処理系定義）。
 
 #### マクロの生成物
 
@@ -857,7 +941,13 @@ pipit: pipeline terminated with error (exit code 1)
 
 ## 8. コンパイラ処理フロー
 
-コンパイラ `pcc` の処理フロー（字句解析 → 構文解析 → アクター登録情報読込み → 名前解決 → SDF グラフ構築 → 静的解析 → スケジュール生成 → C++ コード生成 → C++ コンパイル）の詳細は現行仕様 [pcc-spec-v0.1.0](pcc-spec-v0.1.0.md) を参照。
+コンパイラ `pcc` の処理フロー（字句解析 → 構文解析 → アクター登録情報読込み → 名前解決 → 型制約解決/モノモーフ化 → SDF グラフ構築 → 静的解析 → スケジュール生成 → C++ コード生成 → C++ コンパイル）の詳細は現行仕様 [pcc-spec-v0.2.0](pcc-spec-v0.2.0.md) を参照。
+
+polymorphism と暗黙数値拡張を含むプログラムは、実装内部で explicit な lower 形へ書き換えられてもよい。ただしこの書き換えは意味保存でなければならない。少なくとも以下を満たすこと（MUST）。
+
+- 挿入される暗黙拡張は `int32 -> float -> double` の範囲に限定
+- 書き換えによりトークンレート/shape を変更しない
+- 解決不能または曖昧な型は診断エラーとし、暗黙のフォールバック型を採用しない
 
 ---
 
@@ -966,7 +1056,9 @@ pipe_elem       ::= actor_call
                   | ':' IDENT           # タップ（宣言側）
                   | '?' IDENT           # プローブ
 
-actor_call      ::= IDENT '(' args? ')'
+actor_call      ::= IDENT type_args? '(' args? ')'
+type_args       ::= '<' type_name (',' type_name)* '>'
+type_name       ::= IDENT
 
 sink            ::= '->' IDENT         # 共有バッファ書込み
 
@@ -1340,12 +1432,14 @@ error: runtime param '$n' cannot be used as frame dimension
   hint: use const or literal for shape constraints
 ```
 
-### 13.7 文法差分（v0.2）
+### 13.7 文法差分（v0.2 / v0.2.3）
 
 本章は §10 の差分のみを示す。
 
 ```bnf
-actor_call       ::= IDENT '(' args? ')' shape_constraint?
+actor_call       ::= IDENT type_args? '(' args? ')' shape_constraint?
+type_args        ::= '<' type_name (',' type_name)* '>'
+type_name        ::= IDENT
 shape_constraint ::= '[' shape_dims ']'
 shape_dims       ::= shape_dim (',' shape_dim)*
 shape_dim        ::= NUMBER | IDENT   # IDENT は const 参照
