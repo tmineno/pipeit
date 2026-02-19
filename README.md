@@ -89,7 +89,7 @@ target/release/pcc examples/gain.pdl \
 - **Statistics**: `mean`, `rms`, `min`, `max`
 - **DSP**: `fft`, `c2r`, `mag`, `fir`, `delay`, `decimate`
 - **Waveform generators**: `sine`, `square`, `sawtooth`, `triangle`, `noise`, `impulse`
-- **External I/O**: `socket_write`, `socket_read` (UDP/IPC via [PPKT protocol](doc/spec/ppkt-protocol-spec-v0.2.x.md))
+- **External I/O**: `socket_write`, `socket_read` (UDP/IPC via [PPKT protocol](doc/spec/ppkt-protocol-spec-v0.3.0.md))
 
 ### Tools
 
@@ -119,9 +119,9 @@ benches/        Performance benchmarks (compiler, runtime, E2E)
 
 ## Documentation
 
-- [Language Spec](doc/spec/pipit-lang-spec-v0.2.x.md)
-- [PPKT Protocol Spec](doc/spec/ppkt-protocol-spec-v0.2.x.md)
-- [Standard Library Reference](doc/spec/standard-library-spec-v0.2.x.md)
+- [Language Spec](doc/spec/pipit-lang-spec-v0.3.0.md)
+- [PPKT Protocol Spec](doc/spec/ppkt-protocol-spec-v0.3.0.md)
+- [Standard Library Reference](doc/spec/standard-library-spec-v0.3.0.md)
 - [pcc Usage Guide](doc/pcc-usage-guide.md)
 - [Performance Analysis Report](doc/performance-analysis-report.md)
 - [Development TODO](doc/TODO.md)

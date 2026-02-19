@@ -3,7 +3,7 @@
 Generate standard library reference documentation from std_actors.h.
 
 Parses Doxygen-style /// comments and ACTOR() macro signatures to produce
-a flat markdown specification at doc/spec/standard-library-spec-v0.2.x.md.
+a flat markdown specification at doc/spec/standard-library-spec-v0.3.0.md.
 
 Usage:
     python3 scripts/gen-stdlib-doc.py
@@ -15,7 +15,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 INPUT = PROJECT_ROOT / "runtime" / "libpipit" / "include" / "std_actors.h"
-OUTPUT = PROJECT_ROOT / "doc" / "spec" / "standard-library-spec-v0.2.x.md"
+OUTPUT = PROJECT_ROOT / "doc" / "spec" / "standard-library-spec-v0.3.0.md"
 
 # Regex patterns
 RE_FILE = re.compile(r"/// @file")

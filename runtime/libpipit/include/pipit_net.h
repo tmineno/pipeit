@@ -4,7 +4,7 @@
 ///
 /// Provides the PPKT wire format and non-blocking UDP / Unix domain socket
 /// wrappers for streaming signal data between Pipit actors and external
-/// processes.  See doc/spec/ppkt-protocol-spec-v0.2.x.md for the full specification.
+/// processes.  See doc/spec/ppkt-protocol-spec-v0.3.0.md for the full specification.
 
 #include <arpa/inet.h>
 #include <cstdint>

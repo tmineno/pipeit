@@ -1,4 +1,4 @@
-# Pipit Language Specification v0.2.0 (Draft)
+# Pipit Language Specification v0.3.0 (Draft)
 
 ## 1. Overview
 
@@ -21,13 +21,16 @@ Pipit は、共有メモリ上に SDF (Synchronous Dataflow) セマンティク�
 
 ### 1.3 ツールチェイン
 
-Pipit のソースファイル (`.pdl`) は専用コンパイラ `pcc` によって C++ コードに変換され、`libpipit` とリンクして実行形式を生成する。
+Pipit のソースファイル (`.pdl`) は、アクターメタデータマニフェスト (`actors.meta.json`) とともに専用コンパイラ `pcc` に入力され、C++ コードへ変換された後に `libpipit` とリンクして実行形式を生成する。マニフェストは `ACTOR` 宣言から actor-meta 生成ステップで作成されるか、`pcc` 実行時に自動生成される。
 
 ```
-source.pdl → pcc → source_gen.cpp → g++/clang++ → executable
+source.pdl + actors.h
+  → actor-meta step → actors.meta.json
+  → pcc → source_gen.cpp
+  → g++/clang++ → executable
 ```
 
-`pcc` の CLI インターフェース、コンパイル処理フロー、エラー出力形式の詳細は現行仕様 [pcc-spec](pcc-spec-v0.2.x.md) を参照。
+`pcc` の CLI インターフェース、コンパイル処理フロー、エラー出力形式の詳細は現行仕様 [pcc-spec](pcc-spec-v0.3.0.md) を参照。
 
 ### 1.4 用語定義
 
@@ -41,6 +44,7 @@ source.pdl → pcc → source_gen.cpp → g++/clang++ → executable
 | **共有バッファ** | タスク間でデータを受け渡す非同期 FIFO。共有メモリプール上にリングバッファとして静的配置される |
 | **タップ** | パイプライン内のフォークノード。データをコピーして複数の下流に分配する |
 | **プローブ** | 非侵入的な観測点。リリースビルドではゼロコストで除去される |
+| **アクターマニフェスト** | `ACTOR` 宣言から生成されるメタデータファイル（`actors.meta.json`）。`pcc` が型・ポート・パラメータ情報を取得する一次入力 |
 
 ---
 
@@ -132,7 +136,7 @@ set  const  param  define  clock  mode  control  switch  default  delay
 
 ### 3.1 概要
 
-Pipit の型情報は、アクター定義（C++ 側）の `ACTOR` マクロが生成する `constexpr` 登録関数から取得される。`pcc` はこの登録情報を参照し、パイプライン接続の型整合性を静的に検証する。v0.2.3 以降、アクター呼び出しは以下の 2 形式を許容する。
+Pipit の型情報は、`ACTOR` 宣言から生成されたアクターマニフェスト (`actors.meta.json`) から取得される。`pcc` はマニフェストに含まれる `IN`/`OUT`/`PARAM`/`RUNTIME_PARAM` 情報を参照し、パイプライン接続の型整合性を静的に検証する。v0.3.0 以降、アクター呼び出しは以下の 2 形式を許容する。
 
 - 明示型引数付き: `actor<float>(...)`
 - 型引数省略: `actor(...)`（制約解決で一意に定まる場合のみ）
@@ -149,7 +153,7 @@ Pipit の型情報は、アクター定義（C++ 側）の `ACTOR` マクロが�
 | `cfloat` | 複素浮動小数点数 | `std::complex<float>` |
 | `cdouble` | 複素倍精度浮動小数点数 | `std::complex<double>` |
 
-### 3.3 型推論規則（v0.2.3 追補）
+### 3.3 型推論規則（v0.3.0 追補）
 
 型推論は、(1) actor シグネチャ、(2) パイプ接続制約、(3) 引数（literal/const/param）の3系統の制約を統合して行う。
 
@@ -176,12 +180,14 @@ error: type mismatch at pipe 'fft -> fir'
 
 ### 3.4 型変換
 
-暗黙変換は「情報損失がない数値拡張」に限定して許可する。許可される暗黙変換は以下の2系統のみ。
+暗黙変換は「狭窄変換および実数/複素の意味変換を伴わない数値拡張」に限定して許可する。許可される暗黙変換は以下の2系統のみ。
 
 ```
 int8 -> int16 -> int32 -> float -> double   # 実数系
 cfloat -> cdouble                            # 複素数系
 ```
+
+注: `int32 -> float` は値域上の拡張だが、`|x| > 2^24` では丸めが発生しうる。
 
 各系統内では左から右への変換のみ暗黙的に行われる。系統をまたぐ変換（実数 ↔ 複素数）は暗黙変換の対象外である。
 
@@ -251,7 +257,7 @@ ACTOR(fir, IN(float, 5), OUT(float, 1)) {
 }
 ```
 
-#### polymorphic actor 定義（v0.2.3）
+#### polymorphic actor 定義（v0.3.0）
 
 `ACTOR` マクロの前に `template <typename T>` を記述することで、型パラメトリックなアクターを定義できる。
 
@@ -265,7 +271,7 @@ ACTOR(scale, IN(T, N), OUT(T, N), PARAM(T, gain) PARAM(int, N)) {
 }
 ```
 
-`pcc` はヘッダスキャン時に `template <typename T> ACTOR(scale, ...)` パターンを認識し、`T` が型パラメータであることを記録する。モノモーフ化時に PDL の使用箇所から具体型を解決し、`IN(T, N)` → `IN(float, N)` 等の型代入を行う。C++ コンパイラは生成コード中の `actor_scale<float>` を通常のテンプレートインスタンス化として処理する。
+actor-meta 生成ステップは `template <typename T> ACTOR(scale, ...)` パターンを認識し、`T` が型パラメータであることをマニフェストへ記録する。モノモーフ化時に `pcc` は PDL の使用箇所から具体型を解決し、`IN(T, N)` → `IN(float, N)` 等の型代入を行う。C++ コンパイラは生成コード中の `actor_scale<float>` を通常のテンプレートインスタンス化として処理する。
 
 PDL 側では明示型引数または推論によって呼び出す。
 
@@ -281,9 +287,9 @@ clock 1kHz t {
 `ACTOR` マクロは以下を生成する。
 
 1. **ファンクタクラス**: `IN`/`OUT` インターフェースを持つ `noexcept` な `operator()` を備えるクラス
-2. **宣言情報**: `IN`/`OUT`/`PARAM`/`RUNTIME_PARAM` 記述。`pcc` はヘッダスキャンでこの宣言情報を抽出する
+2. **宣言情報**: `IN`/`OUT`/`PARAM`/`RUNTIME_PARAM` 記述。actor-meta 生成ステップがこれを `actors.meta.json` に変換する
 
-`pcc` は C++ の完全な構文解析は行わず、`ACTOR(...)` マクロ呼出しの宣言形式を前提としたテキストスキャンを行う。
+`pcc` は C++ の完全な構文解析を行わず、アクターマニフェストを一次入力として扱う。`-I`/`--actor-path` のみが与えられた場合は、実装は actor-meta 生成ステップを呼び出して同等のマニフェストを得てもよい（MAY）。
 
 #### ファンクタ内で使用可能なシンボル
 
@@ -951,7 +957,7 @@ pipit: pipeline terminated with error (exit code 1, fail-fast)
 
 ## 8. コンパイラ処理フロー
 
-コンパイラ `pcc` の処理フロー（字句解析 → 構文解析 → アクター登録情報読込み → 名前解決 → 型制約解決/モノモーフ化 → SDF グラフ構築 → 静的解析 → スケジュール生成 → C++ コード生成 → C++ コンパイル）の詳細は現行仕様 [pcc-spec](pcc-spec-v0.2.x.md) を参照。
+コンパイラ `pcc` の処理フロー（字句解析 → 構文解析 → アクターマニフェスト読込み（必要に応じて生成） → 名前解決 → 型制約解決/モノモーフ化 → SDF グラフ構築 → 静的解析 → スケジュール生成 → C++ コード生成 → C++ コンパイル）の詳細は現行仕様 [pcc-spec](pcc-spec-v0.3.0.md) を参照。
 
 polymorphism と暗黙数値拡張を含むプログラムは、実装内部で explicit な lower 形へ書き換えられてもよい。ただしこの書き換えは意味保存でなければならない。少なくとも以下を満たすこと（MUST）。
 
@@ -1226,6 +1232,8 @@ define frontend(n) {
 # メイン受信タスク: 10MHz target rate
 clock 10MHz capture {
     frontend(fft_size) | :raw | fir(coeff) | ?filtered -> signal
+    # FIXME(v0.3.0): frontend() は c2r() で float 化しているため、
+    # この枝の mag() 接続は型不整合。サンプル改訂時に修正する。
     :raw | mag() | stdout()
 }
 
@@ -1452,6 +1460,8 @@ error: runtime param '$n' cannot be used as frame dimension
 const frame = 256
 
 clock 10MHz rx {
+    # FIXME(v0.3.0): c2r() の後段は float なので mag() へは接続できない。
+    # ここはサンプル改訂時に c2r()/mag() の並びを見直す。
     adc(0) | fft()[frame] | c2r() | mag() -> spectrum
 }
 ```
@@ -1472,7 +1482,7 @@ clock 60Hz vision {
 
 ### 14.1 概要
 
-Pipit パイプラインと外部プロセス（オシロスコープ GUI、ロガー、テストハーネス等）間のリアルタイム信号データストリーミングを、標準化されたパケットプロトコル **PPKT (Pipit Packet Protocol)** で行う。プロトコルの完全な仕様は [ppkt-protocol-spec-v0.2.x.md](ppkt-protocol-spec-v0.2.x.md) を参照のこと。
+Pipit パイプラインと外部プロセス（オシロスコープ GUI、ロガー、テストハーネス等）間のリアルタイム信号データストリーミングを、標準化されたパケットプロトコル **PPKT (Pipit Packet Protocol)** で行う。プロトコルの完全な仕様は [ppkt-protocol-spec-v0.3.0.md](ppkt-protocol-spec-v0.3.0.md) を参照のこと。
 
 設計原則:
 
@@ -1523,7 +1533,7 @@ clock 1kHz control {
 
 ## 将来の拡張（v2+ 候補）
 
-以下は v0.2.0 draft でも対象外とする将来候補である。
+以下は v0.3.0 draft でも対象外とする将来候補である。
 
 - 明示的なマルチコアピニング構文
 - BDF (Boolean Dataflow) への拡張

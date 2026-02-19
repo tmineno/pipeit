@@ -1,4 +1,4 @@
-# ADR-015: Actor Polymorphism, Monomorphization Strategy, and Safe Numeric Widening
+# ADR-016: Actor Polymorphism, Monomorphization Strategy, and Safe Numeric Widening
 
 ## Context
 
@@ -79,6 +79,6 @@ Cross-family conversions (real ↔ complex) are never implicit. Narrowing conver
 
 ## Exit criteria
 
-- [ ] v0.2.3 compiler implementation passes all Phase 2 tests (type inference, ambiguity diagnostics, codegen compile tests)
+- [ ] v0.3.0 compiler implementation passes all Phase 2 tests (type inference, ambiguity diagnostics, codegen compile tests)
 - [ ] No regression in existing v0.1/v0.2 programs (backward compatibility)
 - [ ] L1–L5 lowering verifier integrated and exercised by negative tests

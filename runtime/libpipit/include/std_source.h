@@ -3,7 +3,7 @@
 /// @brief Pipit Standard Source Actor Library
 ///
 /// Source actors that receive signal data from external processes via the
-/// Pipit Packet Protocol (PPKT).  See doc/spec/ppkt-protocol-spec-v0.2.x.md.
+/// Pipit Packet Protocol (PPKT).  See doc/spec/ppkt-protocol-spec-v0.3.0.md.
 
 #include <cstring>
 #include <pipit.h>

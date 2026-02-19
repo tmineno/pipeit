@@ -21,7 +21,7 @@
 
 - [x] 25 standard actors (I/O, math, statistics, DSP) in `std_actors.h`
 - [x] 143 total tests (85 integration + 58 C++ runtime)
-- [x] Doxygen docs + auto-generated `standard-library-spec-v0.2.x.md` (pre-commit hook)
+- [x] Doxygen docs + auto-generated `standard-library-spec-v0.3.0.md` (pre-commit hook)
 
 ---
 
@@ -54,7 +54,19 @@
 
 ---
 
-## v0.2.3 - Type System Ergonomics (Polymorphism)
+## v0.2.2a - Spec Alignment & Runtime Hardening ✅
+
+- [x] Strict parameter type checking: `is_int_literal` tracking in parser/AST, exact type match in analyze (no implicit Int→Float)
+- [x] Modal switch semantics: soft-deprecate `switch ... default`, support `$param` and external buffer as ctrl sources
+- [x] Ring buffer fairness: yield + retry loops replace fail-fast reads/writes in codegen
+- [x] Shared buffer optimization: skip writes when no readers, static edge buffer declarations
+- [x] Default memory pool: 64 MB when `set mem` not specified
+- [x] uftrace-based block profiling benchmark (`profile_bench.sh`)
+- [x] ADR-015: v0.2.0 spec-implementation alignment decisions
+
+---
+
+## v0.3.0 - Type System Ergonomics (Polymorphism)
 
 **Goal**: Remove duplicated actor implementations caused by wire-type variation and reduce explicit type plumbing in PDL.
 
@@ -65,7 +77,7 @@
   - [x] Define inferred call form (`actor(...)` with type inferred from context)
   - [x] Define ambiguity rules (when explicit type args are required)
   - [x] Define compatibility with shape constraints (`actor<T>(...)[N]`)
-  - [x] **Create ADR-015**: Monomorphization strategy and diagnostics policy
+  - [x] **Create ADR-016**: Monomorphization strategy and diagnostics policy
 
 - [x] **Principal type inference for const/param** (lang-spec §3.3):
   - [x] Infer principal numeric type from initializer and usage constraints
@@ -83,10 +95,13 @@
   - [ ] Support `template <typename T> ACTOR(name, IN(T, N), ...)` expansion as class template
   - [ ] Ensure generated class template instantiates correctly via `actor_name<float>` etc.
 
-- [ ] **Registry scanner** (pcc):
-  - [ ] Detect `template <typename T> ACTOR(...)` pattern and record type parameter `T`
-  - [ ] Store parametric IN/OUT/PARAM types (e.g., `IN(T, N)` with `T` unresolved)
-  - [ ] Textual type substitution at monomorphization (`T` → `float`, etc.)
+- [ ] **Actor metadata manifest pipeline** (pcc):
+  - [ ] Define `actors.meta.json` schema v1 (name/type params/ports/params/runtime_params)
+  - [ ] Implement actor-meta generator from `ACTOR(...)` declarations (`-I` / `--actor-path`)
+  - [ ] Support direct manifest input (`--actor-meta`) with schema/version validation
+  - [ ] Build ActorRegistry from manifest (including `template <typename T>` metadata)
+  - [ ] Add manifest cache (`--meta-cache-dir`, `--no-meta-cache`) with header-hash invalidation
+  - [ ] Keep monomorphization type substitution (`T` → concrete type) driven by manifest metadata
 
 - [ ] **Frontend updates**:
   - [ ] Parser/AST support for `actor<type>(...)` call syntax
@@ -113,16 +128,18 @@
 - [ ] **Tests**:
   - [ ] Positive/negative type inference tests
   - [ ] Ambiguity and mismatch diagnostic golden tests
+  - [ ] Manifest loading tests (valid/invalid schema, missing fields, duplicate actor names)
+  - [ ] Manifest generation fallback tests (`-I`/`--actor-path` → `actors.meta.json`)
   - [ ] Codegen compile tests for `template <typename T> ACTOR(...)` instantiations
   - [ ] Narrowing warning golden tests
 
 ---
 
-## v0.3.0 - Language Evolution
+## v0.4.0 - Language Evolution
 
 **Goal**: Improve PDL ergonomics based on real usage experience. Design-first approach.
 
-> **Note**: Type inference, polymorphism, and safe widening have been moved to v0.2.3 and are specified in lang-spec §3.3–§3.5 and pcc-spec §9.2. This milestone now covers remaining language evolution items.
+> **Note**: Type inference, polymorphism, and safe widening have been moved to v0.3.0 and are specified in lang-spec §3.3–§3.5 and pcc-spec §9.2. This milestone now covers remaining language evolution items.
 
 - [ ] **Explicit type annotations for const/param** (future ergonomics):
   - [ ] Support syntax: `const x: int32 = 42`, `param gain: double = 2.5`
@@ -136,15 +153,15 @@
 
 - [ ] **DSL survey and experience report**:
   - [ ] Survey type systems in similar DSLs (GNU Radio, Faust, StreamIt)
-  - [ ] Collect real-world examples and pain points from v0.2.3 usage
+  - [ ] Collect real-world examples and pain points from v0.3.0 usage
 
 ---
 
-## v0.3.x - Ecosystem & Quality of Life
+## v0.4.x - Ecosystem & Quality of Life
 
 **Goal**: Make Pipit easier to use and deploy in real projects.
 
-### Standard Actor Library Expansion (migrated from former v0.2.3)
+### Standard Actor Library Expansion (migrated from former v0.3.0)
 
 #### Phase 2: Signal Processing Basics (Medium Complexity)
 
@@ -252,7 +269,7 @@
 
 ---
 
-## v0.4.0 - Advanced Features (Future)
+## v0.5.0 - Advanced Features (Future)
 
 **Goal**: Compiler optimizations, real-time scheduling, heterogeneous execution.
 
@@ -284,7 +301,7 @@
 
 ---
 
-## v0.5.0 - Production Hardening (Future)
+## v0.6.0 - Production Hardening (Future)
 
 **Goal**: Observability, reliability, security, verification for production deployments.
 
@@ -316,9 +333,11 @@
 
 ## Notes
 
-- **v0.2.3** Phase 1 spec/design complete; Phase 2 compiler implementation is next
-- **v0.3.x** now includes former v0.2.3 stdlib expansion backlog
-- **v0.3.0** covers remaining language evolution after v0.2.3 type system work
-- **v0.4.0+** deferred until core is stable and well-characterized
+- **v0.2.2a** Spec/runtime alignment merged from `review/spec`; strict types and modal state fixes establish foundation for Phase 2
+- **v0.3.0** Phase 1 spec/design complete; Phase 2 compiler implementation is next (all items pending)
+- **ADR numbering**: ADR-015 = spec alignment (from review/spec), ADR-016 = polymorphism & safe widening
+- **v0.4.x** now includes former v0.3.0 stdlib expansion backlog
+- **v0.4.0** covers remaining language evolution after v0.3.0 type system work
+- **v0.5.0+** deferred until core is stable and well-characterized
 - Performance characterization should inform optimization priorities (measure before optimizing)
-- Spec files renamed to versioned names (`pipit-lang-spec-v0.2.x.md`, `pcc-spec-v0.2.x.md`); version tracked in file header
+- Spec files renamed to versioned names (`pipit-lang-spec-v0.3.0.md`, `pcc-spec-v0.3.0.md`); `v0.2.0` specs are frozen from tag `v0.2.2`
