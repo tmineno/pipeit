@@ -27,7 +27,7 @@ Pipit のソースファイル (`.pdl`) は専用コンパイラ `pcc` によっ
 source.pdl → pcc → source_gen.cpp → g++/clang++ → executable
 ```
 
-`pcc` の CLI インターフェース、コンパイル処理フロー、エラー出力形式の詳細は現行仕様 [pcc-spec](pcc-spec.md) を参照。
+`pcc` の CLI インターフェース、コンパイル処理フロー、エラー出力形式の詳細は現行仕様 [pcc-spec](pcc-spec-v0.2.x.md) を参照。
 
 ### 1.4 用語定義
 
@@ -950,7 +950,7 @@ pipit: pipeline terminated with error (exit code 1)
 
 ## 8. コンパイラ処理フロー
 
-コンパイラ `pcc` の処理フロー（字句解析 → 構文解析 → アクター登録情報読込み → 名前解決 → 型制約解決/モノモーフ化 → SDF グラフ構築 → 静的解析 → スケジュール生成 → C++ コード生成 → C++ コンパイル）の詳細は現行仕様 [pcc-spec](pcc-spec.md) を参照。
+コンパイラ `pcc` の処理フロー（字句解析 → 構文解析 → アクター登録情報読込み → 名前解決 → 型制約解決/モノモーフ化 → SDF グラフ構築 → 静的解析 → スケジュール生成 → C++ コード生成 → C++ コンパイル）の詳細は現行仕様 [pcc-spec](pcc-spec-v0.2.x.md) を参照。
 
 polymorphism と暗黙数値拡張を含むプログラムは、実装内部で explicit な lower 形へ書き換えられてもよい。ただしこの書き換えは意味保存でなければならない。少なくとも以下を満たすこと（MUST）。
 
@@ -1470,7 +1470,7 @@ clock 60Hz vision {
 
 ### 14.1 概要
 
-Pipit パイプラインと外部プロセス（オシロスコープ GUI、ロガー、テストハーネス等）間のリアルタイム信号データストリーミングを、標準化されたパケットプロトコル **PPKT (Pipit Packet Protocol)** で行う。プロトコルの完全な仕様は [ppkt-protocol-spec.md](ppkt-protocol-spec.md) を参照のこと。
+Pipit パイプラインと外部プロセス（オシロスコープ GUI、ロガー、テストハーネス等）間のリアルタイム信号データストリーミングを、標準化されたパケットプロトコル **PPKT (Pipit Packet Protocol)** で行う。プロトコルの完全な仕様は [ppkt-protocol-spec-v0.2.x.md](ppkt-protocol-spec-v0.2.x.md) を参照のこと。
 
 設計原則:
 

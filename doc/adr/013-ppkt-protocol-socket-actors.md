@@ -34,7 +34,7 @@ socket_read("host:port")  ←UDP─ signal generator
 
 ### 2. PPKT (Pipit Packet Protocol)
 
-信号ストリーミング専用の軽量バイナリデータグラムプロトコルを定義した（`doc/spec/ppkt-protocol-spec.md`）。
+信号ストリーミング専用の軽量バイナリデータグラムプロトコルを定義した（`doc/spec/ppkt-protocol-spec-v0.2.x.md`）。
 
 - **48 バイト固定ヘッダー** + 可変長ペイロード
 - **リトルエンディアン** 固定（x86/ARM ターゲットに合致）
@@ -106,7 +106,7 @@ PARAM(int, N) PARAM(std::span<const char>, addr) PARAM(int, chan_id)
 
 ## Exit criteria
 
-- [x] `doc/spec/ppkt-protocol-spec.md` にプロトコル仕様が記載されている
+- [x] `doc/spec/ppkt-protocol-spec-v0.2.x.md` にプロトコル仕様が記載されている
 - [x] `runtime/libpipit/include/pipit_net.h` に PpktHeader + DatagramSender/Receiver が実装されている
 - [x] `runtime/libpipit/include/std_sink.h` に `socket_write` actor が実装されている
 - [x] `runtime/libpipit/include/std_source.h` に `socket_read` actor が実装されている

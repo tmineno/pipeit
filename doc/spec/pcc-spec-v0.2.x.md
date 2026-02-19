@@ -6,7 +6,7 @@ Version: 0.2.0
 
 `pcc` is the compiler for Pipit Definition Language (`.pdl`) files. It reads a pipeline description and actor header files, performs static analysis, and produces either a standalone executable or generated C++ source code.
 
-Refer to [pipit-lang-spec](pipit-lang-spec.md) for the full language semantics. This spec defines `pcc`'s behavior as a tool.
+Refer to [pipit-lang-spec](pipit-lang-spec-v0.2.x.md) for the full language semantics. This spec defines `pcc`'s behavior as a tool.
 
 ## 2. Non-goals
 

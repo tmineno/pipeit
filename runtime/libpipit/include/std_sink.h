@@ -3,7 +3,7 @@
 /// @brief Pipit Standard Sink Actor Library
 ///
 /// Sink actors that send signal data to external processes via the
-/// Pipit Packet Protocol (PPKT).  See doc/spec/ppkt-protocol-spec.md.
+/// Pipit Packet Protocol (PPKT).  See doc/spec/ppkt-protocol-spec-v0.2.x.md.
 
 #include <cstring>
 #include <pipit.h>

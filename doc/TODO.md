@@ -21,7 +21,7 @@
 
 - [x] 25 standard actors (I/O, math, statistics, DSP) in `std_actors.h`
 - [x] 143 total tests (85 integration + 58 C++ runtime)
-- [x] Doxygen docs + auto-generated `standard-library-spec.md` (pre-commit hook)
+- [x] Doxygen docs + auto-generated `standard-library-spec-v0.2.x.md` (pre-commit hook)
 
 ---
 
@@ -309,4 +309,4 @@
 - **v0.3.0** covers remaining language evolution after v0.2.3 type system work
 - **v0.4.0+** deferred until core is stable and well-characterized
 - Performance characterization should inform optimization priorities (measure before optimizing)
-- Spec files renamed to versionless names (`pipit-lang-spec.md`, `pcc-spec.md`); version tracked in file header
+- Spec files renamed to versioned names (`pipit-lang-spec-v0.2.x.md`, `pcc-spec-v0.2.x.md`); version tracked in file header

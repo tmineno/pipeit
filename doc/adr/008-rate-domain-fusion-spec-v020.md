@@ -17,24 +17,24 @@ Adopt an explicit two-layer specification for scheduling in v0.2.0:
 
 1. **Language spec rule (Pipit)**  
    Add a normative statement that compilers MAY transform to equivalent static schedules, provided core SDF semantics are preserved.  
-   (Added at `pipit-lang-spec.md` §5.4.4)
+   (Added at `pipit-lang-spec-v0.2.x.md` §5.4.4)
 
 2. **Compiler spec rule (pcc)**  
    Define `rate domain` (aka `fusion domain`) as an implementation-level schedule unit and specify when loop fusion is eligible and what invariants MUST hold.  
-   (Added at `pcc-spec.md` §9.1)
+   (Added at `pcc-spec-v0.2.x.md` §9.1)
 
 3. **Terminology choice**  
    Prefer `rate domain` over `clock domain` for this optimization to avoid confusion with task clock frequency domains.
 
 4. **Spec structure update**  
-   Publish compiler spec as `pcc-spec.md` and apply explicit section numbering for stable cross-references.
+   Publish compiler spec as `pcc-spec-v0.2.x.md` and apply explicit section numbering for stable cross-references.
 
 ## Consequences
 
 - Clarifies that fused and unfused schedules can both be correct under the same language semantics.
 - Prevents treating codegen loop shape as a language conformance issue unless semantic invariants are violated.
 - Provides concrete compiler-side guidance for implementing and testing fusion eligibility and correctness.
-- Improves maintainability of documentation via stable numbered references in `pcc-spec.md`.
+- Improves maintainability of documentation via stable numbered references in `pcc-spec-v0.2.x.md`.
 
 ## Alternatives
 

@@ -2,7 +2,7 @@
 // pipscope — Oscilloscope GUI for Pipit PPKT streams
 //
 // Receives PPKT packets over UDP and displays real-time waveforms using
-// ImGui + ImPlot.  See doc/spec/ppkt-protocol-spec.md for protocol details.
+// ImGui + ImPlot.  See doc/spec/ppkt-protocol-spec-v0.2.x.md for protocol details.
 //
 // Usage: pipscope --port <port>
 //        pipscope -p <port>
