@@ -191,16 +191,42 @@ where
             span: e.span(),
         });
 
+    // ── Type argument: pipit type keyword parsed as Ident ──
+    // Accepts: int8, int16, int32, float, double, cfloat, cdouble
+    let type_arg = just(Token::Ident)
+        .map_with(move |_, e| {
+            let span: SimpleSpan = e.span();
+            Ident {
+                name: source[span.start()..span.end()].to_string(),
+                span,
+            }
+        })
+        .try_map(|id, span| {
+            match id.name.as_str() {
+                "int8" | "int16" | "int32" | "float" | "double" | "cfloat" | "cdouble" => Ok(id),
+                _ => Err(chumsky::error::Rich::custom(span, format!("expected pipit type (int8, int16, int32, float, double, cfloat, cdouble), found '{}'", id.name))),
+            }
+        });
+
+    // ── Type args: '<' type (',' type)* '>' (optional) ──
+    let type_args = type_arg
+        .separated_by(just(Token::Comma))
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::Lt), just(Token::Gt));
+
     let actor_call = actor_name
         .clone()
+        .then(type_args.or_not())
         .then(
             arg.separated_by(just(Token::Comma))
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::LParen), just(Token::RParen)),
         )
         .then(shape_constraint.or_not())
-        .map_with(|((name, args), shape), e| ActorCall {
+        .map_with(|(((name, type_args), args), shape), e| ActorCall {
             name,
+            type_args: type_args.unwrap_or_default(),
             args,
             shape_constraint: shape,
             span: e.span(),
@@ -1059,5 +1085,92 @@ mod tests {
             !frac_errs.is_empty(),
             "fractional shape dim should be rejected as parse error"
         );
+    }
+
+    // ── Polymorphic actor calls (v0.3.0) ────────────────────────────────
+
+    #[test]
+    fn actor_call_with_type_args() {
+        let s = parse_one_stmt("clock 1kHz t {\n  fir<float>(coeff)\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        let TaskBody::Pipeline(p) = &t.body else {
+            panic!("expected Pipeline")
+        };
+        let PipeSource::ActorCall(a) = &p.lines[0].source else {
+            panic!("expected ActorCall")
+        };
+        assert_eq!(a.name.name, "fir");
+        assert_eq!(a.type_args.len(), 1);
+        assert_eq!(a.type_args[0].name, "float");
+        assert_eq!(a.args.len(), 1);
+    }
+
+    #[test]
+    fn actor_call_with_type_args_and_shape() {
+        let s = parse_one_stmt("clock 1kHz t {\n  scale<double>(2.0)[256]\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        let TaskBody::Pipeline(p) = &t.body else {
+            panic!("expected Pipeline")
+        };
+        let PipeSource::ActorCall(a) = &p.lines[0].source else {
+            panic!("expected ActorCall")
+        };
+        assert_eq!(a.name.name, "scale");
+        assert_eq!(a.type_args.len(), 1);
+        assert_eq!(a.type_args[0].name, "double");
+        assert!(a.shape_constraint.is_some());
+    }
+
+    #[test]
+    fn actor_call_without_type_args_is_empty() {
+        let s = parse_one_stmt("clock 1kHz t {\n  mul($gain)\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        let TaskBody::Pipeline(p) = &t.body else {
+            panic!("expected Pipeline")
+        };
+        let PipeSource::ActorCall(a) = &p.lines[0].source else {
+            panic!("expected ActorCall")
+        };
+        assert!(a.type_args.is_empty());
+    }
+
+    #[test]
+    fn actor_call_with_type_args_in_pipe() {
+        let s = parse_one_stmt("clock 1kHz t {\n  adc(0) | scale<float>(2.0) | stdout()\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        let TaskBody::Pipeline(p) = &t.body else {
+            panic!("expected Pipeline")
+        };
+        let PipeElem::ActorCall(a) = &p.lines[0].elements[0] else {
+            panic!("expected ActorCall in pipe element")
+        };
+        assert_eq!(a.name.name, "scale");
+        assert_eq!(a.type_args.len(), 1);
+        assert_eq!(a.type_args[0].name, "float");
+    }
+
+    #[test]
+    fn actor_call_multiple_type_args() {
+        let s = parse_one_stmt("clock 1kHz t {\n  convert<float, double>()\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        let TaskBody::Pipeline(p) = &t.body else {
+            panic!("expected Pipeline")
+        };
+        let PipeSource::ActorCall(a) = &p.lines[0].source else {
+            panic!("expected ActorCall")
+        };
+        assert_eq!(a.type_args.len(), 2);
+        assert_eq!(a.type_args[0].name, "float");
+        assert_eq!(a.type_args[1].name, "double");
     }
 }

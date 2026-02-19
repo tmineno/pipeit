@@ -157,7 +157,9 @@ impl<'a> AnalyzeCtx<'a> {
     /// Get the output type of a node, tracing through passthrough nodes.
     fn infer_output_type(&self, node: &Node, sub: &Subgraph) -> Option<PipitType> {
         match &node.kind {
-            NodeKind::Actor { name, .. } => self.actor_meta(name).map(|m| m.out_type),
+            NodeKind::Actor { name, .. } => {
+                self.actor_meta(name).and_then(|m| m.out_type.as_concrete())
+            }
             NodeKind::Fork { .. } | NodeKind::Probe { .. } | NodeKind::BufferWrite { .. } => {
                 // Trace backwards to find upstream actor
                 self.trace_type_backward(node.id, sub)
@@ -172,7 +174,9 @@ impl<'a> AnalyzeCtx<'a> {
     /// Get the input type of a node, tracing through passthrough nodes.
     fn infer_input_type(&self, node: &Node, sub: &Subgraph) -> Option<PipitType> {
         match &node.kind {
-            NodeKind::Actor { name, .. } => self.actor_meta(name).map(|m| m.in_type),
+            NodeKind::Actor { name, .. } => {
+                self.actor_meta(name).and_then(|m| m.in_type.as_concrete())
+            }
             NodeKind::Fork { .. } | NodeKind::Probe { .. } | NodeKind::BufferRead { .. } => {
                 // Passthrough: input type == output type, trace backward
                 self.trace_type_backward(node.id, sub)
@@ -196,7 +200,7 @@ impl<'a> AnalyzeCtx<'a> {
             visited.push(current);
             let node = find_node(sub, current)?;
             if let NodeKind::Actor { name, .. } = &node.kind {
-                return self.actor_meta(name).map(|m| m.out_type);
+                return self.actor_meta(name).and_then(|m| m.out_type.as_concrete());
             }
             // Find predecessor
             let pred = sub.edges.iter().find(|e| e.target == current);

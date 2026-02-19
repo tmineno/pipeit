@@ -8,10 +8,12 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 // ── Data types ──────────────────────────────────────────────────────────────
 
 /// Pipit wire types (spec §3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PipitType {
     Int8,
     Int16,
@@ -21,6 +23,64 @@ pub enum PipitType {
     Cfloat,
     Cdouble,
     Void,
+}
+
+/// A port type expression: either a concrete Pipit type or a type parameter reference.
+///
+/// For concrete (non-polymorphic) actors, this is always `Concrete(...)`.
+/// For polymorphic actors (`template <typename T>`), port types referencing the
+/// type parameter use `TypeParam("T")`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TypeExpr {
+    Concrete(PipitType),
+    TypeParam(String),
+}
+
+impl TypeExpr {
+    /// Extract the concrete PipitType, if this is not a type parameter.
+    pub fn as_concrete(&self) -> Option<PipitType> {
+        match self {
+            TypeExpr::Concrete(t) => Some(*t),
+            TypeExpr::TypeParam(_) => None,
+        }
+    }
+
+    /// Extract the concrete PipitType, panicking if this is a type parameter.
+    /// Use only when polymorphic actors are known to be resolved.
+    pub fn unwrap_concrete(&self) -> PipitType {
+        match self {
+            TypeExpr::Concrete(t) => *t,
+            TypeExpr::TypeParam(name) => {
+                panic!("expected concrete type, found type parameter '{}'", name)
+            }
+        }
+    }
+
+    /// True if this is a concrete type (not a type parameter).
+    pub fn is_concrete(&self) -> bool {
+        matches!(self, TypeExpr::Concrete(_))
+    }
+}
+
+impl From<PipitType> for TypeExpr {
+    fn from(t: PipitType) -> Self {
+        TypeExpr::Concrete(t)
+    }
+}
+
+impl PartialEq<PipitType> for TypeExpr {
+    fn eq(&self, other: &PipitType) -> bool {
+        matches!(self, TypeExpr::Concrete(t) if t == other)
+    }
+}
+
+impl fmt::Display for TypeExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TypeExpr::Concrete(t) => write!(f, "{}", t),
+            TypeExpr::TypeParam(name) => write!(f, "{}", name),
+        }
+    }
 }
 
 impl fmt::Display for PipitType {
@@ -39,7 +99,7 @@ impl fmt::Display for PipitType {
 }
 
 /// Token count on an actor port.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TokenCount {
     /// Fixed count, e.g. `IN(float, 1)`.
     Literal(u32),
@@ -52,7 +112,7 @@ pub enum TokenCount {
 /// Each dimension is a `TokenCount` (literal or symbolic).
 /// The SDF token rate is the product of all dimensions: `|S| = Π di`.
 /// Rank-1 shapes are equivalent to the legacy scalar `TokenCount`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortShape {
     /// One dimension per rank. Rank-1 for scalar/traditional ports.
     pub dims: Vec<TokenCount>,
@@ -108,24 +168,28 @@ impl PortShape {
 }
 
 /// Whether a parameter is compile-time or runtime-swappable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParamKind {
     Param,
     RuntimeParam,
 }
 
 /// C++ type of an actor parameter.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParamType {
     Int,
     Float,
     Double,
     SpanFloat,
     SpanChar,
+    /// Type parameter reference, e.g., `PARAM(T, gain)` in a polymorphic actor.
+    TypeParam(String),
+    /// Span of type parameter, e.g., `PARAM(std::span<const T>, coeff)`.
+    SpanTypeParam(String),
 }
 
 /// A single actor parameter declaration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActorParam {
     pub kind: ParamKind,
     pub param_type: ParamType,
@@ -133,16 +197,25 @@ pub struct ActorParam {
 }
 
 /// Metadata extracted from one ACTOR() macro invocation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActorMeta {
     pub name: String,
-    pub in_type: PipitType,
+    /// Type parameters for polymorphic actors (e.g., `["T"]`). Empty for concrete actors.
+    pub type_params: Vec<String>,
+    pub in_type: TypeExpr,
     pub in_count: TokenCount,
     pub in_shape: PortShape,
-    pub out_type: PipitType,
+    pub out_type: TypeExpr,
     pub out_count: TokenCount,
     pub out_shape: PortShape,
     pub params: Vec<ActorParam>,
+}
+
+impl ActorMeta {
+    /// True if this actor is polymorphic (has type parameters).
+    pub fn is_polymorphic(&self) -> bool {
+        !self.type_params.is_empty()
+    }
 }
 
 /// Errors that can occur during registry loading.
@@ -242,6 +315,17 @@ impl Registry {
         Ok(count)
     }
 
+    /// Create an empty registry (test convenience alias for `new()`).
+    pub fn empty() -> Self {
+        Self::new()
+    }
+
+    /// Insert an actor directly (for tests). Uses a synthetic path.
+    pub fn insert(&mut self, meta: ActorMeta) {
+        let name = meta.name.clone();
+        self.actors.insert(name, (meta, PathBuf::from("<test>")));
+    }
+
     pub fn lookup(&self, name: &str) -> Option<&ActorMeta> {
         self.actors.get(name).map(|(meta, _)| meta)
     }
@@ -266,11 +350,75 @@ impl Registry {
                 .insert(name.clone(), (meta.clone(), path.clone()));
         }
     }
+    /// Load actors from a JSON manifest file (`actors.meta.json` schema v1).
+    pub fn load_manifest(&mut self, path: &Path) -> Result<usize, RegistryError> {
+        let source = std::fs::read_to_string(path).map_err(|e| RegistryError::IoError {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+
+        let manifest: Manifest =
+            serde_json::from_str(&source).map_err(|e| RegistryError::ParseError {
+                file: path.to_path_buf(),
+                line: 0,
+                message: format!("invalid manifest JSON: {}", e),
+            })?;
+
+        if manifest.schema != 1 {
+            return Err(RegistryError::ParseError {
+                file: path.to_path_buf(),
+                line: 0,
+                message: format!(
+                    "invalid actor metadata schema (expected: 1, found: {})",
+                    manifest.schema
+                ),
+            });
+        }
+
+        let count = manifest.actors.len();
+        for actor in manifest.actors {
+            if self.actors.contains_key(&actor.name) {
+                return Err(RegistryError::DuplicateActor {
+                    name: actor.name.clone(),
+                    first: path.to_path_buf(),
+                    second: path.to_path_buf(),
+                });
+            }
+            self.actors
+                .insert(actor.name.clone(), (actor, path.to_path_buf()));
+        }
+
+        Ok(count)
+    }
+
+    /// Generate a JSON manifest string from the current registry contents.
+    pub fn generate_manifest(&self) -> String {
+        let actors: Vec<&ActorMeta> = {
+            let mut v: Vec<_> = self.actors.values().map(|(m, _)| m).collect();
+            v.sort_by(|a, b| a.name.cmp(&b.name));
+            v
+        };
+        let manifest = Manifest {
+            schema: 1,
+            actors: actors.into_iter().cloned().collect(),
+        };
+        serde_json::to_string_pretty(&manifest).expect("manifest serialization should not fail")
+    }
+}
+
+// ── Manifest (actors.meta.json) ──────────────────────────────────────────────
+
+/// Top-level structure of `actors.meta.json` (schema v1).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Manifest {
+    pub schema: u32,
+    pub actors: Vec<ActorMeta>,
 }
 
 // ── Scanner ─────────────────────────────────────────────────────────────────
 
 /// Scan a source string for ACTOR() macro invocations.
+/// Recognizes both concrete actors and `template <typename T> ACTOR(...)`.
 fn scan_actors(source: &str, file: &Path) -> Result<Vec<ActorMeta>, RegistryError> {
     let stripped = strip_comments(source);
     let mut results = Vec::new();
@@ -299,6 +447,9 @@ fn scan_actors(source: &str, file: &Path) -> Result<Vec<ActorMeta>, RegistryErro
                 continue;
             }
 
+            // Check for preceding `template <typename T>` pattern
+            let type_params = extract_template_params(&stripped[..abs_idx]);
+
             // Extract balanced parentheses content
             let paren_start = abs_idx + 5; // index of '('
             match extract_balanced(bytes, paren_start, b'(', b')') {
@@ -306,7 +457,7 @@ fn scan_actors(source: &str, file: &Path) -> Result<Vec<ActorMeta>, RegistryErro
                     let inner = &stripped[paren_start + 1..content_end];
                     let line = stripped[..abs_idx].chars().filter(|&c| c == '\n').count() + 1;
 
-                    let actor = parse_actor_macro(inner, file, line)?;
+                    let actor = parse_actor_macro(inner, &type_params, file, line)?;
                     results.push(actor);
 
                     pos = content_end + 1;
@@ -326,6 +477,61 @@ fn scan_actors(source: &str, file: &Path) -> Result<Vec<ActorMeta>, RegistryErro
     }
 
     Ok(results)
+}
+
+/// Extract template type parameters from text preceding an ACTOR() call.
+/// Matches patterns like `template <typename T>` or `template <typename T, typename U>`.
+/// Returns an empty vec if no template declaration is found.
+fn extract_template_params(text_before_actor: &str) -> Vec<String> {
+    let trimmed = text_before_actor.trim_end();
+
+    // Look for '>' at the end of the preceding text
+    if !trimmed.ends_with('>') {
+        return Vec::new();
+    }
+
+    // Find matching '<'
+    let mut depth = 0i32;
+    let mut angle_start = None;
+    for (i, ch) in trimmed.char_indices().rev() {
+        match ch {
+            '>' => depth += 1,
+            '<' => {
+                depth -= 1;
+                if depth == 0 {
+                    angle_start = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let angle_start = match angle_start {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+
+    // Check that "template" keyword precedes the '<'
+    let before_angle = trimmed[..angle_start].trim_end();
+    if !before_angle.ends_with("template") {
+        return Vec::new();
+    }
+
+    // Extract type parameter names from between < and >
+    let inner = &trimmed[angle_start + 1..trimmed.len() - 1];
+    inner
+        .split(',')
+        .filter_map(|part| {
+            let part = part.trim();
+            // Accept "typename T" or "class T"
+            let name = part
+                .strip_prefix("typename ")
+                .or_else(|| part.strip_prefix("class "))
+                .map(|s| s.trim().to_string());
+            name.filter(|n| !n.is_empty())
+        })
+        .collect()
 }
 
 /// Strip C-style comments from source: `//` line comments and `/* */` blocks.
@@ -469,7 +675,12 @@ fn split_param_specs(s: &str) -> Vec<&str> {
 }
 
 /// Parse the inner content of an ACTOR(...) invocation.
-fn parse_actor_macro(inner: &str, file: &Path, line: usize) -> Result<ActorMeta, RegistryError> {
+fn parse_actor_macro(
+    inner: &str,
+    type_params: &[String],
+    file: &Path,
+    line: usize,
+) -> Result<ActorMeta, RegistryError> {
     let fields = split_top_level_commas(inner);
 
     if fields.len() < 3 {
@@ -492,8 +703,10 @@ fn parse_actor_macro(inner: &str, file: &Path, line: usize) -> Result<ActorMeta,
         });
     }
 
-    let (in_type, in_count, in_shape) = parse_port_spec(fields[1].trim(), "IN", file, line)?;
-    let (out_type, out_count, out_shape) = parse_port_spec(fields[2].trim(), "OUT", file, line)?;
+    let (in_type, in_count, in_shape) =
+        parse_port_spec(fields[1].trim(), "IN", type_params, file, line)?;
+    let (out_type, out_count, out_shape) =
+        parse_port_spec(fields[2].trim(), "OUT", type_params, file, line)?;
 
     // Collect remaining fields (params). Fields may be comma-separated (old style)
     // or space-separated within a single field (new style). Handle both.
@@ -506,13 +719,14 @@ fn parse_actor_macro(inner: &str, file: &Path, line: usize) -> Result<ActorMeta,
         // A field may contain multiple space-separated PARAM/RUNTIME_PARAM specs
         let specs = split_param_specs(trimmed);
         for spec in specs {
-            let param = parse_param_spec(spec, file, line)?;
+            let param = parse_param_spec(spec, type_params, file, line)?;
             params.push(param);
         }
     }
 
     Ok(ActorMeta {
         name,
+        type_params: type_params.to_vec(),
         in_type,
         in_count,
         in_shape,
@@ -527,12 +741,14 @@ fn parse_actor_macro(inner: &str, file: &Path, line: usize) -> Result<ActorMeta,
 ///
 /// Supports both legacy scalar counts (`IN(float, N)`) and v0.2.0
 /// `SHAPE(...)` notation (`IN(float, SHAPE(H, W, C))`).
+/// For polymorphic actors, the type field may reference a type parameter (e.g., `IN(T, N)`).
 fn parse_port_spec(
     s: &str,
     expected_prefix: &str,
+    type_params: &[String],
     file: &Path,
     line: usize,
-) -> Result<(PipitType, TokenCount, PortShape), RegistryError> {
+) -> Result<(TypeExpr, TokenCount, PortShape), RegistryError> {
     let rest = s
         .strip_prefix(expected_prefix)
         .and_then(|r| r.strip_prefix('('))
@@ -556,11 +772,16 @@ fn parse_port_spec(
         });
     }
 
-    let pipit_type = parse_pipit_type(parts[0].trim(), file, line)?;
+    let type_str = parts[0].trim();
+    let type_expr = if type_params.iter().any(|tp| tp == type_str) {
+        TypeExpr::TypeParam(type_str.to_string())
+    } else {
+        TypeExpr::Concrete(parse_pipit_type(type_str, file, line)?)
+    };
     let shape = parse_port_shape(parts[1].trim());
     let count = shape.to_scalar_count();
 
-    Ok((pipit_type, count, shape))
+    Ok((type_expr, count, shape))
 }
 
 /// Parse a port count field into a `PortShape`.
@@ -584,7 +805,13 @@ fn parse_port_shape(count_str: &str) -> PortShape {
 }
 
 /// Parse `PARAM(type, name)` or `RUNTIME_PARAM(type, name)`.
-fn parse_param_spec(s: &str, file: &Path, line: usize) -> Result<ActorParam, RegistryError> {
+/// For polymorphic actors, param types may reference type parameters.
+fn parse_param_spec(
+    s: &str,
+    type_params: &[String],
+    file: &Path,
+    line: usize,
+) -> Result<ActorParam, RegistryError> {
     let (kind, rest) = if let Some(r) = s.strip_prefix("RUNTIME_PARAM(") {
         (ParamKind::RuntimeParam, r)
     } else if let Some(r) = s.strip_prefix("PARAM(") {
@@ -617,7 +844,7 @@ fn parse_param_spec(s: &str, file: &Path, line: usize) -> Result<ActorParam, Reg
         });
     }
 
-    let param_type = parse_param_type(parts[0].trim(), file, line)?;
+    let param_type = parse_param_type(parts[0].trim(), type_params, file, line)?;
     let name = parts[1].trim().to_string();
 
     Ok(ActorParam {
@@ -647,7 +874,28 @@ fn parse_pipit_type(s: &str, file: &Path, line: usize) -> Result<PipitType, Regi
 }
 
 /// Map a type string to ParamType.
-fn parse_param_type(s: &str, file: &Path, line: usize) -> Result<ParamType, RegistryError> {
+/// For polymorphic actors, checks if the type string matches a type parameter name.
+fn parse_param_type(
+    s: &str,
+    type_params: &[String],
+    file: &Path,
+    line: usize,
+) -> Result<ParamType, RegistryError> {
+    // Check for type parameter references first
+    if type_params.iter().any(|tp| tp == s) {
+        return Ok(ParamType::TypeParam(s.to_string()));
+    }
+    // Check for std::span<const T> where T is a type parameter
+    if let Some(inner) = s
+        .strip_prefix("std::span<const ")
+        .and_then(|r| r.strip_suffix('>'))
+    {
+        let inner = inner.trim();
+        if type_params.iter().any(|tp| tp == inner) {
+            return Ok(ParamType::SpanTypeParam(inner.to_string()));
+        }
+    }
+
     match s {
         "int" | "int32" | "int32_t" | "std::int32_t" => Ok(ParamType::Int),
         "float" => Ok(ParamType::Float),
@@ -1212,6 +1460,223 @@ ACTOR(b, IN(float, 1), OUT(float, 1)) { return ACTOR_OK; }
         // "b" should be added
         assert!(base.lookup("b").is_some());
         assert_eq!(base.len(), 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Template (polymorphic) actor scanning ────────────────────────────
+
+    #[test]
+    fn scan_template_actor() {
+        let src = r#"
+template <typename T>
+ACTOR(scale, IN(T, N), OUT(T, N), PARAM(T, gain) PARAM(int, N)) {
+    for (int i = 0; i < N; ++i) out[i] = in[i] * gain;
+    return ACTOR_OK;
+}
+"#;
+        let a = scan_one(src);
+        assert_eq!(a.name, "scale");
+        assert_eq!(a.type_params, vec!["T"]);
+        assert!(a.is_polymorphic());
+        assert_eq!(a.in_type, TypeExpr::TypeParam("T".into()));
+        assert_eq!(a.out_type, TypeExpr::TypeParam("T".into()));
+        assert_eq!(a.in_count, TokenCount::Symbolic("N".into()));
+        assert_eq!(a.out_count, TokenCount::Symbolic("N".into()));
+        assert_eq!(a.params.len(), 2);
+        assert_eq!(a.params[0].param_type, ParamType::TypeParam("T".into()));
+        assert_eq!(a.params[0].name, "gain");
+        assert_eq!(a.params[1].param_type, ParamType::Int);
+        assert_eq!(a.params[1].name, "N");
+    }
+
+    #[test]
+    fn scan_template_actor_with_span_type_param() {
+        let src = r#"
+template <typename T>
+ACTOR(fir_generic, IN(T, N), OUT(T, 1), PARAM(std::span<const T>, coeff) PARAM(int, N)) {
+    return ACTOR_OK;
+}
+"#;
+        let a = scan_one(src);
+        assert_eq!(a.name, "fir_generic");
+        assert_eq!(a.type_params, vec!["T"]);
+        assert_eq!(a.in_type, TypeExpr::TypeParam("T".into()));
+        assert_eq!(a.out_type, TypeExpr::TypeParam("T".into()));
+        assert_eq!(a.params[0].param_type, ParamType::SpanTypeParam("T".into()));
+    }
+
+    #[test]
+    fn scan_concrete_actor_has_empty_type_params() {
+        let a = scan_one("ACTOR(mag, IN(cfloat, 1), OUT(float, 1)) { return ACTOR_OK; }");
+        assert!(a.type_params.is_empty());
+        assert!(!a.is_polymorphic());
+        assert_eq!(a.in_type, TypeExpr::Concrete(PipitType::Cfloat));
+        assert_eq!(a.out_type, TypeExpr::Concrete(PipitType::Float));
+    }
+
+    #[test]
+    fn scan_mixed_concrete_and_template() {
+        let src = r#"
+ACTOR(concrete_a, IN(float, 1), OUT(float, 1)) { return ACTOR_OK; }
+
+template <typename T>
+ACTOR(poly_b, IN(T, 1), OUT(T, 1)) { return ACTOR_OK; }
+
+ACTOR(concrete_c, IN(int32, 1), OUT(int32, 1)) { return ACTOR_OK; }
+"#;
+        let path = PathBuf::from("test.h");
+        let actors = scan_actors(src, &path).unwrap();
+        assert_eq!(actors.len(), 3);
+
+        assert_eq!(actors[0].name, "concrete_a");
+        assert!(!actors[0].is_polymorphic());
+
+        assert_eq!(actors[1].name, "poly_b");
+        assert!(actors[1].is_polymorphic());
+        assert_eq!(actors[1].type_params, vec!["T"]);
+
+        assert_eq!(actors[2].name, "concrete_c");
+        assert!(!actors[2].is_polymorphic());
+    }
+
+    #[test]
+    fn extract_template_params_single() {
+        let params = extract_template_params("template <typename T>\n");
+        assert_eq!(params, vec!["T"]);
+    }
+
+    #[test]
+    fn extract_template_params_multiple() {
+        let params = extract_template_params("template <typename T, typename U>\n");
+        assert_eq!(params, vec!["T", "U"]);
+    }
+
+    #[test]
+    fn extract_template_params_class_keyword() {
+        let params = extract_template_params("template <class T>\n");
+        assert_eq!(params, vec!["T"]);
+    }
+
+    #[test]
+    fn extract_template_params_none() {
+        let params = extract_template_params("some_other_code\n");
+        assert!(params.is_empty());
+    }
+
+    // ── Manifest (JSON) tests ────────────────────────────────────────────
+
+    #[test]
+    fn manifest_roundtrip() {
+        let src = r#"
+ACTOR(mul, IN(float, 1), OUT(float, 1), RUNTIME_PARAM(float, gain)) { return ACTOR_OK; }
+ACTOR(fft, IN(float, N), OUT(cfloat, N), PARAM(int, N)) { return ACTOR_OK; }
+"#;
+        let dir = std::env::temp_dir().join("pipit_test_manifest_rt");
+        std::fs::create_dir_all(&dir).unwrap();
+        let h = dir.join("actors.h");
+        std::fs::write(&h, src).unwrap();
+
+        // Load from header
+        let mut reg1 = Registry::new();
+        reg1.load_header(&h).unwrap();
+
+        // Generate manifest
+        let json = reg1.generate_manifest();
+
+        // Write and reload
+        let manifest_path = dir.join("actors.meta.json");
+        std::fs::write(&manifest_path, &json).unwrap();
+
+        let mut reg2 = Registry::new();
+        reg2.load_manifest(&manifest_path).unwrap();
+
+        // Compare
+        assert_eq!(reg2.len(), reg1.len());
+        for a1 in reg1.actors() {
+            let a2 = reg2
+                .lookup(&a1.name)
+                .expect("actor missing after roundtrip");
+            assert_eq!(a1, a2, "mismatch for actor '{}'", a1.name);
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn manifest_invalid_schema_version() {
+        let dir = std::env::temp_dir().join("pipit_test_manifest_schema");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bad_schema.json");
+        std::fs::write(&path, r#"{"schema": 99, "actors": []}"#).unwrap();
+
+        let mut reg = Registry::new();
+        let err = reg.load_manifest(&path).unwrap_err();
+        match err {
+            RegistryError::ParseError { message, .. } => {
+                assert!(
+                    message.contains("expected: 1, found: 99"),
+                    "got: {}",
+                    message
+                );
+            }
+            other => panic!("expected ParseError, got: {}", other),
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn manifest_invalid_json() {
+        let dir = std::env::temp_dir().join("pipit_test_manifest_badjson");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bad.json");
+        std::fs::write(&path, "not json at all").unwrap();
+
+        let mut reg = Registry::new();
+        let err = reg.load_manifest(&path).unwrap_err();
+        match err {
+            RegistryError::ParseError { message, .. } => {
+                assert!(
+                    message.contains("invalid manifest JSON"),
+                    "got: {}",
+                    message
+                );
+            }
+            other => panic!("expected ParseError, got: {}", other),
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn manifest_template_roundtrip() {
+        let src = r#"
+template <typename T>
+ACTOR(scale, IN(T, N), OUT(T, N), PARAM(T, gain) PARAM(int, N)) {
+    return ACTOR_OK;
+}
+"#;
+        let dir = std::env::temp_dir().join("pipit_test_manifest_poly");
+        std::fs::create_dir_all(&dir).unwrap();
+        let h = dir.join("poly.h");
+        std::fs::write(&h, src).unwrap();
+
+        let mut reg1 = Registry::new();
+        reg1.load_header(&h).unwrap();
+
+        let json = reg1.generate_manifest();
+        let manifest_path = dir.join("actors.meta.json");
+        std::fs::write(&manifest_path, &json).unwrap();
+
+        let mut reg2 = Registry::new();
+        reg2.load_manifest(&manifest_path).unwrap();
+
+        let a2 = reg2.lookup("scale").unwrap();
+        assert!(a2.is_polymorphic());
+        assert_eq!(a2.type_params, vec!["T"]);
+        assert_eq!(a2.in_type, TypeExpr::TypeParam("T".into()));
+        assert_eq!(a2.params[0].param_type, ParamType::TypeParam("T".into()));
 
         std::fs::remove_dir_all(&dir).ok();
     }

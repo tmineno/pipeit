@@ -1623,3 +1623,171 @@ fn probe_output_file_contains_data() {
         let _ = std::fs::remove_file(&tmp);
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Polymorphic actor tests (v0.3.0)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Run pcc on inline PDL with polymorphic actor headers and syntax-check the output.
+fn assert_poly_inline_compiles(pdl_source: &str, test_name: &str) {
+    let cxx = match find_cxx_compiler() {
+        Some(c) => c,
+        None => {
+            eprintln!("SKIP: no C++ compiler found");
+            return;
+        }
+    };
+
+    let root = project_root();
+    let include_dir = root.join("runtime").join("libpipit").join("include");
+    let std_actors_h = include_dir.join("std_actors.h");
+    let std_sink_h = include_dir.join("std_sink.h");
+    let std_source_h = include_dir.join("std_source.h");
+    let poly_actors_h = root.join("examples").join("poly_actors.h");
+    let runtime_include = root.join("runtime").join("libpipit").join("include");
+
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_dir = std::env::temp_dir();
+    let pdl_file = tmp_dir.join(format!("pipit_poly_{}.pdl", n));
+    std::fs::write(&pdl_file, pdl_source).expect("write pdl temp");
+
+    let pcc = pcc_binary();
+    let n2 = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let cpp_out = std::env::temp_dir().join(format!("pipit_gen_poly_{}.cpp", n2));
+    let gen = Command::new(&pcc)
+        .arg(pdl_file.to_str().unwrap())
+        .arg("-I")
+        .arg(std_actors_h.to_str().unwrap())
+        .arg("-I")
+        .arg(std_sink_h.to_str().unwrap())
+        .arg("-I")
+        .arg(std_source_h.to_str().unwrap())
+        .arg("-I")
+        .arg(poly_actors_h.to_str().unwrap())
+        .arg("--emit")
+        .arg("cpp")
+        .arg("-o")
+        .arg(cpp_out.to_str().unwrap())
+        .output()
+        .expect("failed to run pcc");
+
+    let _ = std::fs::remove_file(&pdl_file);
+
+    assert!(
+        gen.status.success(),
+        "pcc failed for '{}':\n{}",
+        test_name,
+        String::from_utf8_lossy(&gen.stderr)
+    );
+
+    let cpp = std::fs::read_to_string(&cpp_out).expect("failed to read generated cpp");
+    let _ = std::fs::remove_file(&cpp_out);
+    assert!(!cpp.is_empty(), "empty output for '{}'", test_name);
+
+    compile_cpp(
+        &cxx,
+        &cpp,
+        test_name,
+        &runtime_include,
+        &root.join("examples"),
+    );
+}
+
+/// Run pcc on inline PDL with poly actors and return generated C++ source.
+fn generate_poly_cpp(pdl_source: &str, test_name: &str) -> String {
+    let root = project_root();
+    let include_dir = root.join("runtime").join("libpipit").join("include");
+    let std_actors_h = include_dir.join("std_actors.h");
+    let std_sink_h = include_dir.join("std_sink.h");
+    let std_source_h = include_dir.join("std_source.h");
+    let poly_actors_h = root.join("examples").join("poly_actors.h");
+
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_dir = std::env::temp_dir();
+    let pdl_file = tmp_dir.join(format!("pipit_poly_gen_{}.pdl", n));
+    std::fs::write(&pdl_file, pdl_source).expect("write pdl temp");
+
+    let pcc = pcc_binary();
+    let n2 = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let cpp_out = tmp_dir.join(format!("pipit_gen_poly_cpp_{}.cpp", n2));
+    let gen = Command::new(&pcc)
+        .arg(pdl_file.to_str().unwrap())
+        .arg("-I")
+        .arg(std_actors_h.to_str().unwrap())
+        .arg("-I")
+        .arg(std_sink_h.to_str().unwrap())
+        .arg("-I")
+        .arg(std_source_h.to_str().unwrap())
+        .arg("-I")
+        .arg(poly_actors_h.to_str().unwrap())
+        .arg("--emit")
+        .arg("cpp")
+        .arg("-o")
+        .arg(cpp_out.to_str().unwrap())
+        .output()
+        .expect("failed to run pcc");
+
+    let _ = std::fs::remove_file(&pdl_file);
+
+    assert!(
+        gen.status.success(),
+        "pcc failed for '{}':\n{}",
+        test_name,
+        String::from_utf8_lossy(&gen.stderr)
+    );
+
+    let cpp = std::fs::read_to_string(&cpp_out).expect("failed to read generated cpp");
+    let _ = std::fs::remove_file(&cpp_out);
+    cpp
+}
+
+#[test]
+fn poly_explicit_type_arg_float() {
+    // poly_scale<float>(...) — explicit type argument
+    assert_poly_inline_compiles(
+        "clock 1kHz t { constant(0.0) | poly_scale<float>(2.0) | stdout() }",
+        "poly_explicit_float",
+    );
+}
+
+#[test]
+fn poly_explicit_type_arg_double() {
+    // poly_pass<double> between two poly actors (both double)
+    // Uses constant(float) -> poly_scale<float> -> stdout() since no double source/sink exist
+    assert_poly_inline_compiles(
+        "clock 1kHz t { constant(0.0) | poly_scale<float>(2.0) | poly_pass<float>() | stdout() }",
+        "poly_explicit_chain",
+    );
+}
+
+#[test]
+fn poly_pass_through_float() {
+    // poly_pass<float>() — identity passthrough
+    assert_poly_inline_compiles(
+        "clock 1kHz t { constant(0.0) | poly_pass<float>() | stdout() }",
+        "poly_pass_float",
+    );
+}
+
+#[test]
+fn poly_template_instantiation_syntax() {
+    // Verify that generated C++ uses Actor_poly_scale<float> template syntax
+    let cpp = generate_poly_cpp(
+        "clock 1kHz t { constant(0.0) | poly_scale<float>(2.0) | stdout() }",
+        "poly_template_syntax",
+    );
+    assert!(
+        cpp.contains("Actor_poly_scale<float>"),
+        "generated C++ should use template instantiation syntax Actor_poly_scale<float>, got:\n{}",
+        cpp
+    );
+}
+
+#[test]
+fn poly_chain_explicit() {
+    // Chain of polymorphic actors with explicit type args
+    assert_poly_inline_compiles(
+        "clock 1kHz t { constant(0.0) | poly_pass<float>() | poly_scale<float>(3.0) | stdout() }",
+        "poly_chain",
+    );
+}

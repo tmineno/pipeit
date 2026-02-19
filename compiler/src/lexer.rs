@@ -91,6 +91,10 @@ pub enum Token {
     Comma,
     #[token("=")]
     Equals,
+    #[token("<")]
+    Lt,
+    #[token(">")]
+    Gt,
 
     // ── Literals ──
     //
@@ -153,6 +157,8 @@ impl fmt::Display for Token {
             Token::RBracket => write!(f, "]"),
             Token::Comma => write!(f, ","),
             Token::Equals => write!(f, "="),
+            Token::Lt => write!(f, "<"),
+            Token::Gt => write!(f, ">"),
             Token::Freq(v) => write!(f, "{v}Hz"),
             Token::Size(v) => write!(f, "{v}B"),
             Token::Number(v) => write!(f, "{v}"),

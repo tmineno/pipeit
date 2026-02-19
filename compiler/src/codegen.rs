@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use crate::analyze::AnalyzedProgram;
 use crate::ast::*;
 use crate::graph::*;
+use crate::lower::LoweredProgram;
 use crate::registry::{
     ActorMeta, ParamKind, ParamType, PipitType, PortShape, Registry, TokenCount,
 };
@@ -53,8 +54,24 @@ pub fn codegen(
     registry: &Registry,
     options: &CodegenOptions,
 ) -> CodegenResult {
+    codegen_with_lowered(
+        program, resolved, graph, analysis, schedule, registry, options, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn codegen_with_lowered(
+    program: &Program,
+    resolved: &ResolvedProgram,
+    graph: &ProgramGraph,
+    analysis: &AnalyzedProgram,
+    schedule: &ScheduledProgram,
+    registry: &Registry,
+    options: &CodegenOptions,
+    lowered: Option<&LoweredProgram>,
+) -> CodegenResult {
     let mut ctx = CodegenCtx::new(
-        program, resolved, graph, analysis, schedule, registry, options,
+        program, resolved, graph, analysis, schedule, registry, options, lowered,
     );
     ctx.emit_all();
     ctx.build_result()
@@ -70,11 +87,13 @@ struct CodegenCtx<'a> {
     schedule: &'a ScheduledProgram,
     registry: &'a Registry,
     options: &'a CodegenOptions,
+    lowered: Option<&'a LoweredProgram>,
     out: String,
     diagnostics: Vec<Diagnostic>,
 }
 
 impl<'a> CodegenCtx<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         program: &'a Program,
         resolved: &'a ResolvedProgram,
@@ -83,6 +102,7 @@ impl<'a> CodegenCtx<'a> {
         schedule: &'a ScheduledProgram,
         registry: &'a Registry,
         options: &'a CodegenOptions,
+        lowered: Option<&'a LoweredProgram>,
     ) -> Self {
         CodegenCtx {
             program,
@@ -92,9 +112,39 @@ impl<'a> CodegenCtx<'a> {
             schedule,
             registry,
             options,
+            lowered,
             out: String::with_capacity(8192),
             diagnostics: Vec::new(),
         }
+    }
+
+    /// Look up the concrete actor metadata for a call, preferring the lowered
+    /// program (which has monomorphized metadata for polymorphic actors) over
+    /// the raw registry.
+    fn lookup_actor(&self, actor_name: &str, call_span: Span) -> Option<&ActorMeta> {
+        // First check lowered program for concrete (possibly monomorphized) metadata
+        if let Some(lowered) = self.lowered {
+            if let Some(meta) = lowered.concrete_actors.get(&call_span) {
+                return Some(meta);
+            }
+        }
+        // Fall back to registry
+        self.registry.lookup(actor_name)
+    }
+
+    /// Format the C++ actor struct name, including template parameters for
+    /// polymorphic actors (e.g., `Actor_scale<float>`).
+    fn actor_cpp_name(&self, actor_name: &str, call_span: Span) -> String {
+        if let Some(lowered) = self.lowered {
+            if let Some(types) = lowered.type_instantiations.get(&call_span) {
+                if !types.is_empty() {
+                    let type_args: Vec<&str> =
+                        types.iter().map(|t| pipit_type_to_cpp(*t)).collect();
+                    return format!("Actor_{}<{}>", actor_name, type_args.join(", "));
+                }
+            }
+        }
+        format!("Actor_{}", actor_name)
     }
 
     fn build_result(self) -> CodegenResult {
@@ -199,12 +249,18 @@ impl<'a> CodegenCtx<'a> {
         for task_graph in self.graph.tasks.values() {
             for sub in subgraphs_of(task_graph) {
                 for node in &sub.nodes {
-                    if let NodeKind::Actor { name, args, .. } = &node.kind {
+                    if let NodeKind::Actor {
+                        name,
+                        call_span,
+                        args,
+                        ..
+                    } = &node.kind
+                    {
                         for (i, arg) in args.iter().enumerate() {
                             if let Arg::ParamRef(ident) = arg {
                                 if ident.name == param_name {
-                                    // Found the actor+position; look up type in registry
-                                    if let Some(meta) = self.registry.lookup(name) {
+                                    // Found the actor+position; look up type
+                                    if let Some(meta) = self.lookup_actor(name, *call_span) {
                                         if let Some(p) = meta.params.get(i) {
                                             return match p.param_type {
                                                 ParamType::Int => "int",
@@ -635,9 +691,9 @@ impl<'a> CodegenCtx<'a> {
         match &node.kind {
             NodeKind::Actor {
                 name,
+                call_span,
                 args,
                 shape_constraint,
-                ..
             } => {
                 // Use explicit shape constraint, or inferred from analysis
                 let effective_sc = shape_constraint
@@ -649,6 +705,7 @@ impl<'a> CodegenCtx<'a> {
                     sched,
                     node,
                     name,
+                    *call_span,
                     args,
                     effective_sc,
                     ind,
@@ -692,21 +749,21 @@ impl<'a> CodegenCtx<'a> {
         sched: &SubgraphSchedule,
         node: &Node,
         actor_name: &str,
+        call_span: Span,
         args: &[Arg],
         shape_constraint: Option<&ShapeConstraint>,
         indent: &str,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
     ) {
-        let meta = self.registry.lookup(actor_name);
-        if meta.is_none() {
-            return;
-        }
-        let meta = meta.unwrap();
+        let meta = match self.lookup_actor(actor_name, call_span) {
+            Some(m) => m.clone(),
+            None => return,
+        };
 
-        let in_count = self.resolve_port_rate_val(&meta.in_shape, meta, args, shape_constraint);
-        let out_count = self.resolve_port_rate_val(&meta.out_shape, meta, args, shape_constraint);
-        let in_cpp = pipit_type_to_cpp(meta.in_type);
-        let _out_cpp = pipit_type_to_cpp(meta.out_type);
+        let in_count = self.resolve_port_rate_val(&meta.in_shape, &meta, args, shape_constraint);
+        let out_count = self.resolve_port_rate_val(&meta.out_shape, &meta, args, shape_constraint);
+        let in_cpp = pipit_type_to_cpp(meta.in_type.unwrap_concrete());
+        let _out_cpp = pipit_type_to_cpp(meta.out_type.unwrap_concrete());
 
         // Input: find upstream edge buffers
         let incoming_edges: Vec<&Edge> = sub.edges.iter().filter(|e| e.target == node.id).collect();
@@ -809,22 +866,23 @@ impl<'a> CodegenCtx<'a> {
         // couldn't be resolved from args or shape constraints.  The SDF solver
         // computes per-edge token counts that give us the correct value.
         let schedule_dim_overrides =
-            self.build_schedule_dim_overrides(meta, args, shape_constraint, sched, node.id, sub);
+            self.build_schedule_dim_overrides(&meta, args, shape_constraint, sched, node.id, sub);
 
         // Construct actor and fire, check return value
         let params = self.format_actor_params(
             task_name,
-            meta,
+            &meta,
             args,
             shape_constraint,
             &schedule_dim_overrides,
         );
+        let cpp_name = self.actor_cpp_name(actor_name, call_span);
         let call = if params.is_empty() {
-            format!("Actor_{}{{}}({}, {})", actor_name, in_ptr, out_ptr)
+            format!("{}{{}}({}, {})", cpp_name, in_ptr, out_ptr)
         } else {
             format!(
-                "Actor_{}{{{}}}.operator()({}, {})",
-                actor_name, params, in_ptr, out_ptr
+                "{}{{{}}}.operator()({}, {})",
+                cpp_name, params, in_ptr, out_ptr
             )
         };
         let _ = writeln!(self.out, "{}if ({} != ACTOR_OK) {{", indent, call);
@@ -1939,9 +1997,11 @@ impl<'a> CodegenCtx<'a> {
             }
             if let Some(node) = find_node(sub, current) {
                 match &node.kind {
-                    NodeKind::Actor { name, .. } => {
-                        if let Some(meta) = self.registry.lookup(name) {
-                            return meta.out_type;
+                    NodeKind::Actor {
+                        name, call_span, ..
+                    } => {
+                        if let Some(meta) = self.lookup_actor(name, *call_span) {
+                            return meta.out_type.unwrap_concrete();
                         }
                         return PipitType::Float;
                     }
@@ -2882,6 +2942,179 @@ mod tests {
         assert!(
             cpp.contains("Actor_delay"),
             "feedback.pdl should have delay actor"
+        );
+    }
+
+    // ── Polymorphic actor tests (v0.3.0) ─────────────────────────────────
+
+    fn poly_registry() -> Registry {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let mut reg = test_registry();
+        let poly_actors = root.join("examples/poly_actors.h");
+        reg.load_header(&poly_actors)
+            .expect("failed to load poly_actors.h");
+        reg
+    }
+
+    /// Run the full pipeline (with type_infer + lower) and return generated C++.
+    fn codegen_poly_ok(source: &str, registry: &Registry) -> String {
+        let parse_result = crate::parser::parse(source);
+        assert!(
+            parse_result.errors.is_empty(),
+            "parse errors: {:?}",
+            parse_result.errors
+        );
+        let program = parse_result.program.expect("parse failed");
+        let resolve_result = resolve::resolve(&program, registry);
+        assert!(
+            resolve_result
+                .diagnostics
+                .iter()
+                .all(|d| d.level != DiagLevel::Error),
+            "resolve errors: {:#?}",
+            resolve_result.diagnostics
+        );
+
+        // Type inference
+        let type_infer_result =
+            crate::type_infer::type_infer(&program, &resolve_result.resolved, registry);
+        assert!(
+            type_infer_result
+                .diagnostics
+                .iter()
+                .all(|d| d.level != DiagLevel::Error),
+            "type_infer errors: {:#?}",
+            type_infer_result.diagnostics
+        );
+
+        // Lowering
+        let lower_result = crate::lower::lower_and_verify(
+            &program,
+            &resolve_result.resolved,
+            &type_infer_result.typed,
+            registry,
+        );
+        assert!(
+            !lower_result.has_errors(),
+            "lower errors: {:#?}",
+            lower_result.diagnostics
+        );
+        assert!(
+            lower_result.cert.all_pass(),
+            "L1-L5 cert failed: {:?}",
+            lower_result.cert
+        );
+
+        let graph_result = crate::graph::build_graph(&program, &resolve_result.resolved, registry);
+        assert!(
+            graph_result
+                .diagnostics
+                .iter()
+                .all(|d| d.level != DiagLevel::Error),
+            "graph errors: {:#?}",
+            graph_result.diagnostics
+        );
+        let analysis_result = crate::analyze::analyze(
+            &program,
+            &resolve_result.resolved,
+            &graph_result.graph,
+            registry,
+        );
+        assert!(
+            analysis_result
+                .diagnostics
+                .iter()
+                .all(|d| d.level != DiagLevel::Error),
+            "analysis errors: {:#?}",
+            analysis_result.diagnostics
+        );
+        let schedule_result = crate::schedule::schedule(
+            &program,
+            &resolve_result.resolved,
+            &graph_result.graph,
+            &analysis_result.analysis,
+            registry,
+        );
+        assert!(
+            schedule_result
+                .diagnostics
+                .iter()
+                .all(|d| d.level != DiagLevel::Error),
+            "schedule errors: {:#?}",
+            schedule_result.diagnostics
+        );
+
+        let result = codegen_with_lowered(
+            &program,
+            &resolve_result.resolved,
+            &graph_result.graph,
+            &analysis_result.analysis,
+            &schedule_result.schedule,
+            registry,
+            &CodegenOptions {
+                release: false,
+                include_paths: vec![],
+            },
+            Some(&lower_result.lowered),
+        );
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "unexpected codegen errors: {:#?}",
+            errors
+        );
+        result.generated.cpp_source
+    }
+
+    #[test]
+    fn poly_scale_explicit_float_template_syntax() {
+        let reg = poly_registry();
+        let cpp = codegen_poly_ok(
+            "clock 1kHz t { constant(0.0) | poly_scale<float>(2.0) | stdout() }",
+            &reg,
+        );
+        assert!(
+            cpp.contains("Actor_poly_scale<float>"),
+            "should emit template instantiation Actor_poly_scale<float>, got:\n{}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn poly_pass_explicit_float_template_syntax() {
+        let reg = poly_registry();
+        let cpp = codegen_poly_ok(
+            "clock 1kHz t { constant(0.0) | poly_pass<float>() | stdout() }",
+            &reg,
+        );
+        assert!(
+            cpp.contains("Actor_poly_pass<float>"),
+            "should emit Actor_poly_pass<float>, got:\n{}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn poly_non_polymorphic_unchanged() {
+        // Non-polymorphic actors should still emit Actor_name{} (no template syntax)
+        let reg = poly_registry();
+        let cpp = codegen_poly_ok("clock 1kHz t { constant(0.0) | stdout() }", &reg);
+        assert!(
+            cpp.contains("Actor_constant{"),
+            "non-polymorphic actor should use Actor_constant{{}} syntax, got:\n{}",
+            cpp
+        );
+        // Should NOT have any template angle brackets for constant/stdout
+        assert!(
+            !cpp.contains("Actor_constant<"),
+            "non-polymorphic actor should not have template syntax"
         );
     }
 }

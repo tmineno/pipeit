@@ -41,6 +41,18 @@ struct Cli {
     #[arg(long)]
     actor_path: Vec<PathBuf>,
 
+    /// Actor metadata manifest file (actors.meta.json)
+    #[arg(long)]
+    actor_meta: Option<PathBuf>,
+
+    /// Cache directory for generated manifests
+    #[arg(long, default_value = ".pcc-cache")]
+    meta_cache_dir: PathBuf,
+
+    /// Disable manifest cache
+    #[arg(long)]
+    no_meta_cache: bool,
+
     /// Output stage
     #[arg(long, value_enum, default_value_t = EmitStage::Exe)]
     emit: EmitStage,
@@ -144,6 +156,48 @@ fn main() {
         );
     }
 
+    // ── Type inference & monomorphization ──
+    let type_infer_result =
+        pcc::type_infer::type_infer(&program, &resolve_result.resolved, &registry);
+    let type_infer_has_errors =
+        print_pipeline_diags(&cli.source, &source, &type_infer_result.diagnostics);
+    if type_infer_has_errors {
+        std::process::exit(EXIT_COMPILE_ERROR);
+    }
+
+    if cli.verbose {
+        let mono_count = type_infer_result.typed.mono_actors.len();
+        let widening_count = type_infer_result.typed.widenings.len();
+        eprintln!(
+            "pcc: type inference complete, {} monomorphized, {} widenings",
+            mono_count, widening_count
+        );
+    }
+
+    // ── Typed lowering & verification ──
+    let lower_result = pcc::lower::lower_and_verify(
+        &program,
+        &resolve_result.resolved,
+        &type_infer_result.typed,
+        &registry,
+    );
+    let lower_has_errors = print_pipeline_diags(&cli.source, &source, &lower_result.diagnostics);
+    if lower_has_errors {
+        std::process::exit(EXIT_COMPILE_ERROR);
+    }
+    if !lower_result.cert.all_pass() {
+        eprintln!("error: lowering verification failed (L1-L5 obligations not met)");
+        std::process::exit(EXIT_COMPILE_ERROR);
+    }
+
+    if cli.verbose {
+        eprintln!(
+            "pcc: lowering complete, {} concrete actors, {} widening nodes, L1-L5 pass",
+            lower_result.lowered.concrete_actors.len(),
+            lower_result.lowered.widening_nodes.len(),
+        );
+    }
+
     // ── Graph construction ──
     let graph_result = pcc::graph::build_graph(&program, &resolve_result.resolved, &registry);
     let graph_has_errors = print_pipeline_diags(&cli.source, &source, &graph_result.diagnostics);
@@ -231,7 +285,7 @@ fn main() {
         release: cli.release,
         include_paths: loaded_headers.clone(),
     };
-    let codegen_result = pcc::codegen::codegen(
+    let codegen_result = pcc::codegen::codegen_with_lowered(
         &program,
         &resolve_result.resolved,
         &graph_result.graph,
@@ -239,6 +293,7 @@ fn main() {
         &schedule_result.schedule,
         &registry,
         &codegen_options,
+        Some(&lower_result.lowered),
     );
 
     let codegen_has_errors =
@@ -364,7 +419,62 @@ fn main() {
 fn load_actor_registry(
     cli: &Cli,
 ) -> Result<(pcc::registry::Registry, Vec<PathBuf>), (String, i32)> {
-    // -I accepts both files and directories; expand directories into headers.
+    // If --actor-meta is provided, load directly from manifest
+    if let Some(ref meta_path) = cli.actor_meta {
+        let meta_path = std::fs::canonicalize(meta_path)
+            .map_err(|e| (format!("{}: {}", meta_path.display(), e), EXIT_USAGE_ERROR))?;
+
+        let mut registry = pcc::registry::Registry::new();
+        registry
+            .load_manifest(&meta_path)
+            .map_err(map_registry_error)?;
+
+        if cli.verbose {
+            eprintln!(
+                "pcc: loaded {} actors from manifest {}",
+                registry.len(),
+                meta_path.display()
+            );
+        }
+
+        // Still collect headers for -include flags during C++ compilation
+        let all_headers = collect_all_headers(cli)?;
+        return Ok((registry, all_headers));
+    }
+
+    // Otherwise, load from headers (existing behavior)
+    load_actor_registry_from_headers(cli)
+}
+
+/// Collect all header paths from -I and --actor-path for C++ compilation.
+fn collect_all_headers(cli: &Cli) -> Result<Vec<PathBuf>, (String, i32)> {
+    let canonicalized_includes = canonicalize_all(&cli.include, EXIT_USAGE_ERROR)?;
+    let mut include_headers = Vec::new();
+    for path in canonicalized_includes {
+        if path.is_dir() {
+            let mut discovered = BTreeSet::new();
+            discover_headers_recursive(&path, &mut discovered)?;
+            include_headers.extend(discovered);
+        } else {
+            include_headers.push(path);
+        }
+    }
+    let actor_path_headers = discover_actor_headers(&cli.actor_path)?;
+
+    let mut all_headers = Vec::new();
+    all_headers.extend(actor_path_headers);
+    all_headers.extend(include_headers);
+
+    let mut dedup = BTreeSet::new();
+    all_headers.retain(|p| dedup.insert(p.clone()));
+
+    Ok(all_headers)
+}
+
+/// Load actor registry from header scanning (pre-v0.3.0 behavior).
+fn load_actor_registry_from_headers(
+    cli: &Cli,
+) -> Result<(pcc::registry::Registry, Vec<PathBuf>), (String, i32)> {
     let canonicalized_includes = canonicalize_all(&cli.include, EXIT_USAGE_ERROR)?;
     let mut include_headers = Vec::new();
     for path in canonicalized_includes {

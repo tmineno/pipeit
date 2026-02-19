@@ -16,6 +16,9 @@ path = "src/lib.rs"
 chumsky = "0.10"
 clap = { version = "4", features = ["derive"] }
 logos = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

@@ -700,6 +700,7 @@ fn substitute_elem(elem: &PipeElem, arg_map: &HashMap<String, Arg>) -> PipeElem 
 fn substitute_actor_call(call: &ActorCall, arg_map: &HashMap<String, Arg>) -> ActorCall {
     ActorCall {
         name: call.name.clone(),
+        type_args: call.type_args.clone(),
         args: call
             .args
             .iter()

@@ -184,11 +184,14 @@ pub struct Sink {
     pub span: Span,
 }
 
-// ── actor_call: IDENT '(' args? ')' shape_constraint? ──
+// ── actor_call: IDENT ('<' type_arg (',' type_arg)* '>')? '(' args? ')' shape_constraint? ──
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActorCall {
     pub name: Ident,
+    /// Optional explicit type arguments: `actor<float, double>(...)` (v0.3.0).
+    /// Empty for non-polymorphic calls or inferred calls.
+    pub type_args: Vec<Ident>,
     pub args: Vec<Arg>,
     /// Optional shape constraint: `actor(...)[d0, d1, ...]` (v0.2.0).
     pub shape_constraint: Option<ShapeConstraint>,

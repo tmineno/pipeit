@@ -557,6 +557,32 @@ impl<'a> ResolveCtx<'a> {
             self.resolved
                 .call_resolutions
                 .insert(call.span, CallResolution::Actor);
+
+            // Validate type arguments for polymorphic actors
+            if let Some(meta) = self.registry.lookup(name) {
+                if !call.type_args.is_empty() && meta.type_params.is_empty() {
+                    self.error(
+                        call.name.span,
+                        format!(
+                            "actor '{}' is not polymorphic but was called with type arguments",
+                            name
+                        ),
+                    );
+                } else if !call.type_args.is_empty()
+                    && call.type_args.len() != meta.type_params.len()
+                {
+                    self.error(
+                        call.name.span,
+                        format!(
+                            "actor '{}' expects {} type argument(s), found {}",
+                            name,
+                            meta.type_params.len(),
+                            call.type_args.len()
+                        ),
+                    );
+                }
+                // Note: polymorphic actor with no type_args is valid (inferred)
+            }
         } else {
             self.diagnostics.push(Diagnostic {
                 level: DiagLevel::Error,
