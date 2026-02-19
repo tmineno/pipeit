@@ -35,7 +35,7 @@ usage() {
 Usage: run_all.sh [options]
 
 Core options:
-  --filter <category>      Repeatable. Categories: compiler, ringbuf, timer, thread, pdl, all
+  --filter <category>      Repeatable. Categories: compiler, ringbuf, timer, thread, pdl, profile, all
   --output-dir <path>      Output directory for benchmark artifacts and report
 
 Report options:
@@ -402,6 +402,25 @@ run_benchmarks() {
             fi
         fi
 
+        echo ""
+    fi
+
+    if should_run "profile"; then
+        echo "[6/6] Block profile benchmarks (uftrace)"
+        if command -v uftrace >/dev/null 2>&1; then
+            if "$SCRIPT_DIR/profile_bench.sh" \
+                --output-dir "$BENCH_OUTPUT_DIR/profile" \
+                --duration 2s \
+                >"$BENCH_OUTPUT_DIR/profile_bench.txt" 2>&1; then
+                run_section "profile" "pass"
+            else
+                run_section "profile" "fail"
+                FINAL_EXIT=1
+            fi
+        else
+            echo "  uftrace not installed, skipping"
+            run_section "profile" "skip"
+        fi
         echo ""
     fi
 
