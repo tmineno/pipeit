@@ -79,21 +79,32 @@
 
 ### Phase 2: Compiler Implementation
 
+- [ ] **Runtime / ACTOR macro**:
+  - [ ] Support `template <typename T> ACTOR(name, IN(T, N), ...)` expansion as class template
+  - [ ] Ensure generated class template instantiates correctly via `actor_name<float>` etc.
+
+- [ ] **Registry scanner** (pcc):
+  - [ ] Detect `template <typename T> ACTOR(...)` pattern and record type parameter `T`
+  - [ ] Store parametric IN/OUT/PARAM types (e.g., `IN(T, N)` with `T` unresolved)
+  - [ ] Textual type substitution at monomorphization (`T` → `float`, etc.)
+
 - [ ] **Frontend updates**:
-  - [ ] Parser/AST support for generic actor calls
-  - [ ] Resolver support for polymorphic actor symbols
+  - [ ] Parser/AST support for `actor<type>(...)` call syntax
+  - [ ] Resolver support for polymorphic actor symbols (lookup by base name)
   - [ ] Generic argument validation and arity checks
 
 - [ ] **Type engine updates**:
   - [ ] Constraint collection + unification for actor I/O and arguments
   - [ ] Principal type computation for `const`/`param`
-  - [ ] Deterministic implicit widening insertion (safe edges only)
+  - [ ] Deterministic implicit widening insertion (`int8->...->double`, `cfloat->cdouble`)
+  - [ ] Narrowing conversion warnings (SHOULD-level, lang-spec §3.4)
   - [ ] Ambiguity diagnostics with concrete fix suggestions
   - [ ] Lowering certificate generation (`Lower(G)->(G', Cert)`)
   - [ ] Obligation verifier for L1-L5 (type/rate/shape/mono/no-fallback)
 
 - [ ] **Monomorphization + codegen**:
-  - [ ] Materialize typed instances (`foo<float>`, `foo<double>`) once per program
+  - [ ] Materialize typed instances (`actor<float>`, `actor<double>`) once per program
+  - [ ] Generate C++ code referencing class template instantiations (e.g., `actor_scale<float>`)
   - [ ] Define `TypedScheduledIR` as single downstream contract
   - [ ] Ensure schedule/analysis/codegen consume the same typed graph
   - [ ] Make codegen syntax-directed from IR (no re-inference / no fallback typing)
@@ -102,7 +113,8 @@
 - [ ] **Tests**:
   - [ ] Positive/negative type inference tests
   - [ ] Ambiguity and mismatch diagnostic golden tests
-  - [ ] Codegen compile tests for multiple instantiations per actor
+  - [ ] Codegen compile tests for `template <typename T> ACTOR(...)` instantiations
+  - [ ] Narrowing warning golden tests
 
 ---
 
