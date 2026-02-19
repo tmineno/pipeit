@@ -89,47 +89,47 @@
   - [x] Keep lossy / semantic conversions explicit (`double -> float`, `cfloat -> float`, etc.)
   - [x] Add warnings for suspicious narrowing in explicit conversions (lang-spec §3.4)
 
-### Phase 2: Compiler Implementation
+### Phase 2: Compiler Implementation (Priority / Complexity / Dependencies)
 
-- [ ] **Runtime / ACTOR macro**:
+- [ ] **1) P0 / Low-Medium Complexity: Runtime / ACTOR Macro Foundation**
   - [ ] Support `template <typename T> ACTOR(name, IN(T, N), ...)` expansion as class template
   - [ ] Ensure generated class template instantiates correctly via `actor_name<float>` etc.
 
-- [ ] **Actor metadata manifest pipeline** (pcc):
+- [ ] **2) P0 / Medium Complexity: Actor Metadata Manifest Pipeline (pcc)**
   - [ ] Define `actors.meta.json` schema v1 (name/type params/ports/params/runtime_params)
-  - [ ] Implement actor-meta generator from `ACTOR(...)` declarations (`-I` / `--actor-path`)
   - [ ] Support direct manifest input (`--actor-meta`) with schema/version validation
   - [ ] Build ActorRegistry from manifest (including `template <typename T>` metadata)
+  - [ ] Implement actor-meta generator from `ACTOR(...)` declarations (`-I` / `--actor-path`)
   - [ ] Add manifest cache (`--meta-cache-dir`, `--no-meta-cache`) with header-hash invalidation
-  - [ ] Keep monomorphization type substitution (`T` → concrete type) driven by manifest metadata
 
-- [ ] **Frontend updates**:
+- [ ] **3) P0 / Medium Complexity: Frontend Updates**
   - [ ] Parser/AST support for `actor<type>(...)` call syntax
   - [ ] Resolver support for polymorphic actor symbols (lookup by base name)
   - [ ] Generic argument validation and arity checks
 
-- [ ] **Type engine updates**:
+- [ ] **4) P0-P1 / High Complexity: Type Engine Updates**
   - [ ] Constraint collection + unification for actor I/O and arguments
   - [ ] Principal type computation for `const`/`param`
   - [ ] Deterministic implicit widening insertion (`int8->...->double`, `cfloat->cdouble`)
-  - [ ] Narrowing conversion warnings (SHOULD-level, lang-spec §3.4)
   - [ ] Ambiguity diagnostics with concrete fix suggestions
+  - [ ] Narrowing conversion warnings (SHOULD-level, lang-spec §3.4)
   - [ ] Lowering certificate generation (`Lower(G)->(G', Cert)`)
   - [ ] Obligation verifier for L1-L5 (type/rate/shape/mono/no-fallback)
 
-- [ ] **Monomorphization + codegen**:
+- [ ] **5) P1 / High Complexity: Monomorphization + Codegen Integration**
   - [ ] Materialize typed instances (`actor<float>`, `actor<double>`) once per program
+  - [ ] Keep monomorphization type substitution (`T` → concrete type) driven by manifest metadata
   - [ ] Generate C++ code referencing class template instantiations (e.g., `actor_scale<float>`)
   - [ ] Define `TypedScheduledIR` as single downstream contract
   - [ ] Ensure schedule/analysis/codegen consume the same typed graph
   - [ ] Make codegen syntax-directed from IR (no re-inference / no fallback typing)
   - [ ] Preserve existing runtime/ABI behavior for non-generic actors
 
-- [ ] **Tests**:
-  - [ ] Positive/negative type inference tests
-  - [ ] Ambiguity and mismatch diagnostic golden tests
+- [ ] **6) P1 / Medium Complexity: Tests (Incremental Additions)**
   - [ ] Manifest loading tests (valid/invalid schema, missing fields, duplicate actor names)
   - [ ] Manifest generation fallback tests (`-I`/`--actor-path` → `actors.meta.json`)
+  - [ ] Positive/negative type inference tests
+  - [ ] Ambiguity and mismatch diagnostic golden tests
   - [ ] Codegen compile tests for `template <typename T> ACTOR(...)` instantiations
   - [ ] Narrowing warning golden tests
 
