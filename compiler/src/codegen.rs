@@ -755,8 +755,8 @@ impl<'a> CodegenCtx<'a> {
 
         let in_count = self.resolve_port_rate_val(&meta.in_shape, meta, args, shape_constraint);
         let out_count = self.resolve_port_rate_val(&meta.out_shape, meta, args, shape_constraint);
-        let in_cpp = pipit_type_to_cpp(meta.in_type.unwrap_concrete());
-        let _out_cpp = pipit_type_to_cpp(meta.out_type.unwrap_concrete());
+        let in_cpp = pipit_type_to_cpp(meta.in_type.as_concrete().unwrap_or(PipitType::Float));
+        let _out_cpp = pipit_type_to_cpp(meta.out_type.as_concrete().unwrap_or(PipitType::Float));
 
         // Input: find upstream edge buffers
         let incoming_edges: Vec<&Edge> = sub.edges.iter().filter(|e| e.target == node.id).collect();
@@ -1867,14 +1867,20 @@ impl<'a> CodegenCtx<'a> {
                     parts.push(val.to_string());
                 } else if let Some(array_arg) = last_array_const {
                     // Auto-fill span param from prior array const
-                    if matches!(param.param_type, ParamType::SpanFloat | ParamType::SpanChar) {
+                    if matches!(
+                        param.param_type,
+                        ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
+                    ) {
                         parts.push(self.arg_to_cpp_value(array_arg, &param.param_type));
                         last_array_const = None;
                     }
                 }
             } else if let Some(array_arg) = last_array_const {
                 // Auto-fill span param from prior array const (runtime param case)
-                if matches!(param.param_type, ParamType::SpanFloat | ParamType::SpanChar) {
+                if matches!(
+                    param.param_type,
+                    ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
+                ) {
                     parts.push(self.arg_to_cpp_value(array_arg, &param.param_type));
                     last_array_const = None;
                 }
@@ -1960,8 +1966,12 @@ impl<'a> CodegenCtx<'a> {
                             Value::Scalar(s) => return self.scalar_literal(s),
                             Value::Array(elems, _) => {
                                 // For span params, use std::span
-                                if matches!(param_type, ParamType::SpanFloat | ParamType::SpanChar)
-                                {
+                                if matches!(
+                                    param_type,
+                                    ParamType::SpanFloat
+                                        | ParamType::SpanChar
+                                        | ParamType::SpanTypeParam(_)
+                                ) {
                                     return format!(
                                         "std::span<const float>(_const_{}, {})",
                                         ident.name,
@@ -1994,7 +2004,7 @@ impl<'a> CodegenCtx<'a> {
                         name, call_span, ..
                     } => {
                         if let Some(meta) = self.lookup_actor(name, *call_span) {
-                            return meta.out_type.unwrap_concrete();
+                            return meta.out_type.as_concrete().unwrap_or(PipitType::Float);
                         }
                         return PipitType::Float;
                     }
@@ -2125,7 +2135,10 @@ impl<'a> CodegenCtx<'a> {
             if param.kind != ParamKind::Param {
                 continue;
             }
-            if !matches!(param.param_type, ParamType::SpanFloat | ParamType::SpanChar) {
+            if !matches!(
+                param.param_type,
+                ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
+            ) {
                 continue;
             }
             if let Some(arg) = actor_args.get(idx) {

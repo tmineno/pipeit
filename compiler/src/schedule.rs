@@ -511,7 +511,10 @@ impl<'a> ScheduleCtx<'a> {
             if param.kind != ParamKind::Param {
                 continue;
             }
-            if !matches!(param.param_type, ParamType::SpanFloat | ParamType::SpanChar) {
+            if !matches!(
+                param.param_type,
+                ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
+            ) {
                 continue;
             }
             if let Some(arg) = actor_args.get(idx) {

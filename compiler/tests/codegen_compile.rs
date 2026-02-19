@@ -447,8 +447,9 @@ fn runtime_param() {
 
 #[test]
 fn runtime_param_integer_default() {
-    // Param with integer default consumed by float actor should fail strict typing.
-    assert_inline_fails(
+    // With polymorphism (v0.3.0), mul<T> gets T=float from upstream pipe context.
+    // Integer param value is implicitly widened to float at the C++ level.
+    assert_inline_compiles(
         "param gain = 1\nclock 1kHz t { constant(0.0) | mul($gain) | stdout() }",
         "runtime_param_int",
     );

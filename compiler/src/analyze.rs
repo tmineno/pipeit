@@ -727,7 +727,10 @@ impl<'a> AnalyzeCtx<'a> {
             if param.kind != ParamKind::Param {
                 continue;
             }
-            if !matches!(param.param_type, ParamType::SpanFloat | ParamType::SpanChar) {
+            if !matches!(
+                param.param_type,
+                ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
+            ) {
                 continue;
             }
             if let Some(arg) = actor_args.get(idx) {
@@ -1526,6 +1529,13 @@ fn infer_param_type(scalar: &Scalar) -> Option<ParamType> {
 
 /// Check if inferred param type exactly matches expected actor param type.
 fn param_type_compatible(inferred: &ParamType, expected: &ParamType) -> bool {
+    // TypeParam / SpanTypeParam are polymorphic — type_infer validates the concrete match
+    if matches!(
+        expected,
+        ParamType::TypeParam(_) | ParamType::SpanTypeParam(_)
+    ) {
+        return true;
+    }
     inferred == expected
 }
 
@@ -1697,15 +1707,45 @@ mod tests {
     #[test]
     fn type_check_mismatch() {
         let reg = test_registry();
-        // fft outputs cfloat, but fir expects float → type mismatch
+        // fft outputs cfloat, but stdout expects float → type mismatch
+        // (uses concrete actors; polymorphic actors defer type checks to type_infer)
         let result = analyze_source(
-            "clock 1kHz t {\n    constant(0.0) | fft(256) | fir(5) | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | stdout()\n}",
             &reg,
         );
         assert!(
             has_error(&result, "type mismatch"),
             "expected type mismatch error, got: {:#?}",
             result.diagnostics
+        );
+    }
+
+    #[test]
+    fn polymorphic_fir_rate_resolution() {
+        let reg = test_registry();
+        // Polymorphic fir with span arg: N resolved from coeff array length.
+        // Verifies that SpanTypeParam("T") is handled by infer_dim_param_from_span_args.
+        let result = analyze_ok(
+            "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\nclock 1kHz t {\n    constant(0.0) | fir(coeff) | stdout()\n}",
+            &reg,
+        );
+        let rv = result
+            .analysis
+            .repetition_vectors
+            .get(&("t".to_string(), "pipeline".to_string()))
+            .expect("rv missing");
+        // fir(coeff) with 5-element array → N=5 → rate should be resolved
+        assert!(!rv.is_empty(), "repetition vector should not be empty");
+    }
+
+    #[test]
+    fn polymorphic_mul_passthrough_rate() {
+        let reg = test_registry();
+        // Polymorphic mul with upstream float: T=float, rate 1:1 passthrough.
+        // Verifies polymorphic actors work in analyze without type_infer.
+        analyze_ok(
+            "clock 1kHz t {\n    constant(0.0) | mul(2.5) | stdout()\n}",
+            &reg,
         );
     }
 
@@ -2008,9 +2048,10 @@ mod tests {
     #[test]
     fn param_type_int_to_float_mismatch_error() {
         let reg = test_registry();
-        // param gain = 1 (int), mul has RUNTIME_PARAM(float, gain) -> mismatch
+        // param val = 1 (int), constant has RUNTIME_PARAM(float, value) -> mismatch
+        // (uses concrete actor; polymorphic actors defer type checks to type_infer)
         let result = analyze_source(
-            "param gain = 1\nclock 1kHz t {\n    constant(0.0) | mul($gain) | stdout()\n}",
+            "param val = 1\nclock 1kHz t {\n    constant($val) | stdout()\n}",
             &reg,
         );
         assert!(
@@ -2331,14 +2372,14 @@ mod tests {
 
     #[test]
     fn ctrl_type_not_int32_error() {
-        // fir() outputs float -> ctrl is NOT int32 -> error
+        // constant outputs float -> ctrl is NOT int32 -> error
+        // (uses concrete actor; polymorphic actors defer type checks to type_infer)
         let reg = test_registry();
         let result = analyze_source(
             concat!(
-                "const coeff = [1.0]\n",
                 "clock 1kHz t {\n",
                 "    control {\n",
-                "        constant(0.0) | fir(coeff) -> ctrl\n",
+                "        constant(0.0) -> ctrl\n",
                 "    }\n",
                 "    mode a {\n        constant(0.0) | stdout()\n    }\n",
                 "    mode b {\n        constant(0.0) | stdout()\n    }\n",
