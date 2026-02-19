@@ -60,22 +60,22 @@
 
 ### Phase 1: Spec & Design (must complete first)
 
-- [ ] **Actor polymorphism model**:
-  - [ ] Define generic actor call syntax (`actor<float>(...)`)
-  - [ ] Define inferred call form (`actor(...)` with type inferred from context)
-  - [ ] Define ambiguity rules (when explicit type args are required)
-  - [ ] Define compatibility with shape constraints (`actor<T>(...)[N]`)
-  - [ ] **Create ADR**: Monomorphization strategy and diagnostics policy
+- [x] **Actor polymorphism model** (lang-spec §3.5, §4.1, §10 BNF):
+  - [x] Define generic actor call syntax (`actor<float>(...)`)
+  - [x] Define inferred call form (`actor(...)` with type inferred from context)
+  - [x] Define ambiguity rules (when explicit type args are required)
+  - [x] Define compatibility with shape constraints (`actor<T>(...)[N]`)
+  - [x] **Create ADR-015**: Monomorphization strategy and diagnostics policy
 
-- [ ] **Principal type inference for const/param**:
-  - [ ] Infer principal numeric type from initializer and usage constraints
-  - [ ] Keep explicit override syntax for future compatibility
-  - [ ] Specify mixed numeric literal resolution in arrays and call arguments
+- [x] **Principal type inference for const/param** (lang-spec §3.3):
+  - [x] Infer principal numeric type from initializer and usage constraints
+  - [x] Keep explicit override syntax for future compatibility
+  - [x] Specify mixed numeric literal resolution in arrays and call arguments
 
-- [ ] **Implicit conversions (safe widening only)**:
-  - [ ] Allow only `int32 -> float -> double`
-  - [ ] Keep lossy / semantic conversions explicit (`double -> float`, `cfloat -> float`, etc.)
-  - [ ] Add warnings for suspicious narrowing in explicit conversions
+- [x] **Implicit conversions (safe widening only)** (lang-spec §3.4):
+  - [x] Allow `int8 -> int16 -> int32 -> float -> double` and `cfloat -> cdouble`
+  - [x] Keep lossy / semantic conversions explicit (`double -> float`, `cfloat -> float`, etc.)
+  - [x] Add warnings for suspicious narrowing in explicit conversions (lang-spec §3.4)
 
 ### Phase 2: Compiler Implementation
 
@@ -106,57 +106,25 @@
 
 ---
 
-## v0.3.0 - Language Evolution (Type Inference)
+## v0.3.0 - Language Evolution
 
-**Goal**: Improve PDL ergonomics and type system based on real usage experience. Design-first approach.
+**Goal**: Improve PDL ergonomics based on real usage experience. Design-first approach.
 
-### Phase 1: Design & Specification
+> **Note**: Type inference, polymorphism, and safe widening have been moved to v0.2.3 and are specified in lang-spec §3.3–§3.5 and pcc-spec §9.2. This milestone now covers remaining language evolution items.
 
-- [ ] **Review current type system**:
-  - [ ] Document how types currently work (explicit only, no inference)
-  - [ ] Identify pain points from user experience (manual c2r() insertion)
-  - [ ] Survey type systems in similar DSLs (GNU Radio, Faust, StreamIt)
-  - [ ] Collect real-world examples where inference would help
-
-- [ ] **Type inference design discussion**:
-  - [ ] Explicit vs implicit conversions trade-offs
-  - [ ] Safety: When should implicit conversion be allowed?
-  - [ ] Clarity: Does auto-conversion make pipelines harder to understand?
-  - [ ] Performance: Cost of implicit conversions vs manual specification
-  - [ ] **Create ADR**: Document design decisions and rationale
-
-- [ ] **Spec update proposal** (`doc/spec/pipit-lang-spec-v0.2.0.md`):
-  - [ ] Formal type inference rules
-  - [ ] Conversion hierarchy (int32 → float → cfloat)
-  - [ ] Where inference applies (const/param vs pipelines)
-  - [ ] Error message improvements
-  - [ ] Generic actor syntax (if supported)
-  - [ ] Backwards compatibility considerations
-
-### Phase 2: Implementation (After Spec Approval)
-
-- [ ] **Implicit type conversions in pipelines**:
-  - [ ] Auto-insert `c2r()` when connecting `cfloat → float` pipeline
-  - [ ] Type promotion: `int → float` where compatible
-  - [ ] Detect and suggest conversion actors for type mismatches
-  - [ ] Warning for lossy conversions (float → int)
-
-- [ ] **Type inference for constants and parameters**:
-  - [ ] Infer `const` type from initializer: `const x = 1.0` → float
-  - [ ] Infer `param` type from default value: `param gain = 2.5` → float
-  - [ ] Support explicit type annotations: `const x: int32 = 42`
+- [ ] **Explicit type annotations for const/param** (future ergonomics):
+  - [ ] Support syntax: `const x: int32 = 42`, `param gain: double = 2.5`
   - [ ] Type checking for array elements: `[1, 2.0]` → error (mixed types)
-
-- [ ] **Generic actor support** (if spec approved):
-  - [ ] Template-like syntax: `fir<float>(N, coeff)` vs `fir<int32>(N, coeff)`
-  - [ ] Type parameter inference from arguments
-  - [ ] Monomorphization during codegen
 
 - [ ] **Better type error messages**:
   - [ ] Show expected vs actual types in context
   - [ ] Suggest conversion actors with exact syntax
   - [ ] Trace type through pipeline
   - [ ] Highlight problematic pipe operator in source
+
+- [ ] **DSL survey and experience report**:
+  - [ ] Survey type systems in similar DSLs (GNU Radio, Faust, StreamIt)
+  - [ ] Collect real-world examples and pain points from v0.2.3 usage
 
 ---
 
@@ -336,8 +304,9 @@
 
 ## Notes
 
-- **v0.2.3** is now dedicated to polymorphism + principal type inference + safe numeric widening
+- **v0.2.3** Phase 1 spec/design complete; Phase 2 compiler implementation is next
 - **v0.3.x** now includes former v0.2.3 stdlib expansion backlog
-- **v0.3.0** keeps language evolution as design-first (spec/ADR before implementation)
+- **v0.3.0** covers remaining language evolution after v0.2.3 type system work
 - **v0.4.0+** deferred until core is stable and well-characterized
 - Performance characterization should inform optimization priorities (measure before optimizing)
+- Spec files renamed to versionless names (`pipit-lang-spec.md`, `pcc-spec.md`); version tracked in file header

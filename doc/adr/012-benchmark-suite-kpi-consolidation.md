@@ -7,7 +7,7 @@ The benchmark environment had grown into multiple scripts, legacy suites, and op
 Problems observed:
 
 1. Execution/report flow was fragmented across multiple scripts (`run`, `report`, `json->md`) with duplicated logic.
-2. Several benchmark items were low-signal for current bottlenecks and did not map cleanly to `pipit-lang-spec-v0.2.0.md` behavior (`tick_rate`, `timer_spin`, overrun, SDF scheduling).
+2. Several benchmark items were low-signal for current bottlenecks and did not map cleanly to `pipit-lang-spec.md` behavior (`tick_rate`, `timer_spin`, overrun, SDF scheduling).
 3. Legacy canonical schema + telemetry/perf helpers increased maintenance cost and review complexity for little day-to-day value.
 4. Compiler benchmark output lacked explicit KPI grouping comparable to runtime suites.
 

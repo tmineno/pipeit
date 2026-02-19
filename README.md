@@ -119,7 +119,7 @@ benches/        Performance benchmarks (compiler, runtime, E2E)
 
 ## Documentation
 
-- [Language Spec v0.2.0](doc/spec/pipit-lang-spec-v0.2.0.md)
+- [Language Spec](doc/spec/pipit-lang-spec.md)
 - [PPKT Protocol Spec](doc/spec/ppkt-protocol-spec.md)
 - [Standard Library Reference](doc/spec/standard-library-spec.md)
 - [pcc Usage Guide](doc/pcc-usage-guide.md)

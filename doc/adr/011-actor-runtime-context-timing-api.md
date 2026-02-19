@@ -2,7 +2,7 @@
 
 ## Context
 
-`pipit-lang-spec-v0.2.0` では、sink アクター（例: oscilloscope）が時間軸付きで表示するための標準的な時刻取得手段が未定義だった。既存仕様にはタスク統計（tick/missed/latency）はあるが、これは終了時の集計であり、actor 実行中に参照できる API ではない。
+`pipit-lang-spec` では、sink アクター（例: oscilloscope）が時間軸付きで表示するための標準的な時刻取得手段が未定義だった。既存仕様にはタスク統計（tick/missed/latency）はあるが、これは終了時の集計であり、actor 実行中に参照できる API ではない。
 
 同時に、以下の制約がある:
 

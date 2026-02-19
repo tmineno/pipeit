@@ -2,7 +2,7 @@
 
 Date: 2026-02-18
 Scope: post-ADR-014 (adaptive spin defaults + EWMA timer calibration) + E2E max throughput
-Spec reference: `doc/spec/pipit-lang-spec-v0.2.0.md` (`tick_rate`, `timer_spin`, overrun policy, SDF static scheduling)
+Spec reference: `doc/spec/pipit-lang-spec.md` (`tick_rate`, `timer_spin`, overrun policy, SDF static scheduling)
 
 ## 1. Measurement Setup
 

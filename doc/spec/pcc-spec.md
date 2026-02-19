@@ -6,7 +6,7 @@ Version: 0.2.0
 
 `pcc` is the compiler for Pipit Definition Language (`.pdl`) files. It reads a pipeline description and actor header files, performs static analysis, and produces either a standalone executable or generated C++ source code.
 
-Refer to [pipit-lang-spec-v0.2.0](pipit-lang-spec-v0.2.0.md) for the full language semantics. This spec defines `pcc`'s behavior as a tool.
+Refer to [pipit-lang-spec](pipit-lang-spec.md) for the full language semantics. This spec defines `pcc`'s behavior as a tool.
 
 ## 2. Non-goals
 
@@ -265,7 +265,8 @@ When `--cflags` is explicitly provided, it overrides the default optimization fl
 1. Read files specified by `-I` flags
 2. Scan directories specified by `--actor-path` for headers
 3. Extract registration metadata: actor name, input type, input token count, output type, output token count, parameter list
-4. Build an actor registry keyed by name
+4. Detect `template <typename T> ACTOR(...)` patterns and record type parameters — `IN(T, N)` is stored with `T` as a parametric type, resolved at monomorphization time
+5. Build an actor registry keyed by name (polymorphic actors keyed by base name)
 
 Duplicate actor names across different headers are a compile error:
 
@@ -300,7 +301,7 @@ source.pdl + actors.h
   │
   ├─ 4. Type Inference & Monomorphization
   │     ├─ Solve actor/pipeline type constraints
-  │     ├─ Apply safe numeric widening (int32->float->double)
+  │     ├─ Apply safe numeric widening (int8->...->int32->float->double, cfloat->cdouble)
   │     ├─ Resolve polymorphic actor calls
   │     └─ Materialize concrete actor instances
   │
@@ -409,8 +410,8 @@ If any obligation fails, compilation MUST stop with an error.
 #### 9.2.2 Obligations (must hold)
 
 - `L1 Type consistency`: every edge in `G_lowered` has identical source/target endpoint types.
-- `L2 Widening safety`: inserted conversion nodes are only from the allowed chain
-  `int32 -> float -> double`.
+- `L2 Widening safety`: inserted conversion nodes are only from the allowed chains
+  `int8 -> int16 -> int32 -> float -> double` and `cfloat -> cdouble`.
 - `L3 Rate/shape preservation`: inserted widening nodes are 1:1 and MUST NOT alter
   token rate or shape constraints.
 - `L4 Monomorphization soundness`: each polymorphic call is rewritten to exactly one
@@ -465,6 +466,7 @@ Errors are classified by phase (see lang spec §7.1 for the full catalog):
 | SDF | Balance equation unsolvable, missing delay |
 | Constraint | Multiple writers, unused tap |
 | Memory | Buffer total exceeds `set mem` |
+| Narrowing (warning) | Explicit narrowing conversion may lose precision |
 | Actor | Duplicate definition, missing registration |
 
 ### 10.3 Example
