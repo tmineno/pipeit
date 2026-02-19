@@ -47,7 +47,7 @@ using int32 = std::int32_t;
 #define ACTOR(name, in_spec, out_spec, ...)                                                        \
     struct Actor_##name {                                                                          \
         __VA_ARGS__                                                                                \
-        int operator()(const _PIPIT_FIRST(in_spec) * in, _PIPIT_FIRST(out_spec) * out)
+        int operator()(const _PIPIT_FIRST(in_spec) * in, _PIPIT_FIRST(out_spec) * out) noexcept
 
 // ── Ring buffer (lock-free single-writer, multi-reader) ─────────────────────
 

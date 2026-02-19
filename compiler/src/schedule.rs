@@ -417,7 +417,7 @@ impl<'a> ScheduleCtx<'a> {
         if let Some(node) = find_node(sub, node_id) {
             if let NodeKind::Actor { args, name, .. } = &node.kind {
                 if name == "delay" {
-                    if let Some(Arg::Value(Value::Scalar(Scalar::Number(n, _)))) = args.first() {
+                    if let Some(Arg::Value(Value::Scalar(Scalar::Number(n, _, _)))) = args.first() {
                         return *n as u32;
                     }
                 }
@@ -531,7 +531,7 @@ impl<'a> ScheduleCtx<'a> {
                 let stmt = &self.program.statements[entry.stmt_index];
                 if let StatementKind::Const(c) = &stmt.kind {
                     match &c.value {
-                        Value::Scalar(Scalar::Number(n, _)) => Some(*n as u32),
+                        Value::Scalar(Scalar::Number(n, _, _)) => Some(*n as u32),
                         _ => None,
                     }
                 } else {
@@ -543,14 +543,14 @@ impl<'a> ScheduleCtx<'a> {
 
     fn resolve_arg_to_u32(&self, arg: &Arg) -> Option<u32> {
         match arg {
-            Arg::Value(Value::Scalar(Scalar::Number(n, _))) => Some(*n as u32),
+            Arg::Value(Value::Scalar(Scalar::Number(n, _, _))) => Some(*n as u32),
             Arg::Value(Value::Array(elems, _)) => Some(elems.len() as u32),
             Arg::ConstRef(ident) => {
                 let entry = self.resolved.consts.get(&ident.name)?;
                 let stmt = &self.program.statements[entry.stmt_index];
                 if let StatementKind::Const(c) = &stmt.kind {
                     match &c.value {
-                        Value::Scalar(Scalar::Number(n, _)) => Some(*n as u32),
+                        Value::Scalar(Scalar::Number(n, _, _)) => Some(*n as u32),
                         Value::Array(elems, _) => Some(elems.len() as u32),
                         _ => None,
                     }

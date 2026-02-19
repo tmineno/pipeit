@@ -29,7 +29,7 @@ clock 10MHz receiver {
 }
 
 # Rate matching: modal writer — actual throughput depends on mode schedule.
-# Pw=256 per data-mode PASS × 10MHz nominal; reader at 1kHz decimates.
+# Pw=256 per data-mode PASS × 10MHz nominal; reader at 1kHz decimates 2,560,000.
 clock 1kHz logger {
-    @payload | decimate(10000) | csvwrite("received.csv")
+    @payload | decimate(2560000) | csvwrite("received.csv")
 }

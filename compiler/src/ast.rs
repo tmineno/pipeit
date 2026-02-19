@@ -235,7 +235,9 @@ pub enum Value {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Scalar {
-    Number(f64, Span),
+    /// Number literal with lexical kind preservation.
+    /// `is_int_literal` is true only when source token had no decimal/exponent.
+    Number(f64, Span, bool),
     Freq(f64, Span),
     Size(u64, Span),
     StringLit(String, Span),

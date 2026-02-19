@@ -35,7 +35,7 @@ usage() {
 Usage: run_all.sh [options]
 
 Core options:
-  --filter <category>      Repeatable. Categories: compiler, ringbuf, timer, thread, pdl, e2e, all
+  --filter <category>      Repeatable. Categories: compiler, ringbuf, timer, thread, pdl, e2e, profile, all
   --output-dir <path>      Output directory for benchmark artifacts and report
 
 Report options:
@@ -356,13 +356,11 @@ run_benchmarks() {
         STD_ACTORS_HEADER="$RUNTIME_INCLUDE/std_actors.h"
         EXAMPLE_ACTORS_HEADER="$EXAMPLES_DIR/example_actors.h"
 
-        if [ ! -f "$PCC" ]; then
-            echo "  Building pcc..."
-            if ! cargo build --release -p pcc --manifest-path "$PROJECT_ROOT/Cargo.toml" >/dev/null 2>&1; then
-                echo "  pcc build failed"
-                run_section "pdl" "fail"
-                FINAL_EXIT=1
-            fi
+        echo "  Building pcc..."
+        if ! cargo build --release -p pcc --manifest-path "$PROJECT_ROOT/Cargo.toml" >/dev/null 2>&1; then
+            echo "  pcc build failed"
+            run_section "pdl" "fail"
+            FINAL_EXIT=1
         fi
 
         if [ -f "$PCC" ]; then
@@ -389,8 +387,15 @@ run_benchmarks() {
                     fi
 
                     echo "  Running $name..."
-                    "$exe" --duration 1s --stats 2>&1 | grep -E '^\[stats\]|ticks=|avg_latency=' || true
-                    pdl_pass=$((pdl_pass + 1))
+                    pdl_stderr_log="$BUILD_DIR/${name}_runtime.stderr"
+                    if "$exe" --duration 1s --stats > /dev/null 2>"$pdl_stderr_log"; then
+                        grep -E '^\[stats\]|ticks=|avg_latency=' "$pdl_stderr_log" || true
+                        pdl_pass=$((pdl_pass + 1))
+                    else
+                        echo "  FAIL: $name (runtime exited non-zero)"
+                        cat "$pdl_stderr_log"
+                        pdl_fail=$((pdl_fail + 1))
+                    fi
                     echo ""
                 done
                 echo "=== PDL Summary ==="
@@ -408,6 +413,25 @@ run_benchmarks() {
             fi
         fi
 
+        echo ""
+    fi
+
+    if should_run "profile"; then
+        echo "[6/6] Block profile benchmarks (uftrace)"
+        if command -v uftrace >/dev/null 2>&1; then
+            if "$SCRIPT_DIR/profile_bench.sh" \
+                --output-dir "$BENCH_OUTPUT_DIR/profile" \
+                --duration 2s \
+                >"$BENCH_OUTPUT_DIR/profile_bench.txt" 2>&1; then
+                run_section "profile" "pass"
+            else
+                run_section "profile" "fail"
+                FINAL_EXIT=1
+            fi
+        else
+            echo "  uftrace not installed, skipping"
+            run_section "profile" "skip"
+        fi
         echo ""
     fi
 

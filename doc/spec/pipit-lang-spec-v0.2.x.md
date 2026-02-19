@@ -281,9 +281,9 @@ clock 1kHz t {
 `ACTOR` マクロは以下を生成する。
 
 1. **ファンクタクラス**: `IN`/`OUT` インターフェースを持つ `noexcept` な `operator()` を備えるクラス
-2. **`constexpr` 登録関数**: アクター名、入力型、入力トークン数、出力型、出力トークン数、パラメータ型リストをコンパイル時定数として公開する関数
+2. **宣言情報**: `IN`/`OUT`/`PARAM`/`RUNTIME_PARAM` 記述。`pcc` はヘッダスキャンでこの宣言情報を抽出する
 
-`pcc` は登録関数の情報のみを使用し、C++ ソースのパースは行わない。
+`pcc` は C++ の完全な構文解析は行わず、`ACTOR(...)` マクロ呼出しの宣言形式を前提としたテキストスキャンを行う。
 
 #### ファンクタ内で使用可能なシンボル
 
@@ -376,19 +376,19 @@ ACTOR(safe_div, IN(float, 2), OUT(float, 1)) {
 
 ```
 set mem = 64MB
-set scheduler = round_robin
 set overrun = drop
 ```
 
-`set` 文はスケジューラおよびランタイムの動作パラメータを設定する。
+`set` 文はランタイムの動作パラメータを設定する。
 
 | キー | 型 | デフォルト | 説明 |
 |------|----|-----------|------|
 | `mem` | SIZE | `64MB` | 共有メモリプールの最大サイズ |
-| `scheduler` | IDENT | `static` | スケジューリングアルゴリズム (`round_robin`, `static`) |
 | `overrun` | IDENT | `drop` | オーバーラン時のポリシー（§5.4.3 参照） |
 | `tick_rate` | FREQ | `10kHz` | OSタイマーのウェイク周波数。K = ceil(タスク周波数 / tick_rate)。高周波タスクのバッチ処理に使用 |
 | `timer_spin` | NUMBER or `auto` | `10000` | デッドライン前のスピンウェイト時間（ナノ秒）。`auto` でEWMAベースの適応的スピン調整を有効化。CPU使用量と引き換えにタイマー精度を向上 |
+
+現行実装のスケジュール生成アルゴリズムは固定であり、タスク内では PASS（Periodic Asynchronous Static Schedule）を用いる。`set` によるスケジューリングアルゴリズム選択は v0.2 ではサポートしない。
 
 #### `tick_rate` — K ファクタバッチ処理
 
@@ -448,7 +448,7 @@ clock 100Hz slow { @signal | stdout() }               # K=1（100Hz < 1kHz）
 
 `timer_spin` はデッドライン直前のスピンウェイト時間（ナノ秒）を指定する。OS の `sleep_until()` にはジッタ（数十〜数百 µs）があるため、スピンウェイトにより最終区間の精度を向上させる。
 
-##### timer_spin = 0（デフォルト: スピンなし）
+##### timer_spin = 0（スピンなし）
 
 ```
 set timer_spin = 0
@@ -576,7 +576,7 @@ clock <freq> <name> { <task_body> }
 
 - `K = ceil(clock_freq / tick_rate)`（§5.1）
 - `clock_freq <= tick_rate` の場合は `K = 1`
-- `tick_rate` 省略時はデフォルト `1MHz` を用いる
+- `tick_rate` 省略時はデフォルト `10kHz` を用いる
 
 #### 5.4.3 オーバーラン処理
 
@@ -767,7 +767,7 @@ adc(0) | fft(256) | ?spec | fir(coeff) -> signal
 $ ./my_app --probe spec --probe raw
 ```
 
-- プローブデータの出力先は `--probe-output` で指定する（stderr, ファイルパス, またはネットワーク）
+- プローブデータの出力先は `--probe-output <path>` で指定する（ファイルパスのみ）。標準エラーへ出力したい場合は `/dev/stderr` などの実装依存パスを使用する。
 
 ### 5.9 サブパイプライン定義
 
@@ -862,6 +862,7 @@ clock 10MHz receiver {
 - `control { ... }`: control subgraph。モード遷移に関係なく常時実行される SDF グラフ。`switch` の制御信号を供給する
 - `mode <name> { ... }`: モードブロック。各モードは独立した SDF グラフとして定義される
 - `switch(ctrl, mode_a, mode_b, ...)`: モード遷移を制御する構文。`ctrl` は control subgraph 内のアクターが共有バッファまたはタスク内エッジ経由で供給する値
+- `switch(... ) default <mode>`: 後方互換のため受理されるが、v0.2 では非推奨。コンパイラは警告を出し、実行時の意味は持たない
 
 ### 6.3 ctrl の供給規則
 
@@ -870,7 +871,7 @@ clock 10MHz receiver {
 1. **control subgraph 内で `-> ctrl` により書き出された共有バッファ**（タスク内通信）
 2. **`param $ctrl`** によるランタイムパラメータ
 
-外部からの制御（例: 外部タスクから共有バッファ経由）も許容されるが、ctrl の供給元が存在しない場合はコンパイルエラーとなる。
+外部からの制御を使う場合も、`switch` の ctrl は本タスク内で `control { ... }` から `-> ctrl` に書き出すか、`param $ctrl` として供給しなければならない（§6.7 の制約に従う）。供給元が存在しない場合はコンパイルエラーとなる。
 
 ```
 error: switch ctrl 'ctrl' has no supplier
@@ -893,20 +894,22 @@ ctrl の型は `int32` でなければならない。値は 0, 1, 2, ... がモ�
 - **共有バッファ上のデータは遷移の影響を受けない**（§5.7参照）
 - 保持が必要なタスク内データは遷移前に共有バッファ (`-> name`) に退避すること
 
-### 6.6 初期モードとデフォルト
+### 6.6 初期モードと default 句（互換）
 
-ブロック内で最初に宣言されたモードが初期モードとなる。明示的に指定する場合は `default` キーワードを使う。
+起動直後の初期モードは固定ではなく、最初のイテレーションで control subgraph を実行して得られた `ctrl` 値で決定される。
 
 ```
 switch(ctrl, sync, data) default sync
 ```
+
+`default` 句は v0.2 ではソフト非推奨であり、構文互換のため受理されるが実行時には無視される。コンパイラは警告を出力する。
 
 ### 6.7 制約
 
 - `switch` 文はタスクブロック内に最大1つ
 - `mode` ブロックを持つタスクには `control` ブロックまたは `param` による ctrl 供給が必須
 - `mode` ブロックを持たないタスクに `switch` / `control` は記述できない
-- ctrl の全有効値（0 〜 モード数-1）は網羅的でなければならない。ctrl がこの範囲外の値を取る場合の動作は未定義である（コンパイラは可能な範囲で警告を発する）
+- ctrl の全有効値（0 〜 モード数-1）は網羅的でなければならない。ctrl がこの範囲外の値を取る場合の動作は未定義である（`default` 句の有無にかかわらず、コンパイラは可能な範囲で警告を発する）
 
 ---
 
@@ -930,18 +933,16 @@ switch(ctrl, sync, data) default sync
 
 ### 7.2 実行時エラー
 
-アクターが `ACTOR_ERROR` を返した場合、以下の連鎖が発生する。
+アクターが `ACTOR_ERROR` を返した場合、ランタイムは**フェイルファスト**でパイプライン全体を停止する。
 
-1. 当該アクターを含む**タスク全体を即座に停止**する
-2. 停止したタスクに `->` で接続されている下流タスクは、データ枯渇により**タイムアウトで停止**する
-3. 上流タスクはバックプレッシャーにより**ブロック → タイムアウトで停止**する
-4. 結果としてエラーはグラフ全体に伝搬し、最終的にパイプライン全体が停止する
+1. 当該アクターを含むタスクを即座に停止する
+2. 共有バッファ読出し/書込み失敗を含む致命エラーはグローバル停止フラグを設定する
+3. 全タスクは停止フラグを観測して終了し、プロセスはエラー終了コードを返す
 
 ```
 runtime error: actor 'safe_div' in task 'capture' returned ACTOR_ERROR
   task 'capture' stopped
-  task 'drain' stopped (timeout: no data from 'signal' for 100ms)
-pipit: pipeline terminated with error (exit code 1)
+pipit: pipeline terminated with error (exit code 1, fail-fast)
 ```
 
 エラー情報は stderr に出力される。プローブが有効な場合はプローブにも出力される。
@@ -974,7 +975,7 @@ $ ./my_app [OPTIONS]
 | `--threads <n>` | スレッドプールサイズ | CPU 論理コア数 |
 | `--param <name>=<value>` | ランタイムパラメータの初期値上書き | DSL 定義値 |
 | `--probe <name>` | 指定プローブを有効化（複数指定可） | 全無効 |
-| `--probe-output <path>` | プローブ出力先 (`stderr`, ファイルパス) | `stderr` |
+| `--probe-output <path>` | プローブ出力先（ファイルパス） | `stderr` 相当の実装定義パス |
 | `--stats` | 終了時にオーバーラン統計等を表示 | 無効 |
 
 ### 9.2 終了コード
@@ -1034,7 +1035,7 @@ task_stmt       ::= 'clock' FREQ IDENT '{' task_body '}'
 task_body       ::= pipeline_body
                   | modal_body
 
-modal_body      ::= control_block mode_block+ switch_stmt
+modal_body      ::= control_block? mode_block+ switch_stmt
 
 control_block   ::= 'control' '{' pipeline_body '}'
 
@@ -1046,7 +1047,7 @@ switch_stmt     ::= 'switch' '(' switch_src ',' IDENT (',' IDENT)+ ')'
 switch_src      ::= IDENT              # 共有バッファ名
                   | '$' IDENT           # ランタイムパラメータ
 
-default_clause  ::= 'default' IDENT
+default_clause  ::= 'default' IDENT    # v0.2: 互換のため受理（非推奨・実行時無効）
 
 # ── パイプライン ──
 
@@ -1264,11 +1265,12 @@ clock 10MHz receiver {
     }
 
     # ctrl=0 → sync, ctrl=1 → data
+    # NOTE: `default sync` は互換のため受理されるが v0.2 では非推奨かつ実行時無効
     switch(ctrl, sync, data) default sync
 }
 
 clock 1kHz logger {
-    @payload | decimate(10000) | csvwrite("received.csv")
+    @payload | decimate(2560000) | csvwrite("received.csv")
 }
 ```
 

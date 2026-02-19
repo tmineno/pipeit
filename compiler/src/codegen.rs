@@ -289,7 +289,7 @@ impl<'a> CodegenCtx<'a> {
         // Probe flags and output
         if !self.resolved.probes.is_empty() && !self.options.release {
             self.out
-                .push_str("static FILE* _probe_output_file = stderr;\n");
+                .push_str("static FILE* _probe_output_file = nullptr;\n");
             for probe in &self.resolved.probes {
                 let _ = writeln!(
                     self.out,
@@ -345,6 +345,9 @@ impl<'a> CodegenCtx<'a> {
 
             // Feedback back-edge buffers (persist across K-loop iterations)
             self.emit_feedback_buffers(task_name, task_graph, &meta.schedule);
+            if matches!(&meta.schedule, TaskSchedule::Modal { .. }) {
+                self.out.push_str("    int32_t _active_mode = -1;\n");
+            }
 
             // Main loop
             self.out
@@ -379,9 +382,6 @@ impl<'a> CodegenCtx<'a> {
                 task_name
             );
 
-            // Read runtime params used by this task
-            self.emit_param_reads(task_name, task_graph);
-
             // K-loop
             if meta.k_factor > 1 {
                 let _ = writeln!(
@@ -392,9 +392,11 @@ impl<'a> CodegenCtx<'a> {
                 self.out.push_str(
                     "            pipit::detail::set_actor_iteration_index(_iter_idx++);\n",
                 );
+                self.emit_param_reads(task_name, task_graph, "            ");
             } else {
                 self.out
                     .push_str("        pipit::detail::set_actor_iteration_index(_iter_idx++);\n");
+                self.emit_param_reads(task_name, task_graph, "        ");
             }
 
             let indent = if meta.k_factor > 1 {
@@ -424,9 +426,21 @@ impl<'a> CodegenCtx<'a> {
                     let _ = writeln!(self.out, "{}// Control subgraph", indent);
                     self.emit_subgraph_firings(task_name, "control", ctrl_sub, control, indent);
 
-                    // Read ctrl value from last BufferWrite in control
-                    let ctrl_var = self.find_ctrl_output(ctrl_sub);
-                    let _ = writeln!(self.out, "{}int32_t _ctrl = {};", indent, ctrl_var);
+                    // Resolve control source (control output / param / external buffer)
+                    self.emit_ctrl_source_read(task_name, ctrl_sub, indent);
+                    let _ = writeln!(
+                        self.out,
+                        "{}if (_active_mode != -1 && _ctrl != _active_mode) {{",
+                        indent
+                    );
+                    self.emit_mode_feedback_resets(
+                        task_name,
+                        mode_subs,
+                        modes,
+                        &format!("{}    ", indent),
+                    );
+                    let _ = writeln!(self.out, "{}}}", indent);
+                    let _ = writeln!(self.out, "{}_active_mode = _ctrl;", indent);
 
                     // Mode dispatch
                     let _ = writeln!(self.out, "{}switch (_ctrl) {{", indent);
@@ -523,7 +537,11 @@ impl<'a> CodegenCtx<'a> {
             let wire_type = self.infer_edge_wire_type(sub, src);
             let cpp_type = pipit_type_to_cpp(wire_type);
             let var_name = format!("_e{}_{}", src.0, tgt.0);
-            let _ = writeln!(self.out, "{}{} {}[{}];", indent, cpp_type, var_name, tokens);
+            let _ = writeln!(
+                self.out,
+                "{}static {} {}[{}];",
+                indent, cpp_type, var_name, tokens
+            );
             names.insert((src, tgt), var_name);
         }
 
@@ -586,7 +604,7 @@ impl<'a> CodegenCtx<'a> {
     fn emit_firing(
         &mut self,
         task_name: &str,
-        _label: &str,
+        label: &str,
         sub: &Subgraph,
         sched: &SubgraphSchedule,
         node: &Node,
@@ -647,7 +665,17 @@ impl<'a> CodegenCtx<'a> {
                 self.emit_buffer_read(task_name, sub, sched, node, buffer_name, ind, edge_bufs);
             }
             NodeKind::BufferWrite { buffer_name } => {
-                self.emit_buffer_write(task_name, sub, sched, node, buffer_name, ind, edge_bufs);
+                if !self.should_skip_shared_buffer_write(task_name, label, sub, buffer_name) {
+                    self.emit_buffer_write(
+                        task_name,
+                        sub,
+                        sched,
+                        node,
+                        buffer_name,
+                        ind,
+                        edge_bufs,
+                    );
+                }
             }
         }
 
@@ -906,20 +934,43 @@ impl<'a> CodegenCtx<'a> {
                     .unwrap_or(0);
                 let _ = writeln!(
                     self.out,
-                    "{}if (!_ringbuf_{}.read({}, {}, {})) {{",
+                    "{}int _rb_retry_{}_{} = 0;",
+                    indent, node.id.0, out_edge.target.0
+                );
+                let _ = writeln!(self.out, "{}while (true) {{", indent);
+                let _ = writeln!(
+                    self.out,
+                    "{}    if (!_ringbuf_{}.read({}, {}, {})) {{",
                     indent, buffer_name, reader_idx, dst_expr, per_firing_tokens
                 );
                 let _ = writeln!(
                     self.out,
-                    "{}    std::fprintf(stderr, \"runtime error: task '{}' failed to read {} token(s) from shared buffer '{}'\\n\");",
+                    "{}        if (_stop.load(std::memory_order_acquire)) {{",
+                    indent
+                );
+                let _ = writeln!(self.out, "{}            return;", indent);
+                let _ = writeln!(self.out, "{}        }}", indent);
+                let _ = writeln!(
+                    self.out,
+                    "{}        if (++_rb_retry_{}_{} < 1000000) {{",
+                    indent, node.id.0, out_edge.target.0
+                );
+                let _ = writeln!(self.out, "{}            std::this_thread::yield();", indent);
+                let _ = writeln!(self.out, "{}            continue;", indent);
+                let _ = writeln!(self.out, "{}        }}", indent);
+                let _ = writeln!(
+                    self.out,
+                    "{}        std::fprintf(stderr, \"runtime error: task '{}' failed to read {} token(s) from shared buffer '{}'\\n\");",
                     indent, task_name, per_firing_tokens, buffer_name
                 );
                 let _ = writeln!(
                     self.out,
-                    "{}    _stop.store(true, std::memory_order_release);",
+                    "{}        _stop.store(true, std::memory_order_release);",
                     indent
                 );
-                let _ = writeln!(self.out, "{}    return;", indent);
+                let _ = writeln!(self.out, "{}        return;", indent);
+                let _ = writeln!(self.out, "{}    }}", indent);
+                let _ = writeln!(self.out, "{}    break;", indent);
                 let _ = writeln!(self.out, "{}}}", indent);
             }
         }
@@ -951,20 +1002,43 @@ impl<'a> CodegenCtx<'a> {
                 };
                 let _ = writeln!(
                     self.out,
-                    "{}if (!_ringbuf_{}.write({}, {})) {{",
+                    "{}int _rb_retry_{}_{} = 0;",
+                    indent, in_edge.source.0, node.id.0
+                );
+                let _ = writeln!(self.out, "{}while (true) {{", indent);
+                let _ = writeln!(
+                    self.out,
+                    "{}    if (!_ringbuf_{}.write({}, {})) {{",
                     indent, buffer_name, src_expr, per_firing_tokens
                 );
                 let _ = writeln!(
                     self.out,
-                    "{}    std::fprintf(stderr, \"runtime error: task '{}' failed to write {} token(s) to shared buffer '{}'\\n\");",
+                    "{}        if (_stop.load(std::memory_order_acquire)) {{",
+                    indent
+                );
+                let _ = writeln!(self.out, "{}            return;", indent);
+                let _ = writeln!(self.out, "{}        }}", indent);
+                let _ = writeln!(
+                    self.out,
+                    "{}        if (++_rb_retry_{}_{} < 1000000) {{",
+                    indent, in_edge.source.0, node.id.0
+                );
+                let _ = writeln!(self.out, "{}            std::this_thread::yield();", indent);
+                let _ = writeln!(self.out, "{}            continue;", indent);
+                let _ = writeln!(self.out, "{}        }}", indent);
+                let _ = writeln!(
+                    self.out,
+                    "{}        std::fprintf(stderr, \"runtime error: task '{}' failed to write {} token(s) to shared buffer '{}'\\n\");",
                     indent, task_name, per_firing_tokens, buffer_name
                 );
                 let _ = writeln!(
                     self.out,
-                    "{}    _stop.store(true, std::memory_order_release);",
+                    "{}        _stop.store(true, std::memory_order_release);",
                     indent
                 );
-                let _ = writeln!(self.out, "{}    return;", indent);
+                let _ = writeln!(self.out, "{}        return;", indent);
+                let _ = writeln!(self.out, "{}    }}", indent);
+                let _ = writeln!(self.out, "{}    break;", indent);
                 let _ = writeln!(self.out, "{}}}", indent);
             }
         }
@@ -1063,9 +1137,9 @@ impl<'a> CodegenCtx<'a> {
 
     // ── Runtime param reads ─────────────────────────────────────────────
 
-    fn emit_param_reads(&mut self, _task_name: &str, task_graph: &TaskGraph) {
+    fn emit_param_reads(&mut self, task_name: &str, task_graph: &TaskGraph, indent: &str) {
         let mut used_params: HashSet<String> = HashSet::new();
-        self.collect_used_params(task_graph, &mut used_params);
+        self.collect_used_params(task_name, task_graph, &mut used_params);
 
         for param_name in &used_params {
             if let Some(entry) = self.resolved.params.get(param_name) {
@@ -1074,15 +1148,20 @@ impl<'a> CodegenCtx<'a> {
                     let cpp_type = self.param_cpp_type(param_name, &p.value);
                     let _ = writeln!(
                         self.out,
-                        "        {} _param_{}_val = _param_{}.load(std::memory_order_acquire);",
-                        cpp_type, param_name, param_name
+                        "{}{} _param_{}_val = _param_{}.load(std::memory_order_acquire);",
+                        indent, cpp_type, param_name, param_name
                     );
                 }
             }
         }
     }
 
-    fn collect_used_params(&self, task_graph: &TaskGraph, params: &mut HashSet<String>) {
+    fn collect_used_params(
+        &self,
+        task_name: &str,
+        task_graph: &TaskGraph,
+        params: &mut HashSet<String>,
+    ) {
         for sub in subgraphs_of(task_graph) {
             for node in &sub.nodes {
                 if let NodeKind::Actor { args, .. } = &node.kind {
@@ -1091,6 +1170,14 @@ impl<'a> CodegenCtx<'a> {
                             params.insert(ident.name.clone());
                         }
                     }
+                }
+            }
+        }
+        // switch($param, ...) is also a runtime-param use even if no actor consumes it.
+        if let Some(task) = self.find_task(task_name) {
+            if let TaskBody::Modal(modal) = &task.body {
+                if let SwitchSource::Param(ident) = &modal.switch.source {
+                    params.insert(ident.name.clone());
                 }
             }
         }
@@ -1104,7 +1191,7 @@ impl<'a> CodegenCtx<'a> {
             .push_str("    double _duration_seconds = std::numeric_limits<double>::infinity();\n");
         self.out.push_str("    int _threads = 0;\n");
         self.out
-            .push_str("    std::string _probe_output = \"stderr\";\n");
+            .push_str("    std::string _probe_output = \"/dev/stderr\";\n");
         self.out
             .push_str("    std::vector<std::string> _enabled_probes;\n");
         self.out.push('\n');
@@ -1193,6 +1280,13 @@ impl<'a> CodegenCtx<'a> {
                 buf_name, buf_name, buf_name, cpp_type
             );
         }
+
+        let mem_limit = self.get_set_size("mem").unwrap_or(64 * 1024 * 1024);
+        let _ = writeln!(
+            self.out,
+            "        fprintf(stderr, \"[stats] memory pool: %zuB allocated, %zuB used\\n\", (size_t){}, (size_t){});",
+            mem_limit, self.analysis.total_memory
+        );
 
         self.out.push_str("    }\n");
     }
@@ -1361,7 +1455,7 @@ impl<'a> CodegenCtx<'a> {
         self.out.push_str("    // Probe initialization\n");
         self.out.push_str("    #ifndef NDEBUG\n");
         self.out
-            .push_str("    if (!_enabled_probes.empty() || _probe_output != \"stderr\") {\n");
+            .push_str("    if (!_enabled_probes.empty() || _probe_output != \"/dev/stderr\") {\n");
 
         // Build valid probe name set
         self.out
@@ -1396,20 +1490,15 @@ impl<'a> CodegenCtx<'a> {
 
         self.out.push_str("        }\n");
 
-        // Open probe output file if specified
+        // Open probe output path
         self.out
-            .push_str("        if (_probe_output != \"stderr\") {\n");
-        self.out.push_str(
-            "            _probe_output_file = std::fopen(_probe_output.c_str(), \"w\");\n",
-        );
-        self.out
-            .push_str("            if (!_probe_output_file) {\n");
+            .push_str("        _probe_output_file = std::fopen(_probe_output.c_str(), \"w\");\n");
+        self.out.push_str("        if (!_probe_output_file) {\n");
         self.out.push_str("                std::fprintf(stderr, \"startup error: failed to open probe output file '%s': %s\\\\n\",\n");
         self.out.push_str(
             "                            _probe_output.c_str(), std::strerror(errno));\n",
         );
         self.out.push_str("                return 2;\n");
-        self.out.push_str("            }\n");
         self.out.push_str("        }\n");
 
         self.out.push_str("    }\n");
@@ -1435,6 +1524,124 @@ impl<'a> CodegenCtx<'a> {
 
     // ── Helpers ─────────────────────────────────────────────────────────
 
+    fn find_task(&self, task_name: &str) -> Option<&TaskStmt> {
+        for stmt in &self.program.statements {
+            if let StatementKind::Task(task) = &stmt.kind {
+                if task.name.name == task_name {
+                    return Some(task);
+                }
+            }
+        }
+        None
+    }
+
+    /// Skip shared-buffer writes when the buffer has no readers.
+    fn should_skip_shared_buffer_write(
+        &self,
+        _task_name: &str,
+        _label: &str,
+        _sub: &Subgraph,
+        buffer_name: &str,
+    ) -> bool {
+        self.resolved
+            .buffers
+            .get(buffer_name)
+            .map(|info| info.readers.is_empty())
+            .unwrap_or(false)
+    }
+
+    fn emit_ctrl_source_read(&mut self, task_name: &str, ctrl_sub: &Subgraph, indent: &str) {
+        let switch_source = self.find_task(task_name).and_then(|task| {
+            let TaskBody::Modal(modal) = &task.body else {
+                return None;
+            };
+            Some(modal.switch.source.clone())
+        });
+        let Some(switch_source) = switch_source else {
+            let ctrl_var = self.find_ctrl_output(ctrl_sub);
+            let _ = writeln!(self.out, "{}int32_t _ctrl = {};", indent, ctrl_var);
+            return;
+        };
+
+        match switch_source {
+            SwitchSource::Param(ident) => {
+                let _ = writeln!(
+                    self.out,
+                    "{}int32_t _ctrl = static_cast<int32_t>(_param_{}_val);",
+                    indent, ident.name
+                );
+            }
+            SwitchSource::Buffer(ident) => {
+                if let Some(ctrl_var) = self.find_ctrl_output_for_buffer(ctrl_sub, &ident.name) {
+                    let _ = writeln!(self.out, "{}int32_t _ctrl = {};", indent, ctrl_var);
+                } else {
+                    let reader_idx = self
+                        .reader_index_for_task(&ident.name, task_name)
+                        .unwrap_or(0);
+                    let _ = writeln!(self.out, "{}int32_t _ctrl_buf[1];", indent);
+                    let _ = writeln!(
+                        self.out,
+                        "{}if (!_ringbuf_{}.read({}, _ctrl_buf, 1)) {{",
+                        indent, ident.name, reader_idx
+                    );
+                    let _ = writeln!(
+                        self.out,
+                        "{}    std::fprintf(stderr, \"runtime error: task '{}' failed to read 1 token(s) from shared buffer '{}' for switch ctrl\\n\");",
+                        indent, task_name, ident.name
+                    );
+                    let _ = writeln!(
+                        self.out,
+                        "{}    _stop.store(true, std::memory_order_release);",
+                        indent
+                    );
+                    let _ = writeln!(self.out, "{}    return;", indent);
+                    let _ = writeln!(self.out, "{}}}", indent);
+                    let _ = writeln!(self.out, "{}int32_t _ctrl = _ctrl_buf[0];", indent);
+                }
+            }
+        }
+    }
+
+    fn emit_mode_feedback_resets(
+        &mut self,
+        task_name: &str,
+        mode_subs: &[(String, Subgraph)],
+        mode_scheds: &[(String, SubgraphSchedule)],
+        indent: &str,
+    ) {
+        let mut reset_points: Vec<(String, u32, String)> = Vec::new();
+
+        for (mode_name, sched) in mode_scheds {
+            let Some((_, sub)) = mode_subs.iter().find(|(n, _)| n == mode_name) else {
+                continue;
+            };
+            let mut back_edges: Vec<(NodeId, NodeId)> = self
+                .identify_back_edges(task_name, sub)
+                .into_iter()
+                .collect();
+            back_edges.sort_by_key(|(src, tgt)| (src.0, tgt.0));
+
+            for (src, tgt) in back_edges {
+                let tokens = sched.edge_buffers.get(&(src, tgt)).copied().unwrap_or(1);
+                let init_val = self.delay_init_value(sub, src);
+                let var_name = format!("_fb_{}_{}", src.0, tgt.0);
+                reset_points.push((var_name, tokens, init_val));
+            }
+        }
+
+        for (var_name, tokens, init_val) in reset_points {
+            if tokens <= 1 {
+                let _ = writeln!(self.out, "{}{}[0] = {};", indent, var_name, init_val);
+            } else {
+                let _ = writeln!(
+                    self.out,
+                    "{}for (int _fb_i = 0; _fb_i < {}; ++_fb_i) {}[_fb_i] = {};",
+                    indent, tokens, var_name, init_val
+                );
+            }
+        }
+    }
+
     fn get_set_ident<'b>(&'b self, name: &str) -> Option<&'b str> {
         for stmt in &self.program.statements {
             if let StatementKind::Set(set) = &stmt.kind {
@@ -1454,6 +1661,19 @@ impl<'a> CodegenCtx<'a> {
                 if set.name.name == name {
                     if let SetValue::Number(n, _) = &set.value {
                         return Some(*n);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn get_set_size(&self, name: &str) -> Option<u64> {
+        for stmt in &self.program.statements {
+            if let StatementKind::Set(set) = &stmt.kind {
+                if set.name.name == name {
+                    if let SetValue::Size(v, _) = &set.value {
+                        return Some(*v);
                     }
                 }
             }
@@ -1486,9 +1706,33 @@ impl<'a> CodegenCtx<'a> {
         "0".to_string()
     }
 
+    fn find_ctrl_output_for_buffer(
+        &self,
+        ctrl_sub: &Subgraph,
+        ctrl_buffer_name: &str,
+    ) -> Option<String> {
+        for node in ctrl_sub.nodes.iter().rev() {
+            let NodeKind::BufferWrite { buffer_name } = &node.kind else {
+                continue;
+            };
+            if buffer_name != ctrl_buffer_name {
+                continue;
+            }
+            let incoming: Vec<&Edge> = ctrl_sub
+                .edges
+                .iter()
+                .filter(|e| e.target == node.id)
+                .collect();
+            if let Some(edge) = incoming.first() {
+                return Some(format!("_e{}_{}[0]", edge.source.0, edge.target.0));
+            }
+        }
+        None
+    }
+
     fn scalar_literal(&self, scalar: &Scalar) -> String {
         match scalar {
-            Scalar::Number(n, _) => {
+            Scalar::Number(n, _, _) => {
                 if *n == (*n as i64) as f64 && !n.is_nan() && !n.is_infinite() {
                     format!("{}", *n as i64)
                 } else {
@@ -1504,7 +1748,7 @@ impl<'a> CodegenCtx<'a> {
 
     fn scalar_cpp_type(&self, scalar: &Scalar) -> &'static str {
         match scalar {
-            Scalar::Number(n, _) => {
+            Scalar::Number(n, _, _) => {
                 if *n == (*n as i64) as f64 && !n.is_nan() && !n.is_infinite() {
                     if *n >= i32::MIN as f64 && *n <= i32::MAX as f64 {
                         "int"
@@ -1848,7 +2092,7 @@ impl<'a> CodegenCtx<'a> {
                 let stmt = &self.program.statements[entry.stmt_index];
                 if let StatementKind::Const(c) = &stmt.kind {
                     match &c.value {
-                        Value::Scalar(Scalar::Number(n, _)) => Some(*n as u32),
+                        Value::Scalar(Scalar::Number(n, _, _)) => Some(*n as u32),
                         _ => None,
                     }
                 } else {
@@ -1860,14 +2104,14 @@ impl<'a> CodegenCtx<'a> {
 
     fn resolve_arg_to_u32(&self, arg: &Arg) -> Option<u32> {
         match arg {
-            Arg::Value(Value::Scalar(Scalar::Number(n, _))) => Some(*n as u32),
+            Arg::Value(Value::Scalar(Scalar::Number(n, _, _))) => Some(*n as u32),
             Arg::Value(Value::Array(elems, _)) => Some(elems.len() as u32),
             Arg::ConstRef(ident) => {
                 let entry = self.resolved.consts.get(&ident.name)?;
                 let stmt = &self.program.statements[entry.stmt_index];
                 if let StatementKind::Const(c) = &stmt.kind {
                     match &c.value {
-                        Value::Scalar(Scalar::Number(n, _)) => Some(*n as u32),
+                        Value::Scalar(Scalar::Number(n, _, _)) => Some(*n as u32),
                         Value::Array(elems, _) => Some(elems.len() as u32),
                         _ => None,
                     }
@@ -2467,6 +2711,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn probe_output_is_path_only() {
+        let reg = test_registry();
+        let source = "clock 1kHz t { constant(0.0) | ?debug | stdout() }";
+        let cpp = codegen_ok(source, &reg);
+        assert!(
+            cpp.contains("std::string _probe_output = \"/dev/stderr\";"),
+            "default probe output should be an implementation-defined path: {}",
+            cpp
+        );
+        assert!(
+            !cpp.contains("_probe_output != \"stderr\""),
+            "should not special-case literal 'stderr' token: {}",
+            cpp
+        );
+        assert!(
+            cpp.contains("_probe_output_file = std::fopen(_probe_output.c_str(), \"w\");"),
+            "probe output should always be opened as a path: {}",
+            cpp
+        );
+    }
+
     // ── Integration tests ───────────────────────────────────────────────
 
     #[test]
@@ -2513,6 +2779,88 @@ mod tests {
         assert!(
             cpp.contains("switch (_ctrl)"),
             "receiver.pdl should have mode switch: {}",
+            cpp
+        );
+        assert!(
+            cpp.contains("int32_t _active_mode = -1;"),
+            "receiver.pdl should track active mode for transition handling: {}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn switch_param_source_reads_runtime_param_for_ctrl() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            concat!(
+                "param sel = 0\n",
+                "clock 1kHz t {\n",
+                "    control {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode a {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode b {\n        constant(0.0) | stdout()\n    }\n",
+                "    switch($sel, a, b)\n",
+                "}\n"
+            ),
+            &reg,
+        );
+        assert!(
+            cpp.contains("int32_t _ctrl = static_cast<int32_t>(_param_sel_val);"),
+            "switch($param, ...) should read ctrl from runtime param: {}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn switch_external_buffer_source_reads_ring_buffer_for_ctrl() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            concat!(
+                "clock 1kHz producer {\n",
+                "    constant(0.0) | detect() -> ctrl\n",
+                "}\n",
+                "clock 1kHz t {\n",
+                "    control {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode a {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode b {\n        constant(0.0) | stdout()\n    }\n",
+                "    switch(ctrl, a, b)\n",
+                "}\n"
+            ),
+            &reg,
+        );
+        assert!(
+            cpp.contains("_ringbuf_ctrl.read(") && cpp.contains("int32_t _ctrl = _ctrl_buf[0];"),
+            "switch(buffer, ...) should read ctrl from shared ring buffer: {}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn switch_default_clause_has_no_codegen_fallback() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            concat!(
+                "clock 1kHz t {\n",
+                "    control {\n        constant(0.0) | detect() -> ctrl\n    }\n",
+                "    mode a {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode b {\n        constant(0.0) | stdout()\n    }\n",
+                "    switch(ctrl, a, b) default a\n",
+                "}\n"
+            ),
+            &reg,
+        );
+        assert!(
+            cpp.contains("switch (_ctrl)"),
+            "modal task should dispatch by ctrl value: {}",
+            cpp
+        );
+        assert!(
+            cpp.contains("default: break;"),
+            "out-of-range ctrl should not force fallback mode: {}",
+            cpp
+        );
+        assert!(
+            !cpp.contains("_ringbuf_ctrl.write("),
+            "internally consumed switch ctrl should not be written to shared ring buffer: {}",
             cpp
         );
     }
