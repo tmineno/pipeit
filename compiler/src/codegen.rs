@@ -122,14 +122,7 @@ impl<'a> CodegenCtx<'a> {
     /// program (which has monomorphized metadata for polymorphic actors) over
     /// the raw registry.
     fn lookup_actor(&self, actor_name: &str, call_span: Span) -> Option<&ActorMeta> {
-        // First check lowered program for concrete (possibly monomorphized) metadata
-        if let Some(lowered) = self.lowered {
-            if let Some(meta) = lowered.concrete_actors.get(&call_span) {
-                return Some(meta);
-            }
-        }
-        // Fall back to registry
-        self.registry.lookup(actor_name)
+        lookup_actor_in(self.lowered, self.registry, actor_name, call_span)
     }
 
     /// Format the C++ actor struct name, including template parameters for
@@ -755,13 +748,13 @@ impl<'a> CodegenCtx<'a> {
         indent: &str,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
     ) {
-        let meta = match self.lookup_actor(actor_name, call_span) {
-            Some(m) => m.clone(),
+        let meta = match lookup_actor_in(self.lowered, self.registry, actor_name, call_span) {
+            Some(m) => m,
             None => return,
         };
 
-        let in_count = self.resolve_port_rate_val(&meta.in_shape, &meta, args, shape_constraint);
-        let out_count = self.resolve_port_rate_val(&meta.out_shape, &meta, args, shape_constraint);
+        let in_count = self.resolve_port_rate_val(&meta.in_shape, meta, args, shape_constraint);
+        let out_count = self.resolve_port_rate_val(&meta.out_shape, meta, args, shape_constraint);
         let in_cpp = pipit_type_to_cpp(meta.in_type.unwrap_concrete());
         let _out_cpp = pipit_type_to_cpp(meta.out_type.unwrap_concrete());
 
@@ -866,12 +859,12 @@ impl<'a> CodegenCtx<'a> {
         // couldn't be resolved from args or shape constraints.  The SDF solver
         // computes per-edge token counts that give us the correct value.
         let schedule_dim_overrides =
-            self.build_schedule_dim_overrides(&meta, args, shape_constraint, sched, node.id, sub);
+            self.build_schedule_dim_overrides(meta, args, shape_constraint, sched, node.id, sub);
 
         // Construct actor and fire, check return value
         let params = self.format_actor_params(
             task_name,
-            &meta,
+            meta,
             args,
             shape_constraint,
             &schedule_dim_overrides,
@@ -2294,6 +2287,22 @@ fn subgraphs_of(task_graph: &TaskGraph) -> Vec<&Subgraph> {
             subs
         }
     }
+}
+
+/// Free-function actor lookup that borrows only the lowered program and registry,
+/// not the entire CodegenCtx — avoids whole-self borrow conflicts with `self.out`.
+fn lookup_actor_in<'a>(
+    lowered: Option<&'a LoweredProgram>,
+    registry: &'a Registry,
+    actor_name: &str,
+    call_span: Span,
+) -> Option<&'a ActorMeta> {
+    if let Some(l) = lowered {
+        if let Some(meta) = l.concrete_actors.get(&call_span) {
+            return Some(meta);
+        }
+    }
+    registry.lookup(actor_name)
 }
 
 fn pipit_type_to_cpp(t: PipitType) -> &'static str {
