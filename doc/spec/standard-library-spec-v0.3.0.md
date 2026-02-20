@@ -37,6 +37,7 @@
 | `abs` | T[1] | T[1] | Absolute value |
 | `sqrt` | T[1] | T[1] | Square root |
 | `threshold` | T[1] | int32[1] | Threshold detector |
+| `convolve` | T[N] | T[N] | Convolution |
 | `socket_write` | float[N] | void | Send signal samples over UDP/IPC using PPKT protocol |
 | `socket_read` | void | float[N] | Receive signal samples over UDP/IPC using PPKT protocol |
 
@@ -245,7 +246,7 @@ clock 1kHz control {
 
 ### fft
 
-**Fast Fourier Transform** — Computes FFT using Cooley-Tukey algorithm (radix-2, DIT). Requires N to be a power of 2.
+**Fast Fourier Transform** — Computes real-to-complex FFT using PocketFFT (BSD-3, Max-Planck-Society). Requires N to be a power of 2. Outputs full N-point complex spectrum (Hermitian reconstruction for bins N/2+1 through N-1). Preconditions: N > 0 and N is a power of 2. Postconditions: out[0..N-1] contains the full DFT spectrum. Failure modes: Returns ACTOR_ERROR if N is not a power of 2. Side effects: PocketFFT caches twiddle factors internally.
 
 **Signature:**
 
@@ -796,6 +797,30 @@ template <typename T> ACTOR(threshold, IN(T, 1), OUT(int32, 1), RUNTIME_PARAM(T,
 
 ```pdl
 threshold(0.5)
+```
+
+---
+
+### convolve
+
+**Convolution** — Applies discrete convolution of input signal with a kernel. Produces N output samples (1:1 rate), unlike fir which is N:1. Uses causal zero-padded convolution: out[i] = sum_j kernel[j] * in[i-j]. Polymorphic: works with float and double wire types. Preconditions: kernel.size() > 0. Postconditions: out[0..N-1] contains the convolved signal. Failure modes: None (always returns ACTOR_OK). Side effects: None.
+
+**Signature:**
+
+```cpp
+ACTOR(convolve, IN(T, N), OUT(T, N), PARAM(std::span<const T>, kernel) PARAM(int, N))
+```
+
+**Parameters:**
+
+- `kernel` - Convolution kernel coefficients
+
+**Returns:** ACTOR_OK on success
+
+**Example:**
+
+```pdl
+convolve([0.2, 0.6, 0.2])
 ```
 
 ---

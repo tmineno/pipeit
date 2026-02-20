@@ -574,6 +574,11 @@ fn discover_headers_recursive(
 
         let path = entry.path();
         if path.is_dir() {
+            // Skip vendored third-party directories — their headers are included
+            // transitively via top-level headers, not directly.
+            if path.file_name().and_then(|n| n.to_str()) == Some("third_party") {
+                continue;
+            }
             discover_headers_recursive(&path, out)?;
             continue;
         }

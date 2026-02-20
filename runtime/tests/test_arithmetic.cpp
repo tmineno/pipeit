@@ -233,6 +233,91 @@ TEST(threshold_exact) {
     ASSERT_EQ(out[0], 0); // Equal to threshold is NOT greater
 }
 
+// ── Test: convolve actor ──
+
+TEST(convolve_identity_kernel) {
+    // Convolution with [1] should be identity
+    float kernel[] = {1.0f};
+    Actor_convolve<float> actor;
+    actor.kernel = std::span<const float>(kernel, 1);
+    actor.N = 4;
+
+    float in[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float out[4];
+
+    int result = actor(in, out);
+    ASSERT_EQ(result, ACTOR_OK);
+    ASSERT_NEAR(out[0], 1.0f, 0.0001f);
+    ASSERT_NEAR(out[1], 2.0f, 0.0001f);
+    ASSERT_NEAR(out[2], 3.0f, 0.0001f);
+    ASSERT_NEAR(out[3], 4.0f, 0.0001f);
+}
+
+TEST(convolve_impulse_response) {
+    // Convolution of impulse [1,0,0,0] with kernel [a,b,c] should yield [a,b,c,0]
+    float kernel[] = {0.5f, 0.3f, 0.2f};
+    Actor_convolve<float> actor;
+    actor.kernel = std::span<const float>(kernel, 3);
+    actor.N = 4;
+
+    float in[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    float out[4];
+
+    int result = actor(in, out);
+    ASSERT_EQ(result, ACTOR_OK);
+    ASSERT_NEAR(out[0], 0.5f, 0.0001f);
+    ASSERT_NEAR(out[1], 0.3f, 0.0001f);
+    ASSERT_NEAR(out[2], 0.2f, 0.0001f);
+    ASSERT_NEAR(out[3], 0.0f, 0.0001f);
+}
+
+TEST(convolve_smoothing) {
+    // Moving average kernel [0.25, 0.5, 0.25] on a step function
+    float kernel[] = {0.25f, 0.5f, 0.25f};
+    Actor_convolve<float> actor;
+    actor.kernel = std::span<const float>(kernel, 3);
+    actor.N = 6;
+
+    float in[6] = {0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f};
+    float out[6];
+
+    int result = actor(in, out);
+    ASSERT_EQ(result, ACTOR_OK);
+    // out[0] = 0.25*0 = 0
+    ASSERT_NEAR(out[0], 0.0f, 0.0001f);
+    // out[3] = 0.25*1 + 0.5*0 + 0.25*0 = 0.25
+    ASSERT_NEAR(out[3], 0.25f, 0.0001f);
+    // out[4] = 0.25*1 + 0.5*1 + 0.25*0 = 0.75
+    ASSERT_NEAR(out[4], 0.75f, 0.0001f);
+    // out[5] = 0.25*1 + 0.5*1 + 0.25*1 = 1.0
+    ASSERT_NEAR(out[5], 1.0f, 0.0001f);
+}
+
+TEST(convolve_linearity) {
+    // convolve(a*x, k) == a * convolve(x, k)
+    float kernel[] = {0.3f, 0.5f, 0.2f};
+    Actor_convolve<float> actor1, actor2;
+    actor1.kernel = std::span<const float>(kernel, 3);
+    actor1.N = 4;
+    actor2.kernel = std::span<const float>(kernel, 3);
+    actor2.N = 4;
+
+    float x[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float scaled[4];
+    float out_x[4], out_scaled[4];
+    const float a = 2.5f;
+
+    for (int i = 0; i < 4; ++i)
+        scaled[i] = a * x[i];
+
+    actor1(x, out_x);
+    actor2(scaled, out_scaled);
+
+    for (int i = 0; i < 4; ++i) {
+        ASSERT_NEAR(out_scaled[i], a * out_x[i], 0.0001f);
+    }
+}
+
 int main() {
     printf("\n=== Arithmetic Actor Tests ===\n\n");
     printf("\nAll tests passed!\n");
