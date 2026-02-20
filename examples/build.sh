@@ -6,6 +6,9 @@ cd "$(dirname "$0")/.."
 echo "Building pcc..."
 cargo build -p pcc --release
 
+echo "Cleaning previous build..."
+rm -rf examples/build/_cmake
+
 echo "Configuring examples..."
 cmake -S examples -B examples/build/_cmake -DCMAKE_BUILD_TYPE=Release "$@"
 
