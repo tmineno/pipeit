@@ -150,6 +150,35 @@
 
 ---
 
+## v0.3.1 - Codegen Correctness & Throughput Hardening
+
+**Goal**: Fix implementation-side regressions in shape/dimension resolution and shared-buffer codegen, then lock behavior with targeted tests.
+
+- [ ] **Fix dimension inference precedence for symbolic actor params (e.g., `fir(coeff)`)**
+  - [ ] Treat span-derived dimension inference as a first-class resolved source when deciding whether shape is unresolved
+  - [ ] Prevent reverse shape propagation from overriding already-resolved symbolic dimensions
+  - [ ] Add explicit mismatch diagnostics when inferred dimension value conflicts with explicit arg/shape constraint
+  - [ ] Verify generated actor params preserve stdlib semantics (`fir(coeff)` uses `N = len(coeff)` unless explicitly constrained)
+
+- [ ] **Fix shared-buffer I/O granularity in codegen**
+  - [ ] Stop modeling inter-task `BufferRead`/`BufferWrite` as effectively one-token firings in emitted loops
+  - [ ] Emit block ring-buffer operations whenever schedule information allows (`read(..., count>1)`, `write(..., count>1)`)
+  - [ ] Keep fail-fast + retry semantics intact while reducing retry-loop frequency
+
+- [ ] **Reduce actor construction overhead in hot loops**
+  - [ ] Hoist actor object construction out of per-firing inner loops when semantics permit
+  - [ ] Keep runtime-parameter update behavior correct at iteration boundaries
+  - [ ] Add a clear policy for actors that cannot be safely hoisted
+
+- [ ] **Add regression tests for these issues**
+  - [ ] `analyze` tests: symbolic dimension resolution prefers explicit args/span-derived values over propagated shape when both exist
+  - [ ] `schedule`/`codegen` tests: generated FIR call sites do not emit out-of-bounds pointer strides for `fir(coeff)` pipelines
+  - [ ] `codegen` tests: shared-buffer I/O emits block-size ring-buffer ops for multi-token edges
+  - [ ] `codegen` tests: actor construction count in generated C++ is hoisted (no per-firing temporary construction where hoistable)
+  - [ ] Integration test: `examples/example.pdl` compile/codegen smoke assertion for safe FIR indexing and stable shared-buffer transfer shape
+
+---
+
 ## v0.4.0 - Language Evolution
 
 **Goal**: Improve PDL ergonomics based on real usage experience. Design-first approach.

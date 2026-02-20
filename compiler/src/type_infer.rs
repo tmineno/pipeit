@@ -119,6 +119,9 @@ pub fn type_infer(
             mono_actors: HashMap::new(),
         },
         diagnostics: Vec::new(),
+        buffer_types: HashMap::new(),
+        tap_types: HashMap::new(),
+        program: Some(program),
     };
 
     engine.infer_program(program);
@@ -134,13 +137,31 @@ struct TypeInferEngine<'a> {
     registry: &'a Registry,
     typed: TypedProgram,
     diagnostics: Vec<Diagnostic>,
+    /// Output types of shared buffers, keyed by buffer name.
+    /// Populated as pipe chains with buffer writes are processed.
+    buffer_types: HashMap<String, PipitType>,
+    /// Output types of tap/fork points, keyed by tap label name.
+    tap_types: HashMap<String, PipitType>,
+    /// Program AST reference for define body lookup.
+    program: Option<&'a Program>,
 }
 
 impl<'a> TypeInferEngine<'a> {
     fn infer_program(&mut self, program: &Program) {
+        // Pass 1: Process all tasks (collects buffer/tap output types along the way).
+        // Define bodies are processed on-demand via define_output_type when
+        // a define call is encountered, using the call site's upstream type context.
         for stmt in &program.statements {
             if let StatementKind::Task(task) = &stmt.kind {
                 self.infer_task(task);
+            }
+        }
+
+        // Pass 2: Re-process tasks that have unresolved polymorphic calls from
+        // buffer reads (the writer task may have been processed after the reader)
+        for stmt in &program.statements {
+            if let StatementKind::Task(task) = &stmt.kind {
+                self.reinfer_task_buffer_reads(task);
             }
         }
     }
@@ -164,16 +185,48 @@ impl<'a> TypeInferEngine<'a> {
     }
 
     fn infer_pipe_expr(&mut self, pipe: &PipeExpr) {
+        self.infer_pipe_expr_with_upstream(pipe, None);
+    }
+
+    fn infer_pipe_expr_with_upstream(&mut self, pipe: &PipeExpr, upstream_type: Option<PipitType>) {
         // Collect the chain of actor calls in this pipe
         let mut calls: Vec<&ActorCall> = Vec::new();
 
-        if let PipeSource::ActorCall(call) = &pipe.source {
-            calls.push(call);
-        }
+        // Determine initial upstream type from pipe source
+        let initial_type = match &pipe.source {
+            PipeSource::ActorCall(call) => {
+                calls.push(call);
+                upstream_type // ActorCall source has no external upstream
+            }
+            PipeSource::BufferRead(ident) => {
+                // Use tracked buffer type if available
+                upstream_type.or_else(|| self.buffer_types.get(&ident.name).copied())
+            }
+            PipeSource::TapRef(ident) => {
+                // Use tracked tap type if available
+                upstream_type.or_else(|| self.tap_types.get(&ident.name).copied())
+            }
+        };
+
+        // Track tap element positions so we can record their types after inference
+        let mut tap_positions: Vec<(String, usize)> = Vec::new(); // (name, call_index)
+        let mut call_index = if matches!(&pipe.source, PipeSource::ActorCall(_)) {
+            1 // source call is at index 0
+        } else {
+            0
+        };
 
         for elem in &pipe.elements {
-            if let PipeElem::ActorCall(call) = elem {
-                calls.push(call);
+            match elem {
+                PipeElem::ActorCall(call) => {
+                    calls.push(call);
+                    call_index += 1;
+                }
+                PipeElem::Tap(ident) => {
+                    // Record tap position — its type is the output of the most recent call
+                    tap_positions.push((ident.name.clone(), call_index));
+                }
+                PipeElem::Probe(_) => {}
             }
         }
 
@@ -183,10 +236,31 @@ impl<'a> TypeInferEngine<'a> {
         }
 
         // Phase 2: Infer type arguments from pipe context for unresolved calls
-        self.infer_from_pipe_context(&calls);
+        let final_type = self.infer_from_pipe_context_with_initial(&calls, initial_type);
 
         // Phase 3: Check widening between pipe edges
         self.check_pipe_widening(&calls);
+
+        // Record tap types — the type at a tap point is the output of the call
+        // immediately before it (or the initial type if no call precedes it)
+        for (tap_name, idx) in &tap_positions {
+            let tap_type = if *idx == 0 {
+                initial_type
+            } else {
+                // Get the output type of the call at idx-1
+                self.call_output_type(calls[idx - 1])
+            };
+            if let Some(t) = tap_type {
+                self.tap_types.insert(tap_name.clone(), t);
+            }
+        }
+
+        // Track buffer output type if this pipe writes to a buffer
+        if let Some(ref sink) = pipe.sink {
+            if let Some(out_type) = final_type {
+                self.buffer_types.insert(sink.buffer.name.clone(), out_type);
+            }
+        }
     }
 
     /// Resolve explicit type arguments (e.g., `fir<float>(coeff)`).
@@ -243,16 +317,21 @@ impl<'a> TypeInferEngine<'a> {
         self.typed.mono_actors.insert(call.span, mono);
     }
 
-    /// Infer type arguments from pipe context for polymorphic calls without explicit type args.
-    fn infer_from_pipe_context(&mut self, calls: &[&ActorCall]) {
+    /// Infer type arguments from pipe context, with an optional initial upstream type.
+    /// Returns the output type of the last actor in the chain.
+    fn infer_from_pipe_context_with_initial(
+        &mut self,
+        calls: &[&ActorCall],
+        initial_type: Option<PipitType>,
+    ) -> Option<PipitType> {
         // Walk the pipe chain and propagate types forward
-        let mut current_output_type: Option<PipitType> = None;
+        let mut current_output_type: Option<PipitType> = initial_type;
 
         for call in calls {
             let resolution = self.resolved.call_resolutions.get(&call.span);
             if !matches!(resolution, Some(CallResolution::Actor)) {
-                // Define call — no type to propagate
-                current_output_type = None;
+                // Define call — try to propagate type through the define body
+                current_output_type = self.define_output_type(call, current_output_type);
                 continue;
             }
 
@@ -340,6 +419,137 @@ impl<'a> TypeInferEngine<'a> {
                 }
             }
         }
+        current_output_type
+    }
+
+    /// Get the output type of a define call by looking up the define body's last actor.
+    /// Also processes the define body with the upstream type context if provided.
+    fn define_output_type(
+        &mut self,
+        call: &ActorCall,
+        upstream_type: Option<PipitType>,
+    ) -> Option<PipitType> {
+        let define_entry = self.resolved.defines.get(&call.name.name)?;
+        let program = self.program?;
+        let define_stmt = match &program.statements[define_entry.stmt_index].kind {
+            StatementKind::Define(d) => d,
+            _ => return None,
+        };
+
+        // Process the define body with the upstream type context.
+        // This allows polymorphic actors inside defines to resolve T from the
+        // call site's pipe context (e.g., `constant(0.0) | amplify() | stdout()`
+        // propagates float into amplify's body).
+        let first_pipe = define_stmt.body.lines.first()?;
+
+        // Collect calls from the first pipe line to infer with upstream context
+        let mut calls: Vec<&ActorCall> = Vec::new();
+        if let PipeSource::ActorCall(c) = &first_pipe.source {
+            calls.push(c);
+        }
+        for elem in &first_pipe.elements {
+            if let PipeElem::ActorCall(c) = elem {
+                calls.push(c);
+            }
+        }
+
+        // Resolve explicit type args first
+        for c in &calls {
+            self.resolve_explicit_type_args(c);
+        }
+
+        // Infer from upstream type context
+        let body_output = self.infer_from_pipe_context_with_initial(&calls, upstream_type);
+
+        // Process remaining pipe lines in the define body (if any)
+        for pipe in define_stmt.body.lines.iter().skip(1) {
+            self.infer_pipe_expr(pipe);
+        }
+
+        // Return the output type of the define body
+        if body_output.is_some() {
+            return body_output;
+        }
+
+        // Fallback: check the last actor in the last pipe line
+        let last_pipe = define_stmt.body.lines.last()?;
+        let mut last_call: Option<&ActorCall> = None;
+        for elem in last_pipe.elements.iter().rev() {
+            if let PipeElem::ActorCall(c) = elem {
+                last_call = Some(c);
+                break;
+            }
+        }
+        if last_call.is_none() {
+            if let PipeSource::ActorCall(c) = &last_pipe.source {
+                last_call = Some(c);
+            }
+        }
+
+        let last_call = last_call?;
+        if let Some(mono) = self.typed.mono_actors.get(&last_call.span) {
+            return mono.out_type.as_concrete();
+        }
+        let meta = self.registry.lookup(&last_call.name.name)?;
+        meta.out_type.as_concrete()
+    }
+
+    /// Re-process pipes starting with buffer reads that may have had unresolved
+    /// polymorphic actors on the first pass (the writer task may have been defined
+    /// after the reader task in the source file).
+    fn reinfer_task_buffer_reads(&mut self, task: &TaskStmt) {
+        let pipes = match &task.body {
+            TaskBody::Pipeline(body) => body.lines.iter().collect::<Vec<_>>(),
+            TaskBody::Modal(modal) => {
+                let mut v: Vec<&PipeExpr> = modal.control.body.lines.iter().collect();
+                for mode in &modal.modes {
+                    v.extend(mode.body.lines.iter());
+                }
+                v
+            }
+        };
+
+        for pipe in pipes {
+            if let PipeSource::BufferRead(ident) = &pipe.source {
+                if let Some(&buf_type) = self.buffer_types.get(&ident.name) {
+                    // Check if any actor in this pipe is still unresolved
+                    let has_unresolved = pipe.elements.iter().any(|elem| {
+                        if let PipeElem::ActorCall(call) = elem {
+                            let meta = self.registry.lookup(&call.name.name);
+                            if let Some(m) = meta {
+                                m.is_polymorphic()
+                                    && !self.typed.mono_actors.contains_key(&call.span)
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    });
+
+                    if has_unresolved {
+                        // Clear previous errors for these calls before re-inferring
+                        let call_spans: Vec<Span> = pipe
+                            .elements
+                            .iter()
+                            .filter_map(|e| {
+                                if let PipeElem::ActorCall(c) = e {
+                                    Some(c.name.span)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        self.diagnostics.retain(|d| {
+                            !(d.message.contains("ambiguous polymorphic")
+                                && call_spans.contains(&d.span))
+                        });
+
+                        self.infer_pipe_expr_with_upstream(pipe, Some(buf_type));
+                    }
+                }
+            }
+        }
     }
 
     /// Try to infer type parameters from actor call arguments.
@@ -386,13 +596,109 @@ impl<'a> TypeInferEngine<'a> {
                     Some(PipitType::Float) // Float literals default to float
                 }
             }
-            Arg::ConstRef(_ident) => {
-                // Const type inference requires access to the AST const value.
-                // For now, return None — explicit type args are required when
-                // the type can't be inferred from pipe context.
-                None
+            Arg::ParamRef(ident) => {
+                // Look up param's declared value type
+                self.infer_param_type(&ident.name)
+            }
+            Arg::ConstRef(ident) => {
+                // Look up const's declared value type
+                self.infer_const_type(&ident.name)
             }
             _ => None,
+        }
+    }
+
+    /// Get the output type of a call (actor or define).
+    fn call_output_type(&self, call: &ActorCall) -> Option<PipitType> {
+        // Check if it's a monomorphized actor
+        if let Some(mono) = self.typed.mono_actors.get(&call.span) {
+            return mono.out_type.as_concrete();
+        }
+        // Check actor registry
+        if let Some(meta) = self.registry.lookup(&call.name.name) {
+            return meta.out_type.as_concrete();
+        }
+        // Check if it's a define — get the define body's output type
+        if let Some(define_entry) = self.resolved.defines.get(&call.name.name) {
+            if let Some(program) = self.program {
+                if let StatementKind::Define(def) =
+                    &program.statements[define_entry.stmt_index].kind
+                {
+                    // Find the last actor call in the define body
+                    if let Some(last_pipe) = def.body.lines.last() {
+                        let mut last_call: Option<&ActorCall> = None;
+                        for elem in last_pipe.elements.iter().rev() {
+                            if let PipeElem::ActorCall(c) = elem {
+                                last_call = Some(c);
+                                break;
+                            }
+                        }
+                        if last_call.is_none() {
+                            if let PipeSource::ActorCall(c) = &last_pipe.source {
+                                last_call = Some(c);
+                            }
+                        }
+                        if let Some(lc) = last_call {
+                            return self.call_output_type(lc);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Infer the type of a runtime param from its default value.
+    fn infer_param_type(&self, name: &str) -> Option<PipitType> {
+        let entry = self.resolved.params.get(name)?;
+        let program = self.program?;
+        let stmt = &program.statements[entry.stmt_index];
+        if let StatementKind::Param(p) = &stmt.kind {
+            match &p.value {
+                Scalar::Number(_, _, is_int) => {
+                    if *is_int {
+                        Some(PipitType::Int32)
+                    } else {
+                        Some(PipitType::Float)
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Infer the type of a const from its declared value.
+    fn infer_const_type(&self, name: &str) -> Option<PipitType> {
+        let entry = self.resolved.consts.get(name)?;
+        let program = self.program?;
+        let stmt = &program.statements[entry.stmt_index];
+        if let StatementKind::Const(c) = &stmt.kind {
+            match &c.value {
+                Value::Scalar(Scalar::Number(_, _, is_int)) => {
+                    if *is_int {
+                        Some(PipitType::Int32)
+                    } else {
+                        Some(PipitType::Float)
+                    }
+                }
+                Value::Array(elems, _) => {
+                    // Infer from first element
+                    if let Some(Scalar::Number(_, _, is_int)) = elems.first() {
+                        if *is_int {
+                            Some(PipitType::Int32)
+                        } else {
+                            Some(PipitType::Float)
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
         }
     }
 

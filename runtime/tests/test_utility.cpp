@@ -82,7 +82,7 @@ TEST(constant_multiple_calls) {
 
 // ── Test: delay actor ──
 TEST(delay_passthrough) {
-    Actor_delay actor;
+    Actor_delay<float> actor;
     actor.N = 1;
     actor.init = 0.0f;
 
@@ -95,7 +95,7 @@ TEST(delay_passthrough) {
 }
 
 TEST(delay_different_values) {
-    Actor_delay actor;
+    Actor_delay<float> actor;
     actor.N = 1;
     actor.init = 0.0f;
 
@@ -116,7 +116,7 @@ TEST(delay_different_values) {
 
 // ── Test: decimate actor ──
 TEST(decimate_basic) {
-    Actor_decimate actor;
+    Actor_decimate<float> actor;
     actor.N = 3;
 
     float in[3] = {1.0f, 2.0f, 3.0f};
@@ -128,7 +128,7 @@ TEST(decimate_basic) {
 }
 
 TEST(decimate_large_window) {
-    Actor_decimate actor;
+    Actor_decimate<float> actor;
     actor.N = 10;
 
     float in[10] = {9.0f, 8.0f, 7.0f, 6.0f, 5.0f, 4.0f, 3.0f, 2.0f, 1.0f, 0.0f};
@@ -140,7 +140,7 @@ TEST(decimate_large_window) {
 }
 
 TEST(decimate_single) {
-    Actor_decimate actor;
+    Actor_decimate<float> actor;
     actor.N = 1;
 
     float in[1] = {42.0f};

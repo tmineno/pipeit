@@ -56,7 +56,7 @@
 
 // ── Test: mul actor ──
 TEST(mul_basic) {
-    Actor_mul actor{2.0f};
+    Actor_mul<float> actor{2.0f};
     actor.N = 1;
     float in[1] = {5.0f};
     float out[1];
@@ -67,7 +67,7 @@ TEST(mul_basic) {
 }
 
 TEST(mul_negative_gain) {
-    Actor_mul actor{-2.0f};
+    Actor_mul<float> actor{-2.0f};
     actor.N = 1;
     float in[1] = {5.0f};
     float out[1];
@@ -79,7 +79,7 @@ TEST(mul_negative_gain) {
 
 // ── Test: add actor ──
 TEST(add_basic) {
-    Actor_add actor;
+    Actor_add<float> actor;
     float in[2] = {3.0f, 7.0f};
     float out[1];
 
@@ -89,7 +89,7 @@ TEST(add_basic) {
 }
 
 TEST(add_negative) {
-    Actor_add actor;
+    Actor_add<float> actor;
     float in[2] = {-3.0f, 7.0f};
     float out[1];
 
@@ -100,7 +100,7 @@ TEST(add_negative) {
 
 // ── Test: sub actor ──
 TEST(sub_basic) {
-    Actor_sub actor;
+    Actor_sub<float> actor;
     float in[2] = {10.0f, 3.0f};
     float out[1];
 
@@ -110,7 +110,7 @@ TEST(sub_basic) {
 }
 
 TEST(sub_negative_result) {
-    Actor_sub actor;
+    Actor_sub<float> actor;
     float in[2] = {3.0f, 10.0f};
     float out[1];
 
@@ -121,7 +121,7 @@ TEST(sub_negative_result) {
 
 // ── Test: div actor ──
 TEST(div_basic) {
-    Actor_div actor;
+    Actor_div<float> actor;
     float in[2] = {10.0f, 2.0f};
     float out[1];
 
@@ -131,7 +131,7 @@ TEST(div_basic) {
 }
 
 TEST(div_by_zero_returns_nan) {
-    Actor_div actor;
+    Actor_div<float> actor;
     float in[2] = {10.0f, 0.0f};
     float out[1];
 
@@ -142,7 +142,7 @@ TEST(div_by_zero_returns_nan) {
 
 // ── Test: abs actor ──
 TEST(abs_positive) {
-    Actor_abs actor;
+    Actor_abs<float> actor;
     float in[1] = {5.0f};
     float out[1];
 
@@ -152,7 +152,7 @@ TEST(abs_positive) {
 }
 
 TEST(abs_negative) {
-    Actor_abs actor;
+    Actor_abs<float> actor;
     float in[1] = {-5.0f};
     float out[1];
 
@@ -162,7 +162,7 @@ TEST(abs_negative) {
 }
 
 TEST(abs_zero) {
-    Actor_abs actor;
+    Actor_abs<float> actor;
     float in[1] = {0.0f};
     float out[1];
 
@@ -173,7 +173,7 @@ TEST(abs_zero) {
 
 // ── Test: sqrt actor ──
 TEST(sqrt_basic) {
-    Actor_sqrt actor;
+    Actor_sqrt<float> actor;
     float in[1] = {16.0f};
     float out[1];
 
@@ -183,7 +183,7 @@ TEST(sqrt_basic) {
 }
 
 TEST(sqrt_zero) {
-    Actor_sqrt actor;
+    Actor_sqrt<float> actor;
     float in[1] = {0.0f};
     float out[1];
 
@@ -193,7 +193,7 @@ TEST(sqrt_zero) {
 }
 
 TEST(sqrt_negative_returns_nan) {
-    Actor_sqrt actor;
+    Actor_sqrt<float> actor;
     float in[1] = {-4.0f};
     float out[1];
 
@@ -204,7 +204,7 @@ TEST(sqrt_negative_returns_nan) {
 
 // ── Test: threshold actor ──
 TEST(threshold_above) {
-    Actor_threshold actor{0.5f};
+    Actor_threshold<float> actor{0.5f};
     float in[1] = {0.7f};
     int32_t out[1];
 
@@ -214,7 +214,7 @@ TEST(threshold_above) {
 }
 
 TEST(threshold_below) {
-    Actor_threshold actor{0.5f};
+    Actor_threshold<float> actor{0.5f};
     float in[1] = {0.3f};
     int32_t out[1];
 
@@ -224,7 +224,7 @@ TEST(threshold_below) {
 }
 
 TEST(threshold_exact) {
-    Actor_threshold actor{0.5f};
+    Actor_threshold<float> actor{0.5f};
     float in[1] = {0.5f};
     int32_t out[1];
 

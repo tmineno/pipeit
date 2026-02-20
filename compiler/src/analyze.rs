@@ -48,6 +48,21 @@ pub struct AnalyzedProgram {
     /// For actors with unresolved SHAPE dims, this stores the shapes inferred
     /// from connected edges. NodeId → inferred ShapeConstraint.
     pub inferred_shapes: HashMap<NodeId, ShapeConstraint>,
+    /// Span-derived dimension parameters: (NodeId, param_name) → value.
+    /// For actors where a symbolic dimension param was inferred from a span
+    /// argument length (e.g., `fir(coeff)` with `coeff=[...5 elems...]` → N=5).
+    /// Authoritative: takes precedence over SDF edge-derived fallbacks in codegen.
+    pub span_derived_dims: HashMap<(NodeId, String), u32>,
+    /// Concrete input/output port rates per node, resolved once in analysis.
+    /// `None` means the corresponding side could not be resolved statically.
+    pub node_port_rates: HashMap<NodeId, NodePortRates>,
+}
+
+/// Concrete input/output token rates for a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodePortRates {
+    pub in_rate: Option<u32>,
+    pub out_rate: Option<u32>,
 }
 
 // ── Public entry point ──────────────────────────────────────────────────────
@@ -61,6 +76,7 @@ pub fn analyze(
 ) -> AnalysisResult {
     let mut ctx = AnalyzeCtx::new(program, resolved, graph, registry);
     ctx.check_types();
+    ctx.record_span_derived_dims();
     ctx.infer_shapes_from_edges();
     ctx.check_shape_constraints();
     ctx.check_dimension_param_order();
@@ -86,6 +102,7 @@ struct AnalyzeCtx<'a> {
     inter_buffers: HashMap<String, u64>,
     total_memory: u64,
     inferred_shapes: HashMap<NodeId, ShapeConstraint>,
+    span_derived_dims: HashMap<(NodeId, String), u32>,
 }
 
 struct BalanceGraph {
@@ -110,6 +127,7 @@ impl<'a> AnalyzeCtx<'a> {
             inter_buffers: HashMap::new(),
             total_memory: 0,
             inferred_shapes: HashMap::new(),
+            span_derived_dims: HashMap::new(),
         }
     }
 
@@ -141,15 +159,36 @@ impl<'a> AnalyzeCtx<'a> {
     }
 
     fn build_result(self) -> AnalysisResult {
+        let node_port_rates = self.compute_node_port_rates();
         AnalysisResult {
             analysis: AnalyzedProgram {
                 repetition_vectors: self.repetition_vectors,
                 inter_task_buffers: self.inter_buffers,
                 total_memory: self.total_memory,
                 inferred_shapes: self.inferred_shapes,
+                span_derived_dims: self.span_derived_dims,
+                node_port_rates,
             },
             diagnostics: self.diagnostics,
         }
+    }
+
+    fn compute_node_port_rates(&self) -> HashMap<NodeId, NodePortRates> {
+        let mut rates = HashMap::new();
+        for task_graph in self.graph.tasks.values() {
+            for sub in subgraphs_of(task_graph) {
+                for node in &sub.nodes {
+                    rates.insert(
+                        node.id,
+                        NodePortRates {
+                            in_rate: self.consumption_rate(node),
+                            out_rate: self.production_rate(node),
+                        },
+                    );
+                }
+            }
+        }
+        rates
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────
@@ -431,25 +470,117 @@ impl<'a> AnalyzeCtx<'a> {
 
                 // Try: propagate from src's output shape → tgt's input shape
                 if let Some(sc) = self.try_propagate_shape(src, tgt, sub) {
-                    if let std::collections::hash_map::Entry::Vacant(e) =
-                        self.inferred_shapes.entry(tgt.id)
-                    {
-                        e.insert(sc);
+                    if self.upsert_inferred_shape(tgt.id, sc) {
                         changed = true;
                     }
                 }
 
                 // Try: propagate from tgt's input shape → src's output shape
                 if let Some(sc) = self.try_propagate_shape_reverse(tgt, src, sub) {
-                    if let std::collections::hash_map::Entry::Vacant(e) =
-                        self.inferred_shapes.entry(src.id)
-                    {
-                        e.insert(sc);
+                    if self.upsert_inferred_shape(src.id, sc) {
                         changed = true;
                     }
                 }
             }
         }
+    }
+
+    /// Insert/update inferred shape and report whether anything changed.
+    fn upsert_inferred_shape(&mut self, node_id: NodeId, sc: ShapeConstraint) -> bool {
+        match self.inferred_shapes.get(&node_id) {
+            Some(prev) if prev == &sc => false,
+            _ => {
+                self.inferred_shapes.insert(node_id, sc);
+                true
+            }
+        }
+    }
+
+    /// Resolve a symbolic dimension from explicit actor args.
+    fn resolve_symbolic_dim_from_args(
+        &self,
+        sym: &str,
+        meta: &ActorMeta,
+        args: &[Arg],
+    ) -> Option<u32> {
+        meta.params
+            .iter()
+            .position(|p| p.name == sym)
+            .and_then(|idx| args.get(idx))
+            .and_then(|arg| self.resolve_arg_to_u32(arg))
+    }
+
+    /// Resolve a single port dimension using precedence:
+    /// explicit arg / explicit shape / span-derived / existing inferred.
+    fn resolve_port_dim_preferred(
+        &self,
+        node_id: NodeId,
+        dim_idx: usize,
+        dim: &TokenCount,
+        meta: &ActorMeta,
+        args: &[Arg],
+        explicit_sc: Option<&ShapeConstraint>,
+        existing_inferred_sc: Option<&ShapeConstraint>,
+    ) -> Option<u32> {
+        match dim {
+            TokenCount::Literal(n) => Some(*n),
+            TokenCount::Symbolic(sym) => self
+                .resolve_symbolic_dim_from_args(sym, meta, args)
+                .or_else(|| {
+                    explicit_sc
+                        .and_then(|sc| sc.dims.get(dim_idx))
+                        .and_then(|sd| self.resolve_shape_dim(sd))
+                })
+                .or_else(|| self.span_derived_dims.get(&(node_id, sym.clone())).copied())
+                .or_else(|| {
+                    existing_inferred_sc
+                        .and_then(|sc| sc.dims.get(dim_idx))
+                        .and_then(|sd| self.resolve_shape_dim(sd))
+                }),
+        }
+    }
+
+    /// Merge edge-propagated dimensions into a target/source actor shape.
+    /// Per-dimension behavior:
+    /// - keep dimensions already fixed by higher-priority sources
+    /// - fill only unresolved dimensions from propagated dims
+    /// Returns merged shape and whether any unresolved dimension was newly filled.
+    fn merge_propagated_shape(
+        &self,
+        node_id: NodeId,
+        port_shape: &PortShape,
+        meta: &ActorMeta,
+        args: &[Arg],
+        explicit_sc: Option<&ShapeConstraint>,
+        existing_inferred_sc: Option<&ShapeConstraint>,
+        propagated_dims: &[u32],
+        span: Span,
+    ) -> Option<(ShapeConstraint, bool)> {
+        if propagated_dims.len() != port_shape.rank() {
+            return None;
+        }
+
+        let mut changed = false;
+        let mut dims = Vec::with_capacity(port_shape.rank());
+        for (i, dim) in port_shape.dims.iter().enumerate() {
+            let val = if let Some(preferred) = self.resolve_port_dim_preferred(
+                node_id,
+                i,
+                dim,
+                meta,
+                args,
+                explicit_sc,
+                existing_inferred_sc,
+            ) {
+                preferred
+            } else {
+                changed = true;
+                propagated_dims[i]
+            };
+            dims.push(ShapeDim::Literal(val, span));
+        }
+
+        Some((ShapeConstraint { dims, span }, changed))
     }
 
     /// Try to propagate shape from src's output to tgt's input.
@@ -471,36 +602,31 @@ impl<'a> AnalyzeCtx<'a> {
             _ => return None,
         };
 
-        // Skip if tgt already has explicit shape constraint or inferred shape
-        if tgt_sc.is_some() || self.inferred_shapes.contains_key(&tgt.id) {
+        // Explicit shape constraints are authoritative at call-site.
+        if tgt_sc.is_some() {
             return None;
         }
 
         let tgt_meta = self.actor_meta(tgt_name)?;
 
-        // Check if tgt has unresolved symbolic dims in its input shape
-        if !self.has_unresolved_dims(&tgt_meta.in_shape, tgt_meta, tgt_args) {
-            return None;
-        }
-
         // Get src's resolved output shape (as a list of concrete dim values)
         let src_dims = self.resolve_output_shape_dims(src, sub)?;
-        let tgt_in_rank = tgt_meta.in_shape.rank();
-
-        // Only propagate if ranks match
-        if src_dims.len() != tgt_in_rank {
-            return None;
+        let existing = self.inferred_shapes.get(&tgt.id);
+        let (sc, changed) = self.merge_propagated_shape(
+            tgt.id,
+            &tgt_meta.in_shape,
+            tgt_meta,
+            tgt_args,
+            tgt_sc,
+            existing,
+            &src_dims,
+            tgt.span,
+        )?;
+        if changed {
+            Some(sc)
+        } else {
+            None
         }
-
-        // Build a ShapeConstraint from src's resolved output dims
-        let span = tgt.span;
-        Some(ShapeConstraint {
-            dims: src_dims
-                .into_iter()
-                .map(|v| ShapeDim::Literal(v, span))
-                .collect(),
-            span,
-        })
     }
 
     /// Try to propagate shape from tgt's input back to src's output.
@@ -522,15 +648,12 @@ impl<'a> AnalyzeCtx<'a> {
             _ => return None,
         };
 
-        if src_sc.is_some() || self.inferred_shapes.contains_key(&src.id) {
+        // Explicit shape constraints are authoritative at call-site.
+        if src_sc.is_some() {
             return None;
         }
 
         let src_meta = self.actor_meta(src_name)?;
-
-        if !self.has_unresolved_dims(&src_meta.out_shape, src_meta, src_args) {
-            return None;
-        }
 
         // Only propagate backward when tgt's input shape has symbolic dimensions.
         // If all dims are Literal, the shape is fixed by the actor definition
@@ -559,33 +682,22 @@ impl<'a> AnalyzeCtx<'a> {
             return None;
         }
 
-        let span = src.span;
-        Some(ShapeConstraint {
-            dims: tgt_dims
-                .into_iter()
-                .map(|v| ShapeDim::Literal(v, span))
-                .collect(),
-            span,
-        })
-    }
-
-    /// Check if a PortShape has any unresolved symbolic dimensions.
-    fn has_unresolved_dims(&self, shape: &PortShape, meta: &ActorMeta, args: &[Arg]) -> bool {
-        for dim in &shape.dims {
-            if let TokenCount::Symbolic(sym) = dim {
-                // Check if resolved from args
-                let from_arg = meta
-                    .params
-                    .iter()
-                    .position(|p| p.name == *sym)
-                    .and_then(|idx| args.get(idx))
-                    .and_then(|arg| self.resolve_arg_to_u32(arg));
-                if from_arg.is_none() {
-                    return true;
-                }
-            }
+        let existing = self.inferred_shapes.get(&src.id);
+        let (sc, changed) = self.merge_propagated_shape(
+            src.id,
+            &src_meta.out_shape,
+            src_meta,
+            src_args,
+            src_sc,
+            existing,
+            &tgt_dims,
+            src.span,
+        )?;
+        if changed {
+            Some(sc)
+        } else {
+            None
         }
-        false
     }
 
     /// Resolve a node's output shape to concrete dim values.
@@ -728,20 +840,107 @@ impl<'a> AnalyzeCtx<'a> {
         if dim_param.kind != ParamKind::Param || dim_param.param_type != ParamType::Int {
             return None;
         }
-        for (idx, param) in actor_meta.params.iter().enumerate() {
-            if param.kind != ParamKind::Param {
-                continue;
+        // Find a span length source (first span arg with known compile-time length).
+        let span_len = actor_meta
+            .params
+            .iter()
+            .enumerate()
+            .find_map(|(idx, param)| {
+                if param.kind != ParamKind::Param {
+                    return None;
+                }
+                if !matches!(
+                    param.param_type,
+                    ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
+                ) {
+                    return None;
+                }
+                actor_args
+                    .get(idx)
+                    .and_then(|arg| self.resolve_arg_to_u32(arg))
+            })?;
+
+        // Disambiguation rule: bind span length only to the first unresolved
+        // dimension param (in actor param declaration order).
+        let mut dim_names: HashSet<&str> = HashSet::new();
+        for dim in actor_meta
+            .in_shape
+            .dims
+            .iter()
+            .chain(actor_meta.out_shape.dims.iter())
+        {
+            if let TokenCount::Symbolic(sym) = dim {
+                dim_names.insert(sym.as_str());
             }
-            if !matches!(param.param_type, ParamType::SpanFloat | ParamType::SpanChar) {
-                continue;
+        }
+        let first_unresolved_dim = actor_meta.params.iter().enumerate().find_map(|(idx, p)| {
+            if p.kind != ParamKind::Param || p.param_type != ParamType::Int {
+                return None;
             }
-            if let Some(arg) = actor_args.get(idx) {
-                if let Some(n) = self.resolve_arg_to_u32(arg) {
-                    return Some(n);
+            if !dim_names.contains(p.name.as_str()) {
+                return None;
+            }
+            let explicit = actor_args
+                .get(idx)
+                .and_then(|arg| self.resolve_arg_to_u32(arg));
+            if explicit.is_some() {
+                return None;
+            }
+            Some(p.name.as_str())
+        })?;
+
+        if first_unresolved_dim == dim_name {
+            Some(span_len)
+        } else {
+            None
+        }
+    }
+
+    // ── Phase 0a2: Record span-derived dimension params ─────────────────
+    //
+    // For actors whose symbolic dimension can be inferred from a span argument
+    // length (e.g., fir(coeff) → N = len(coeff)), store the authoritative value
+    // so downstream phases don't need to re-derive it and can detect conflicts.
+
+    fn record_span_derived_dims(&mut self) {
+        let mut entries = Vec::new();
+        for task_graph in self.graph.tasks.values() {
+            for sub in subgraphs_of(task_graph) {
+                for node in &sub.nodes {
+                    if let NodeKind::Actor { name, args, .. } = &node.kind {
+                        if let Some(meta) = self.actor_meta(name) {
+                            // Deduplicate: collect unique symbolic dim names
+                            let mut seen = HashSet::new();
+                            for dim in meta.in_shape.dims.iter().chain(meta.out_shape.dims.iter()) {
+                                if let TokenCount::Symbolic(sym) = dim {
+                                    if !seen.insert(sym.clone()) {
+                                        continue;
+                                    }
+                                    // Skip if already resolvable from explicit args
+                                    let from_arg = meta
+                                        .params
+                                        .iter()
+                                        .position(|p| p.name == *sym)
+                                        .and_then(|idx| args.get(idx))
+                                        .and_then(|arg| self.resolve_arg_to_u32(arg));
+                                    if from_arg.is_some() {
+                                        continue;
+                                    }
+                                    if let Some(val) =
+                                        self.infer_dim_param_from_span_args(sym, meta, args)
+                                    {
+                                        entries.push((node.id, sym.clone(), val));
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
-        None
+        for (node_id, sym, val) in entries {
+            self.span_derived_dims.insert((node_id, sym), val);
+        }
     }
 
     // ── Phase 0b: Shape constraint validation (§13.6) ───────────────────
@@ -802,6 +1001,44 @@ impl<'a> AnalyzeCtx<'a> {
             if let Some((span, message)) = self.find_shape_conflict_on_edge(sub, edge) {
                 self.error(span, message);
             }
+        }
+
+        // Check 4: span-derived vs edge-inferred dimension conflicts (v0.3.1)
+        let mut conflicts = Vec::new();
+        for node in &sub.nodes {
+            if let NodeKind::Actor { name, .. } = &node.kind {
+                if let Some(inferred_sc) = self.inferred_shapes.get(&node.id) {
+                    if let Some(meta) = self.actor_meta(name) {
+                        for (i, dim) in meta.in_shape.dims.iter().enumerate() {
+                            if let TokenCount::Symbolic(sym) = dim {
+                                if let Some(&span_val) =
+                                    self.span_derived_dims.get(&(node.id, sym.clone()))
+                                {
+                                    if let Some(inferred_val) = inferred_sc
+                                        .dims
+                                        .get(i)
+                                        .and_then(|sd| self.resolve_shape_dim(sd))
+                                    {
+                                        if span_val != inferred_val {
+                                            conflicts.push((
+                                                node.span,
+                                                format!(
+                                                    "conflicting dimension '{}' at actor '{}': \
+                                                     span-derived value {} vs edge-inferred value {}",
+                                                    sym, name, span_val, inferred_val
+                                                ),
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (span, msg) in conflicts {
+            self.error(span, msg);
         }
     }
 
@@ -1559,6 +1796,13 @@ fn infer_param_type(scalar: &Scalar) -> Option<ParamType> {
 
 /// Check if inferred param type exactly matches expected actor param type.
 fn param_type_compatible(inferred: &ParamType, expected: &ParamType) -> bool {
+    // TypeParam / SpanTypeParam are polymorphic — type_infer validates the concrete match
+    if matches!(
+        expected,
+        ParamType::TypeParam(_) | ParamType::SpanTypeParam(_)
+    ) {
+        return true;
+    }
     inferred == expected
 }
 
@@ -1589,6 +1833,22 @@ mod tests {
             .expect("failed to load std_sink.h");
         reg.load_header(&std_source)
             .expect("failed to load std_source.h");
+        reg
+    }
+
+    fn test_registry_with_extra_header(header_src: &str) -> Registry {
+        let mut reg = test_registry();
+        let tmp = std::env::temp_dir().join(format!(
+            "pipit_extra_actor_{}_{}.h",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock before UNIX_EPOCH")
+                .as_nanos()
+        ));
+        std::fs::write(&tmp, header_src).expect("write temp actor header");
+        reg.load_header(&tmp).expect("load temp actor header");
+        let _ = std::fs::remove_file(&tmp);
         reg
     }
 
@@ -1730,15 +1990,45 @@ mod tests {
     #[test]
     fn type_check_mismatch() {
         let reg = test_registry();
-        // fft outputs cfloat, but fir expects float → type mismatch
+        // fft outputs cfloat, but stdout expects float → type mismatch
+        // (uses concrete actors; polymorphic actors defer type checks to type_infer)
         let result = analyze_source(
-            "clock 1kHz t {\n    constant(0.0) | fft(256) | fir(5) | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | stdout()\n}",
             &reg,
         );
         assert!(
             has_error(&result, "type mismatch"),
             "expected type mismatch error, got: {:#?}",
             result.diagnostics
+        );
+    }
+
+    #[test]
+    fn polymorphic_fir_rate_resolution() {
+        let reg = test_registry();
+        // Polymorphic fir with span arg: N resolved from coeff array length.
+        // Verifies that SpanTypeParam("T") is handled by infer_dim_param_from_span_args.
+        let result = analyze_ok(
+            "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\nclock 1kHz t {\n    constant(0.0) | fir(coeff) | stdout()\n}",
+            &reg,
+        );
+        let rv = result
+            .analysis
+            .repetition_vectors
+            .get(&("t".to_string(), "pipeline".to_string()))
+            .expect("rv missing");
+        // fir(coeff) with 5-element array → N=5 → rate should be resolved
+        assert!(!rv.is_empty(), "repetition vector should not be empty");
+    }
+
+    #[test]
+    fn polymorphic_mul_passthrough_rate() {
+        let reg = test_registry();
+        // Polymorphic mul with upstream float: T=float, rate 1:1 passthrough.
+        // Verifies polymorphic actors work in analyze without type_infer.
+        analyze_ok(
+            "clock 1kHz t {\n    constant(0.0) | mul(2.5) | stdout()\n}",
+            &reg,
         );
     }
 
@@ -2041,9 +2331,10 @@ mod tests {
     #[test]
     fn param_type_int_to_float_mismatch_error() {
         let reg = test_registry();
-        // param gain = 1 (int), mul has RUNTIME_PARAM(float, gain) -> mismatch
+        // param val = 1 (int), constant has RUNTIME_PARAM(float, value) -> mismatch
+        // (uses concrete actor; polymorphic actors defer type checks to type_infer)
         let result = analyze_source(
-            "param gain = 1\nclock 1kHz t {\n    constant(0.0) | mul($gain) | stdout()\n}",
+            "param val = 1\nclock 1kHz t {\n    constant($val) | stdout()\n}",
             &reg,
         );
         assert!(
@@ -2364,14 +2655,14 @@ mod tests {
 
     #[test]
     fn ctrl_type_not_int32_error() {
-        // fir() outputs float -> ctrl is NOT int32 -> error
+        // constant outputs float -> ctrl is NOT int32 -> error
+        // (uses concrete actor; polymorphic actors defer type checks to type_infer)
         let reg = test_registry();
         let result = analyze_source(
             concat!(
-                "const coeff = [1.0]\n",
                 "clock 1kHz t {\n",
                 "    control {\n",
-                "        constant(0.0) | fir(coeff) -> ctrl\n",
+                "        constant(0.0) -> ctrl\n",
                 "    }\n",
                 "    mode a {\n        constant(0.0) | stdout()\n    }\n",
                 "    mode b {\n        constant(0.0) | stdout()\n    }\n",
@@ -2390,5 +2681,182 @@ mod tests {
             "should error about ctrl not being int32: {:#?}",
             errors
         );
+    }
+
+    // ── v0.3.1 span-derived dimension tests ─────────────────────────────
+
+    #[test]
+    fn span_derived_dim_stored_for_fir() {
+        let reg = test_registry();
+        let source = concat!(
+            "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
+            "clock 1kHz t {\n    constant(0.0) | fir(coeff) | stdout()\n}",
+        );
+        let (result, graph) = analyze_with_graph(source, &reg);
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(errors.is_empty(), "unexpected errors: {:#?}", errors);
+
+        let fir_id = find_actor_id(&graph, "t", "fir");
+        let n_val = result
+            .analysis
+            .span_derived_dims
+            .get(&(fir_id, "N".to_string()));
+        assert_eq!(
+            n_val,
+            Some(&5),
+            "fir(coeff) with 5-element array should store N=5 in span_derived_dims"
+        );
+    }
+
+    #[test]
+    fn span_derived_dim_not_stored_when_explicit_arg() {
+        let reg = test_registry();
+        // fir(taps, 3) provides N=3 explicitly — span_derived_dims should NOT store it
+        let source = concat!(
+            "const taps = [0.1, 0.2, 0.1]\n",
+            "clock 1kHz t {\n    constant(0.0) | fir(taps, 3) | stdout()\n}",
+        );
+        let (result, graph) = analyze_with_graph(source, &reg);
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(errors.is_empty(), "unexpected errors: {:#?}", errors);
+
+        let fir_id = find_actor_id(&graph, "t", "fir");
+        assert!(
+            !result
+                .analysis
+                .span_derived_dims
+                .contains_key(&(fir_id, "N".to_string())),
+            "N should not be in span_derived_dims when provided explicitly"
+        );
+    }
+
+    #[test]
+    fn span_derived_no_conflict_with_matching_pipeline() {
+        // fir(coeff) with 5-tap filter in a pipeline that doesn't force a conflicting N
+        let reg = test_registry();
+        let source = concat!(
+            "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
+            "clock 1kHz t {\n    constant(0.0) | fir(coeff) | stdout()\n}",
+        );
+        let result = analyze_source(source, &reg);
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(errors.is_empty(), "no conflicts expected: {:#?}", errors);
+    }
+
+    #[test]
+    fn span_derived_prevents_edge_inference_override() {
+        // fir(coeff) with 5 taps after fft(256)|c2r() — edge inference should NOT
+        // overwrite N=5 with 256
+        let reg = test_registry();
+        let source = concat!(
+            "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | c2r() | fir(coeff) | stdout()\n}",
+        );
+        let (result, graph) = analyze_with_graph(source, &reg);
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(errors.is_empty(), "unexpected errors: {:#?}", errors);
+
+        let fir_id = find_actor_id(&graph, "t", "fir");
+        // span-derived N=5 must be authoritative
+        assert_eq!(
+            result
+                .analysis
+                .span_derived_dims
+                .get(&(fir_id, "N".to_string())),
+            Some(&5),
+            "fir(coeff) N should be 5, not overridden by edge inference"
+        );
+        // inferred_shapes should NOT contain fir's node (edge inference skipped)
+        assert!(
+            !result.analysis.inferred_shapes.contains_key(&fir_id),
+            "fir should not have edge-inferred shape when span-derived dims exist"
+        );
+    }
+
+    #[test]
+    fn mixed_dims_span_and_edge_inference_merge_per_dimension() {
+        // Generalized case: one symbolic dim (H) resolved from span arg length,
+        // the other dim (W) inferred from connected edge shape.
+        let reg = test_registry_with_extra_header(concat!(
+            "ACTOR(src2d, IN(void, 0), OUT(float, SHAPE(5, 4))) {\n",
+            "    (void)in;\n",
+            "    for (int i = 0; i < 20; ++i) out[i] = 0.0f;\n",
+            "    return ACTOR_OK;\n",
+            "}\n",
+            "ACTOR(mixdim,\n",
+            "      IN(float, SHAPE(H, W)), OUT(float, SHAPE(H, W)),\n",
+            "      PARAM(std::span<const float>, coeff) PARAM(int, H) PARAM(int, W)) {\n",
+            "    (void)coeff;\n",
+            "    for (int i = 0; i < H * W; ++i) out[i] = in[i];\n",
+            "    return ACTOR_OK;\n",
+            "}\n",
+            "ACTOR(sink2d, IN(float, SHAPE(H, W)), OUT(void, 0), PARAM(int, H) PARAM(int, W)) {\n",
+            "    (void)in;\n",
+            "    (void)out;\n",
+            "    (void)H;\n",
+            "    (void)W;\n",
+            "    return ACTOR_OK;\n",
+            "}\n",
+        ));
+        let source = concat!(
+            "const coeff = [1, 2, 3, 4, 5]\n",
+            "clock 1kHz t {\n",
+            "    src2d() | mixdim(coeff) | sink2d()\n",
+            "}",
+        );
+        let (result, graph) = analyze_with_graph(source, &reg);
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(errors.is_empty(), "unexpected errors: {:#?}", errors);
+
+        let mix_id = find_actor_id(&graph, "t", "mixdim");
+        assert_eq!(
+            result
+                .analysis
+                .span_derived_dims
+                .get(&(mix_id, "H".to_string())),
+            Some(&5),
+            "H should be span-derived from coeff length"
+        );
+        let inferred = result
+            .analysis
+            .inferred_shapes
+            .get(&mix_id)
+            .expect("mixdim should have inferred shape");
+        assert_eq!(inferred.dims.len(), 2);
+        assert!(
+            matches!(inferred.dims[0], ShapeDim::Literal(5, _)),
+            "H should remain 5 from span-derived source"
+        );
+        assert!(
+            matches!(inferred.dims[1], ShapeDim::Literal(4, _)),
+            "W should be inferred from upstream edge"
+        );
+        let rates = result
+            .analysis
+            .node_port_rates
+            .get(&mix_id)
+            .expect("mixdim should have precomputed node rates");
+        assert_eq!(rates.in_rate, Some(20));
+        assert_eq!(rates.out_rate, Some(20));
     }
 }

@@ -18,9 +18,7 @@ use crate::analyze::AnalyzedProgram;
 use crate::ast::*;
 use crate::graph::*;
 use crate::lower::LoweredProgram;
-use crate::registry::{
-    ActorMeta, ParamKind, ParamType, PipitType, PortShape, Registry, TokenCount,
-};
+use crate::registry::{ActorMeta, ParamKind, ParamType, PipitType, Registry, TokenCount};
 use crate::resolve::{Diagnostic, ResolvedProgram};
 use crate::schedule::*;
 
@@ -122,14 +120,7 @@ impl<'a> CodegenCtx<'a> {
     /// program (which has monomorphized metadata for polymorphic actors) over
     /// the raw registry.
     fn lookup_actor(&self, actor_name: &str, call_span: Span) -> Option<&ActorMeta> {
-        // First check lowered program for concrete (possibly monomorphized) metadata
-        if let Some(lowered) = self.lowered {
-            if let Some(meta) = lowered.concrete_actors.get(&call_span) {
-                return Some(meta);
-            }
-        }
-        // Fall back to registry
-        self.registry.lookup(actor_name)
+        lookup_actor_in(self.lowered, self.registry, actor_name, call_span)
     }
 
     /// Format the C++ actor struct name, including template parameters for
@@ -657,6 +648,16 @@ impl<'a> CodegenCtx<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Check if an actor's constructor params are all loop-invariant.
+    /// If true, the actor can be constructed once before the repetition loop.
+    fn is_actor_hoistable(&self, args: &[Arg]) -> bool {
+        args.iter().all(|arg| match arg {
+            Arg::Value(_) | Arg::ConstRef(_) | Arg::ParamRef(_) => true,
+            Arg::TapRef(_) => false,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn emit_firing(
         &mut self,
         task_name: &str,
@@ -668,13 +669,81 @@ impl<'a> CodegenCtx<'a> {
         indent: &str,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
     ) {
-        // Fork/Probe are zero-copy passthrough nodes — no loop needed
+        // Fork/Probe are zero-copy passthrough nodes — no loop needed.
+        // BufferRead/BufferWrite perform block ring-buffer transfers outside the
+        // repetition loop for better throughput.
         let is_passthrough = matches!(node.kind, NodeKind::Fork { .. } | NodeKind::Probe { .. });
+        let is_buffer_io = matches!(
+            node.kind,
+            NodeKind::BufferRead { .. } | NodeKind::BufferWrite { .. }
+        );
 
         let rep = entry.repetition_count;
-        let use_loop = rep > 1 && !is_passthrough;
+        let use_loop = rep > 1 && !is_passthrough && !is_buffer_io;
         let inner_indent;
         let ind;
+
+        // Actor construction hoisting: for hoistable actors with rep > 1,
+        // declare the actor once before the loop to avoid repeated construction.
+        let hoisted_actor_var: Option<String> = if use_loop {
+            if let NodeKind::Actor {
+                name,
+                call_span,
+                args,
+                shape_constraint,
+            } = &node.kind
+            {
+                if self.is_actor_hoistable(args) {
+                    if let Some(meta) =
+                        lookup_actor_in(self.lowered, self.registry, name, *call_span)
+                    {
+                        let effective_sc = shape_constraint
+                            .as_ref()
+                            .or_else(|| self.analysis.inferred_shapes.get(&node.id));
+                        let schedule_dim_overrides = self.build_schedule_dim_overrides(
+                            meta,
+                            args,
+                            effective_sc,
+                            sched,
+                            node.id,
+                            sub,
+                        );
+                        let params = self.format_actor_params(
+                            task_name,
+                            meta,
+                            args,
+                            effective_sc,
+                            &schedule_dim_overrides,
+                            node.id,
+                        );
+                        let cpp_name = self.actor_cpp_name(name, *call_span);
+                        let var_name = format!("_actor_{}", node.id.0);
+                        if params.is_empty() {
+                            let _ = writeln!(
+                                self.out,
+                                "{}auto {} = {}{{}};",
+                                indent, var_name, cpp_name
+                            );
+                        } else {
+                            let _ = writeln!(
+                                self.out,
+                                "{}auto {} = {}{{{}}};",
+                                indent, var_name, cpp_name, params
+                            );
+                        }
+                        Some(var_name)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         if use_loop {
             let _ = writeln!(
@@ -710,6 +779,7 @@ impl<'a> CodegenCtx<'a> {
                     effective_sc,
                     ind,
                     edge_bufs,
+                    hoisted_actor_var.as_deref(),
                 );
             }
             NodeKind::Fork { .. } => {
@@ -754,16 +824,17 @@ impl<'a> CodegenCtx<'a> {
         shape_constraint: Option<&ShapeConstraint>,
         indent: &str,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
+        hoisted_var: Option<&str>,
     ) {
-        let meta = match self.lookup_actor(actor_name, call_span) {
-            Some(m) => m.clone(),
+        let meta = match lookup_actor_in(self.lowered, self.registry, actor_name, call_span) {
+            Some(m) => m,
             None => return,
         };
 
-        let in_count = self.resolve_port_rate_val(&meta.in_shape, &meta, args, shape_constraint);
-        let out_count = self.resolve_port_rate_val(&meta.out_shape, &meta, args, shape_constraint);
-        let in_cpp = pipit_type_to_cpp(meta.in_type.unwrap_concrete());
-        let _out_cpp = pipit_type_to_cpp(meta.out_type.unwrap_concrete());
+        let in_count = self.node_in_rate(node.id);
+        let out_count = self.node_out_rate(node.id);
+        let in_cpp = pipit_type_to_cpp(meta.in_type.as_concrete().unwrap_or(PipitType::Float));
+        let _out_cpp = pipit_type_to_cpp(meta.out_type.as_concrete().unwrap_or(PipitType::Float));
 
         // Input: find upstream edge buffers
         let incoming_edges: Vec<&Edge> = sub.edges.iter().filter(|e| e.target == node.id).collect();
@@ -866,24 +937,30 @@ impl<'a> CodegenCtx<'a> {
         // couldn't be resolved from args or shape constraints.  The SDF solver
         // computes per-edge token counts that give us the correct value.
         let schedule_dim_overrides =
-            self.build_schedule_dim_overrides(&meta, args, shape_constraint, sched, node.id, sub);
+            self.build_schedule_dim_overrides(meta, args, shape_constraint, sched, node.id, sub);
 
         // Construct actor and fire, check return value
-        let params = self.format_actor_params(
-            task_name,
-            &meta,
-            args,
-            shape_constraint,
-            &schedule_dim_overrides,
-        );
-        let cpp_name = self.actor_cpp_name(actor_name, call_span);
-        let call = if params.is_empty() {
-            format!("{}{{}}({}, {})", cpp_name, in_ptr, out_ptr)
+        let call = if let Some(var_name) = hoisted_var {
+            // Actor was hoisted before the loop — just call operator()
+            format!("{}.operator()({}, {})", var_name, in_ptr, out_ptr)
         } else {
-            format!(
-                "{}{{{}}}.operator()({}, {})",
-                cpp_name, params, in_ptr, out_ptr
-            )
+            let params = self.format_actor_params(
+                task_name,
+                meta,
+                args,
+                shape_constraint,
+                &schedule_dim_overrides,
+                node.id,
+            );
+            let cpp_name = self.actor_cpp_name(actor_name, call_span);
+            if params.is_empty() {
+                format!("{}{{}}({}, {})", cpp_name, in_ptr, out_ptr)
+            } else {
+                format!(
+                    "{}{{{}}}.operator()({}, {})",
+                    cpp_name, params, in_ptr, out_ptr
+                )
+            }
         };
         let _ = writeln!(self.out, "{}if ({} != ACTOR_OK) {{", indent, call);
         let _ = writeln!(
@@ -974,19 +1051,13 @@ impl<'a> CodegenCtx<'a> {
         indent: &str,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
     ) {
-        // Read from inter-task ring buffer into outgoing edge buffer
+        // Read from inter-task ring buffer into outgoing edge buffer.
+        // Uses block transfer (total_tokens at once) for throughput.
         let outgoing: Vec<&Edge> = sub.edges.iter().filter(|e| e.source == node.id).collect();
 
         if let Some(out_edge) = outgoing.first() {
             if let Some(dst_buf) = edge_bufs.get(&(out_edge.source, out_edge.target)) {
-                let rep = self.firing_repetition(sched, node.id).max(1);
                 let total_tokens = self.edge_buffer_tokens(sched, out_edge.source, out_edge.target);
-                let per_firing_tokens = (total_tokens / rep).max(1);
-                let dst_expr = if rep > 1 {
-                    format!("&{}[_r * {}]", dst_buf, per_firing_tokens)
-                } else {
-                    dst_buf.clone()
-                };
                 let reader_idx = self
                     .reader_index_for_task(buffer_name, task_name)
                     .unwrap_or(0);
@@ -999,7 +1070,7 @@ impl<'a> CodegenCtx<'a> {
                 let _ = writeln!(
                     self.out,
                     "{}    if (!_ringbuf_{}.read({}, {}, {})) {{",
-                    indent, buffer_name, reader_idx, dst_expr, per_firing_tokens
+                    indent, buffer_name, reader_idx, dst_buf, total_tokens
                 );
                 let _ = writeln!(
                     self.out,
@@ -1019,7 +1090,7 @@ impl<'a> CodegenCtx<'a> {
                 let _ = writeln!(
                     self.out,
                     "{}        std::fprintf(stderr, \"runtime error: task '{}' failed to read {} token(s) from shared buffer '{}'\\n\");",
-                    indent, task_name, per_firing_tokens, buffer_name
+                    indent, task_name, total_tokens, buffer_name
                 );
                 let _ = writeln!(
                     self.out,
@@ -1045,19 +1116,13 @@ impl<'a> CodegenCtx<'a> {
         indent: &str,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
     ) {
-        // Write from incoming edge buffer to inter-task ring buffer
+        // Write from incoming edge buffer to inter-task ring buffer.
+        // Uses block transfer (total_tokens at once) for throughput.
         let incoming: Vec<&Edge> = sub.edges.iter().filter(|e| e.target == node.id).collect();
 
         if let Some(in_edge) = incoming.first() {
             if let Some(src_buf) = edge_bufs.get(&(in_edge.source, in_edge.target)) {
-                let rep = self.firing_repetition(sched, node.id).max(1);
                 let total_tokens = self.edge_buffer_tokens(sched, in_edge.source, in_edge.target);
-                let per_firing_tokens = (total_tokens / rep).max(1);
-                let src_expr = if rep > 1 {
-                    format!("&{}[_r * {}]", src_buf, per_firing_tokens)
-                } else {
-                    src_buf.clone()
-                };
                 let _ = writeln!(
                     self.out,
                     "{}int _rb_retry_{}_{} = 0;",
@@ -1067,7 +1132,7 @@ impl<'a> CodegenCtx<'a> {
                 let _ = writeln!(
                     self.out,
                     "{}    if (!_ringbuf_{}.write({}, {})) {{",
-                    indent, buffer_name, src_expr, per_firing_tokens
+                    indent, buffer_name, src_buf, total_tokens
                 );
                 let _ = writeln!(
                     self.out,
@@ -1087,7 +1152,7 @@ impl<'a> CodegenCtx<'a> {
                 let _ = writeln!(
                     self.out,
                     "{}        std::fprintf(stderr, \"runtime error: task '{}' failed to write {} token(s) to shared buffer '{}'\\n\");",
-                    indent, task_name, per_firing_tokens, buffer_name
+                    indent, task_name, total_tokens, buffer_name
                 );
                 let _ = writeln!(
                     self.out,
@@ -1837,6 +1902,7 @@ impl<'a> CodegenCtx<'a> {
         args: &[Arg],
         shape_constraint: Option<&ShapeConstraint>,
         schedule_dim_overrides: &HashMap<String, u32>,
+        node_id: NodeId,
     ) -> String {
         let mut parts = Vec::new();
         // Track const array args used for count params so they can auto-fill span params.
@@ -1865,23 +1931,36 @@ impl<'a> CodegenCtx<'a> {
                 }
             } else if param.kind == ParamKind::Param {
                 // No arg at this index — try to infer dimension param from shape constraint,
-                // then from span args, then from schedule-resolved edge buffer sizes
+                // then from span args, then from analysis-recorded span-derived dims,
+                // then from schedule-resolved edge buffer sizes
                 if let Some(val) = self
                     .resolve_dim_param_from_shape(&param.name, meta, shape_constraint)
                     .or_else(|| self.infer_dim_param_from_span_args(&param.name, meta, args))
+                    .or_else(|| {
+                        self.analysis
+                            .span_derived_dims
+                            .get(&(node_id, param.name.clone()))
+                            .copied()
+                    })
                     .or_else(|| schedule_dim_overrides.get(&param.name).copied())
                 {
                     parts.push(val.to_string());
                 } else if let Some(array_arg) = last_array_const {
                     // Auto-fill span param from prior array const
-                    if matches!(param.param_type, ParamType::SpanFloat | ParamType::SpanChar) {
+                    if matches!(
+                        param.param_type,
+                        ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
+                    ) {
                         parts.push(self.arg_to_cpp_value(array_arg, &param.param_type));
                         last_array_const = None;
                     }
                 }
             } else if let Some(array_arg) = last_array_const {
                 // Auto-fill span param from prior array const (runtime param case)
-                if matches!(param.param_type, ParamType::SpanFloat | ParamType::SpanChar) {
+                if matches!(
+                    param.param_type,
+                    ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
+                ) {
                     parts.push(self.arg_to_cpp_value(array_arg, &param.param_type));
                     last_array_const = None;
                 }
@@ -1967,8 +2046,12 @@ impl<'a> CodegenCtx<'a> {
                             Value::Scalar(s) => return self.scalar_literal(s),
                             Value::Array(elems, _) => {
                                 // For span params, use std::span
-                                if matches!(param_type, ParamType::SpanFloat | ParamType::SpanChar)
-                                {
+                                if matches!(
+                                    param_type,
+                                    ParamType::SpanFloat
+                                        | ParamType::SpanChar
+                                        | ParamType::SpanTypeParam(_)
+                                ) {
                                     return format!(
                                         "std::span<const float>(_const_{}, {})",
                                         ident.name,
@@ -2001,7 +2084,7 @@ impl<'a> CodegenCtx<'a> {
                         name, call_span, ..
                     } => {
                         if let Some(meta) = self.lookup_actor(name, *call_span) {
-                            return meta.out_type.unwrap_concrete();
+                            return meta.out_type.as_concrete().unwrap_or(PipitType::Float);
                         }
                         return PipitType::Float;
                     }
@@ -2079,42 +2162,18 @@ impl<'a> CodegenCtx<'a> {
         (bytes / elem_size as u64).max(1) as u32
     }
 
-    /// Resolve a PortShape to a concrete rate (product of resolved dimensions).
-    fn resolve_port_rate_val(
-        &self,
-        shape: &PortShape,
-        actor_meta: &ActorMeta,
-        actor_args: &[Arg],
-        shape_constraint: Option<&ShapeConstraint>,
-    ) -> Option<u32> {
-        let mut product: u32 = 1;
-        for (i, dim) in shape.dims.iter().enumerate() {
-            let val = match dim {
-                TokenCount::Literal(n) => Some(*n),
-                TokenCount::Symbolic(sym) => {
-                    let from_arg = actor_meta
-                        .params
-                        .iter()
-                        .position(|p| p.name == *sym)
-                        .and_then(|idx| actor_args.get(idx))
-                        .and_then(|arg| self.resolve_arg_to_u32(arg));
-                    if from_arg.is_some() {
-                        from_arg
-                    } else {
-                        let from_shape = shape_constraint
-                            .and_then(|sc| sc.dims.get(i))
-                            .and_then(|sd| self.resolve_shape_dim(sd));
-                        if from_shape.is_some() {
-                            from_shape
-                        } else {
-                            self.infer_dim_param_from_span_args(sym, actor_meta, actor_args)
-                        }
-                    }
-                }
-            };
-            product = product.checked_mul(val?)?;
-        }
-        Some(product)
+    fn node_in_rate(&self, node_id: NodeId) -> Option<u32> {
+        self.analysis
+            .node_port_rates
+            .get(&node_id)
+            .and_then(|r| r.in_rate)
+    }
+
+    fn node_out_rate(&self, node_id: NodeId) -> Option<u32> {
+        self.analysis
+            .node_port_rates
+            .get(&node_id)
+            .and_then(|r| r.out_rate)
     }
 
     fn infer_dim_param_from_span_args(
@@ -2128,20 +2187,57 @@ impl<'a> CodegenCtx<'a> {
         if dim_param.kind != ParamKind::Param || dim_param.param_type != ParamType::Int {
             return None;
         }
-        for (idx, param) in actor_meta.params.iter().enumerate() {
-            if param.kind != ParamKind::Param {
-                continue;
-            }
-            if !matches!(param.param_type, ParamType::SpanFloat | ParamType::SpanChar) {
-                continue;
-            }
-            if let Some(arg) = actor_args.get(idx) {
-                if let Some(n) = self.resolve_arg_to_u32(arg) {
-                    return Some(n);
+        let span_len = actor_meta
+            .params
+            .iter()
+            .enumerate()
+            .find_map(|(idx, param)| {
+                if param.kind != ParamKind::Param {
+                    return None;
                 }
+                if !matches!(
+                    param.param_type,
+                    ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
+                ) {
+                    return None;
+                }
+                actor_args
+                    .get(idx)
+                    .and_then(|arg| self.resolve_arg_to_u32(arg))
+            })?;
+
+        let mut dim_names: HashSet<&str> = HashSet::new();
+        for dim in actor_meta
+            .in_shape
+            .dims
+            .iter()
+            .chain(actor_meta.out_shape.dims.iter())
+        {
+            if let TokenCount::Symbolic(sym) = dim {
+                dim_names.insert(sym.as_str());
             }
         }
-        None
+        let first_unresolved_dim = actor_meta.params.iter().enumerate().find_map(|(idx, p)| {
+            if p.kind != ParamKind::Param || p.param_type != ParamType::Int {
+                return None;
+            }
+            if !dim_names.contains(p.name.as_str()) {
+                return None;
+            }
+            let explicit = actor_args
+                .get(idx)
+                .and_then(|arg| self.resolve_arg_to_u32(arg));
+            if explicit.is_some() {
+                return None;
+            }
+            Some(p.name.as_str())
+        })?;
+
+        if first_unresolved_dim == dim_name {
+            Some(span_len)
+        } else {
+            None
+        }
     }
 
     fn resolve_shape_dim(&self, dim: &ShapeDim) -> Option<u32> {
@@ -2229,6 +2325,14 @@ impl<'a> CodegenCtx<'a> {
                 {
                     continue;
                 }
+                // Skip if authoritatively recorded in analysis
+                if self
+                    .analysis
+                    .span_derived_dims
+                    .contains_key(&(node_id, sym.clone()))
+                {
+                    continue;
+                }
                 // Also skip if there's an explicit arg for this param
                 if let Some(idx) = meta.params.iter().position(|p| p.name == *sym) {
                     if args.get(idx).is_some() {
@@ -2255,6 +2359,14 @@ impl<'a> CodegenCtx<'a> {
                     .resolve_dim_param_from_shape(sym, meta, shape_constraint)
                     .or_else(|| self.infer_dim_param_from_span_args(sym, meta, args))
                     .is_some()
+                {
+                    continue;
+                }
+                // Skip if authoritatively recorded in analysis
+                if self
+                    .analysis
+                    .span_derived_dims
+                    .contains_key(&(node_id, sym.clone()))
                 {
                     continue;
                 }
@@ -2294,6 +2406,22 @@ fn subgraphs_of(task_graph: &TaskGraph) -> Vec<&Subgraph> {
             subs
         }
     }
+}
+
+/// Free-function actor lookup that borrows only the lowered program and registry,
+/// not the entire CodegenCtx — avoids whole-self borrow conflicts with `self.out`.
+fn lookup_actor_in<'a>(
+    lowered: Option<&'a LoweredProgram>,
+    registry: &'a Registry,
+    actor_name: &str,
+    call_span: Span,
+) -> Option<&'a ActorMeta> {
+    if let Some(l) = lowered {
+        if let Some(meta) = l.concrete_actors.get(&call_span) {
+            return Some(meta);
+        }
+    }
+    registry.lookup(actor_name)
 }
 
 fn pipit_type_to_cpp(t: PipitType) -> &'static str {
@@ -3115,6 +3243,93 @@ mod tests {
         assert!(
             !cpp.contains("Actor_constant<"),
             "non-polymorphic actor should not have template syntax"
+        );
+    }
+
+    // ── v0.3.1 regression tests ─────────────────────────────────────────
+
+    #[test]
+    fn fir_span_derived_param_in_codegen() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\nclock 1kHz t { constant(0.0) | fir(coeff) | stdout() }",
+            &reg,
+        );
+        // fir actor constructor should have N=5 from span-derived dim
+        assert!(
+            cpp.contains(", 5}"),
+            "fir actor should have N=5 from span-derived dim, got:\n{}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn fir_span_derived_not_overridden_by_edge_inference() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            concat!(
+                "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
+                "clock 1kHz t { constant(0.0) | fft(256) | c2r() | fir(coeff) | stdout() }",
+            ),
+            &reg,
+        );
+        // Even with fft(256) upstream producing 256 tokens, fir N should be 5
+        assert!(
+            cpp.contains("Actor_fir") && cpp.contains(", 5}"),
+            "fir should have N=5 even after fft(256)|c2r(), not 256, got:\n{}",
+            cpp
+        );
+        // fir's constructor should NOT contain 256 as its N param
+        assert!(
+            !cpp.contains("Actor_fir")
+                || !cpp.contains("Actor_fir<float>{std::span<const float>(_const_coeff, 5), 256}"),
+            "fir should NOT have N=256 from edge inference, got:\n{}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn shared_buffer_block_transfer() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            concat!(
+                "set mem = 64MB\n",
+                "clock 1kHz a { constant(0.0) -> sig }\n",
+                "clock 1kHz b { @sig | stdout() }\n",
+            ),
+            &reg,
+        );
+        // Ring buffer read/write should use base buffer pointer (no &buf[_r*N] offset)
+        assert!(
+            !cpp.contains("_ringbuf_sig.write(&_"),
+            "ring buffer write should NOT use per-firing pointer offset (block transfer), got:\n{}",
+            cpp
+        );
+        assert!(
+            !cpp.contains("_ringbuf_sig.read(0, &_"),
+            "ring buffer read should NOT use per-firing pointer offset (block transfer), got:\n{}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn actor_construction_hoisted_for_repetition() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            "clock 1kHz t { constant(0.0) | fft(256) | c2r() | stdout() }",
+            &reg,
+        );
+        // c2r has rep=256. Its actor should be hoisted before the _r loop.
+        assert!(
+            cpp.contains("auto _actor_"),
+            "hoistable actor with rep>1 should have pre-loop declaration, got:\n{}",
+            cpp
+        );
+        // The hoisted actor should be called via .operator() inside the loop
+        assert!(
+            cpp.contains("_actor_") && cpp.contains(".operator()("),
+            "hoisted actor should be called via .operator() inside the loop, got:\n{}",
+            cpp
         );
     }
 }

@@ -25,4 +25,5 @@ criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
 name = "compiler_bench"
+path = "../benches/compiler_bench.rs"
 harness = false

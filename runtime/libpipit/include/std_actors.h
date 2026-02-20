@@ -321,6 +321,7 @@ ACTOR(mag, IN(cfloat, SHAPE(N)), OUT(float, SHAPE(N)), PARAM(int, N)) {
 /// @brief Finite Impulse Response filter
 ///
 /// Applies FIR filter with given coefficients.
+/// Polymorphic: works with float and double wire types.
 ///
 /// @param coeff Filter coefficients
 /// @param N Filter length (must match coefficient array size)
@@ -330,8 +331,9 @@ ACTOR(mag, IN(cfloat, SHAPE(N)), OUT(float, SHAPE(N)), PARAM(int, N)) {
 /// @code{.pdl}
 /// fir([0.1, 0.2, 0.4, 0.2, 0.1])
 /// @endcode
-ACTOR(fir, IN(float, N), OUT(float, 1), PARAM(std::span<const float>, coeff) PARAM(int, N)) {
-    float y = 0;
+template <typename T>
+ACTOR(fir, IN(T, N), OUT(T, 1), PARAM(std::span<const T>, coeff) PARAM(int, N)) {
+    T y = T{};
     for (int i = 0; i < N; i++)
         y += coeff[i] * in[i];
     out[0] = y;
@@ -348,6 +350,7 @@ ACTOR(fir, IN(float, N), OUT(float, 1), PARAM(std::span<const float>, coeff) PAR
 /// @brief Multiplication
 ///
 /// Multiplies signal by a runtime-adjustable gain.
+/// Polymorphic: works with any numeric wire type (float, double, etc.).
 ///
 /// @param gain Multiplication factor (runtime parameter)
 /// @return ACTOR_OK on success
@@ -357,7 +360,7 @@ ACTOR(fir, IN(float, N), OUT(float, 1), PARAM(std::span<const float>, coeff) PAR
 /// mul($gain)
 /// mul(2.5)
 /// @endcode
-ACTOR(mul, IN(float, N), OUT(float, N), RUNTIME_PARAM(float, gain) PARAM(int, N)) {
+template <typename T> ACTOR(mul, IN(T, N), OUT(T, N), RUNTIME_PARAM(T, gain) PARAM(int, N)) {
     for (int i = 0; i < N; ++i) {
         out[i] = in[i] * gain;
     }
@@ -369,6 +372,7 @@ ACTOR(mul, IN(float, N), OUT(float, N), RUNTIME_PARAM(float, gain) PARAM(int, N)
 /// @brief Addition
 ///
 /// Adds two signals together.
+/// Polymorphic: works with any numeric wire type.
 ///
 /// @return ACTOR_OK on success
 ///
@@ -376,7 +380,7 @@ ACTOR(mul, IN(float, N), OUT(float, N), RUNTIME_PARAM(float, gain) PARAM(int, N)
 /// @code{.pdl}
 /// :a | add(:b)
 /// @endcode
-ACTOR(add, IN(float, 2), OUT(float, 1)) {
+template <typename T> ACTOR(add, IN(T, 2), OUT(T, 1)) {
     out[0] = in[0] + in[1];
     return ACTOR_OK;
 }
@@ -386,6 +390,7 @@ ACTOR(add, IN(float, 2), OUT(float, 1)) {
 /// @brief Subtraction
 ///
 /// Subtracts second input from first (out = in[0] - in[1]).
+/// Polymorphic: works with any numeric wire type.
 ///
 /// @return ACTOR_OK on success
 ///
@@ -393,7 +398,7 @@ ACTOR(add, IN(float, 2), OUT(float, 1)) {
 /// @code{.pdl}
 /// :a | sub(:b)
 /// @endcode
-ACTOR(sub, IN(float, 2), OUT(float, 1)) {
+template <typename T> ACTOR(sub, IN(T, 2), OUT(T, 1)) {
     out[0] = in[0] - in[1];
     return ACTOR_OK;
 }
@@ -403,7 +408,9 @@ ACTOR(sub, IN(float, 2), OUT(float, 1)) {
 /// @brief Division
 ///
 /// Divides first input by second (out = in[0] / in[1]).
-/// Returns NaN on division by zero (IEEE 754 behavior).
+/// Returns NaN on division by zero for floating-point types (IEEE 754).
+/// Returns zero on division by zero for integer types.
+/// Polymorphic: works with any numeric wire type.
 ///
 /// @return ACTOR_OK on success
 ///
@@ -411,9 +418,9 @@ ACTOR(sub, IN(float, 2), OUT(float, 1)) {
 /// @code{.pdl}
 /// :a | div(:b)
 /// @endcode
-ACTOR(div, IN(float, 2), OUT(float, 1)) {
-    if (in[1] == 0.0f) {
-        out[0] = std::numeric_limits<float>::quiet_NaN();
+template <typename T> ACTOR(div, IN(T, 2), OUT(T, 1)) {
+    if (in[1] == T{}) {
+        out[0] = std::numeric_limits<T>::quiet_NaN();
     } else {
         out[0] = in[0] / in[1];
     }
@@ -425,6 +432,7 @@ ACTOR(div, IN(float, 2), OUT(float, 1)) {
 /// @brief Absolute value
 ///
 /// Computes absolute value of signal.
+/// Polymorphic: works with any numeric wire type.
 ///
 /// @return ACTOR_OK on success
 ///
@@ -432,7 +440,7 @@ ACTOR(div, IN(float, 2), OUT(float, 1)) {
 /// @code{.pdl}
 /// abs()
 /// @endcode
-ACTOR(abs, IN(float, 1), OUT(float, 1)) {
+template <typename T> ACTOR(abs, IN(T, 1), OUT(T, 1)) {
     out[0] = std::abs(in[0]);
     return ACTOR_OK;
 }
@@ -443,6 +451,7 @@ ACTOR(abs, IN(float, 1), OUT(float, 1)) {
 ///
 /// Computes square root of signal.
 /// Returns NaN for negative inputs (IEEE 754 behavior).
+/// Polymorphic: works with float and double wire types.
 ///
 /// @return ACTOR_OK on success
 ///
@@ -450,7 +459,7 @@ ACTOR(abs, IN(float, 1), OUT(float, 1)) {
 /// @code{.pdl}
 /// sqrt()
 /// @endcode
-ACTOR(sqrt, IN(float, 1), OUT(float, 1)) {
+template <typename T> ACTOR(sqrt, IN(T, 1), OUT(T, 1)) {
     out[0] = std::sqrt(in[0]);
     return ACTOR_OK;
 }
@@ -459,9 +468,10 @@ ACTOR(sqrt, IN(float, 1), OUT(float, 1)) {
 
 /// @brief Threshold detector
 ///
-/// Converts float to int32 based on threshold.
+/// Converts signal to int32 based on threshold.
 /// Outputs 1 if input > threshold, otherwise 0.
 /// Useful for control signals in modal tasks.
+/// Polymorphic input: works with any comparable wire type.
 ///
 /// @param value Threshold value (runtime parameter)
 /// @return ACTOR_OK on success
@@ -470,7 +480,7 @@ ACTOR(sqrt, IN(float, 1), OUT(float, 1)) {
 /// @code{.pdl}
 /// threshold(0.5)
 /// @endcode
-ACTOR(threshold, IN(float, 1), OUT(int32, 1), RUNTIME_PARAM(float, value)) {
+template <typename T> ACTOR(threshold, IN(T, 1), OUT(int32, 1), RUNTIME_PARAM(T, value)) {
     out[0] = (in[0] > value) ? 1 : 0;
     return ACTOR_OK;
 }
@@ -486,6 +496,7 @@ ACTOR(threshold, IN(float, 1), OUT(int32, 1), RUNTIME_PARAM(float, value)) {
 ///
 /// Computes mean (average) over N samples.
 /// Consumes N tokens, outputs 1 token.
+/// Polymorphic: works with any numeric wire type.
 ///
 /// @param N Number of samples to average
 /// @return ACTOR_OK on success
@@ -494,8 +505,8 @@ ACTOR(threshold, IN(float, 1), OUT(int32, 1), RUNTIME_PARAM(float, value)) {
 /// @code{.pdl}
 /// mean(10)
 /// @endcode
-ACTOR(mean, IN(float, N), OUT(float, 1), PARAM(int, N)) {
-    float sum = 0.0f;
+template <typename T> ACTOR(mean, IN(T, N), OUT(T, 1), PARAM(int, N)) {
+    T sum = T{};
     for (int i = 0; i < N; ++i) {
         sum += in[i];
     }
@@ -509,6 +520,7 @@ ACTOR(mean, IN(float, N), OUT(float, 1), PARAM(int, N)) {
 ///
 /// Computes RMS over N samples.
 /// Consumes N tokens, outputs 1 token.
+/// Polymorphic: works with float and double wire types.
 ///
 /// @param N Number of samples for RMS calculation
 /// @return ACTOR_OK on success
@@ -517,8 +529,8 @@ ACTOR(mean, IN(float, N), OUT(float, 1), PARAM(int, N)) {
 /// @code{.pdl}
 /// rms(10)
 /// @endcode
-ACTOR(rms, IN(float, N), OUT(float, 1), PARAM(int, N)) {
-    float sum_sq = 0.0f;
+template <typename T> ACTOR(rms, IN(T, N), OUT(T, 1), PARAM(int, N)) {
+    T sum_sq = T{};
     for (int i = 0; i < N; ++i) {
         sum_sq += in[i] * in[i];
     }
@@ -532,6 +544,7 @@ ACTOR(rms, IN(float, N), OUT(float, 1), PARAM(int, N)) {
 ///
 /// Finds minimum value over N samples.
 /// Consumes N tokens, outputs 1 token.
+/// Polymorphic: works with any comparable wire type.
 ///
 /// @param N Number of samples to search
 /// @return ACTOR_OK on success
@@ -540,8 +553,8 @@ ACTOR(rms, IN(float, N), OUT(float, 1), PARAM(int, N)) {
 /// @code{.pdl}
 /// min(10)
 /// @endcode
-ACTOR(min, IN(float, N), OUT(float, 1), PARAM(int, N)) {
-    float min_val = in[0];
+template <typename T> ACTOR(min, IN(T, N), OUT(T, 1), PARAM(int, N)) {
+    T min_val = in[0];
     for (int i = 1; i < N; ++i) {
         if (in[i] < min_val) {
             min_val = in[i];
@@ -557,6 +570,7 @@ ACTOR(min, IN(float, N), OUT(float, 1), PARAM(int, N)) {
 ///
 /// Finds maximum value over N samples.
 /// Consumes N tokens, outputs 1 token.
+/// Polymorphic: works with any comparable wire type.
 ///
 /// @param N Number of samples to search
 /// @return ACTOR_OK on success
@@ -565,8 +579,8 @@ ACTOR(min, IN(float, N), OUT(float, 1), PARAM(int, N)) {
 /// @code{.pdl}
 /// max(10)
 /// @endcode
-ACTOR(max, IN(float, N), OUT(float, 1), PARAM(int, N)) {
-    float max_val = in[0];
+template <typename T> ACTOR(max, IN(T, N), OUT(T, 1), PARAM(int, N)) {
+    T max_val = in[0];
     for (int i = 1; i < N; ++i) {
         if (in[i] > max_val) {
             max_val = in[i];
@@ -587,6 +601,7 @@ ACTOR(max, IN(float, N), OUT(float, 1), PARAM(int, N)) {
 ///
 /// Provides initial tokens for feedback loops.
 /// Built-in support: delay(N, init) provides N initial tokens.
+/// Polymorphic: works with any wire type.
 ///
 /// @param N Number of initial tokens to provide
 /// @param init Initial value for tokens
@@ -596,7 +611,7 @@ ACTOR(max, IN(float, N), OUT(float, 1), PARAM(int, N)) {
 /// @code{.pdl}
 /// delay(1, 0.0)
 /// @endcode
-ACTOR(delay, IN(float, 1), OUT(float, 1), PARAM(int, N) PARAM(float, init)) {
+template <typename T> ACTOR(delay, IN(T, 1), OUT(T, 1), PARAM(int, N) PARAM(T, init)) {
     // Built-in: delay(N, init) provides N initial tokens
     (void)N;
     (void)init;
@@ -749,6 +764,7 @@ ACTOR(binwrite, IN(float, 1), OUT(void, 0),
 /// @brief Downsampling
 ///
 /// Consumes N tokens, outputs first token (rate reduction by N).
+/// Polymorphic: works with any wire type.
 ///
 /// @param N Decimation factor
 /// @return ACTOR_OK on success
@@ -757,7 +773,7 @@ ACTOR(binwrite, IN(float, 1), OUT(void, 0),
 /// @code{.pdl}
 /// decimate(10)
 /// @endcode
-ACTOR(decimate, IN(float, N), OUT(float, 1), PARAM(int, N)) {
+template <typename T> ACTOR(decimate, IN(T, N), OUT(T, 1), PARAM(int, N)) {
     out[0] = in[0];
     return ACTOR_OK;
 }

@@ -46,7 +46,7 @@
 
 // ── Test: mean actor ──
 TEST(mean_basic) {
-    Actor_mean actor;
+    Actor_mean<float> actor;
     actor.N = 5;
     float in[5] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
     float out[1];
@@ -57,7 +57,7 @@ TEST(mean_basic) {
 }
 
 TEST(mean_negative_values) {
-    Actor_mean actor;
+    Actor_mean<float> actor;
     actor.N = 4;
     float in[4] = {-2.0f, -4.0f, 2.0f, 4.0f};
     float out[1];
@@ -68,7 +68,7 @@ TEST(mean_negative_values) {
 }
 
 TEST(mean_single_value) {
-    Actor_mean actor;
+    Actor_mean<float> actor;
     actor.N = 1;
     float in[1] = {42.0f};
     float out[1];
@@ -79,7 +79,7 @@ TEST(mean_single_value) {
 }
 
 TEST(mean_large_window) {
-    Actor_mean actor;
+    Actor_mean<float> actor;
     actor.N = 100;
     float in[100];
     for (int i = 0; i < 100; ++i) {
@@ -94,7 +94,7 @@ TEST(mean_large_window) {
 
 // ── Test: rms actor ──
 TEST(rms_basic) {
-    Actor_rms actor;
+    Actor_rms<float> actor;
     actor.N = 3;
     float in[3] = {3.0f, 4.0f, 0.0f};
     float out[1];
@@ -105,7 +105,7 @@ TEST(rms_basic) {
 }
 
 TEST(rms_uniform_values) {
-    Actor_rms actor;
+    Actor_rms<float> actor;
     actor.N = 5;
     float in[5] = {2.0f, 2.0f, 2.0f, 2.0f, 2.0f};
     float out[1];
@@ -116,7 +116,7 @@ TEST(rms_uniform_values) {
 }
 
 TEST(rms_zero) {
-    Actor_rms actor;
+    Actor_rms<float> actor;
     actor.N = 3;
     float in[3] = {0.0f, 0.0f, 0.0f};
     float out[1];
@@ -128,7 +128,7 @@ TEST(rms_zero) {
 
 // ── Test: min actor ──
 TEST(min_basic) {
-    Actor_min actor;
+    Actor_min<float> actor;
     actor.N = 5;
     float in[5] = {5.0f, 2.0f, 8.0f, 1.0f, 6.0f};
     float out[1];
@@ -139,7 +139,7 @@ TEST(min_basic) {
 }
 
 TEST(min_negative_values) {
-    Actor_min actor;
+    Actor_min<float> actor;
     actor.N = 4;
     float in[4] = {-2.0f, -8.0f, 3.0f, -5.0f};
     float out[1];
@@ -150,7 +150,7 @@ TEST(min_negative_values) {
 }
 
 TEST(min_single_value) {
-    Actor_min actor;
+    Actor_min<float> actor;
     actor.N = 1;
     float in[1] = {42.0f};
     float out[1];
@@ -161,7 +161,7 @@ TEST(min_single_value) {
 }
 
 TEST(min_all_same) {
-    Actor_min actor;
+    Actor_min<float> actor;
     actor.N = 4;
     float in[4] = {7.0f, 7.0f, 7.0f, 7.0f};
     float out[1];
@@ -173,7 +173,7 @@ TEST(min_all_same) {
 
 // ── Test: max actor ──
 TEST(max_basic) {
-    Actor_max actor;
+    Actor_max<float> actor;
     actor.N = 5;
     float in[5] = {5.0f, 2.0f, 8.0f, 1.0f, 6.0f};
     float out[1];
@@ -184,7 +184,7 @@ TEST(max_basic) {
 }
 
 TEST(max_negative_values) {
-    Actor_max actor;
+    Actor_max<float> actor;
     actor.N = 4;
     float in[4] = {-2.0f, -8.0f, -3.0f, -5.0f};
     float out[1];
@@ -195,7 +195,7 @@ TEST(max_negative_values) {
 }
 
 TEST(max_single_value) {
-    Actor_max actor;
+    Actor_max<float> actor;
     actor.N = 1;
     float in[1] = {42.0f};
     float out[1];
@@ -206,7 +206,7 @@ TEST(max_single_value) {
 }
 
 TEST(max_all_same) {
-    Actor_max actor;
+    Actor_max<float> actor;
     actor.N = 4;
     float in[4] = {7.0f, 7.0f, 7.0f, 7.0f};
     float out[1];

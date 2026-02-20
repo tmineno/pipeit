@@ -28,7 +28,7 @@ RE_CODE_START = re.compile(r"/// @code\{\.pdl\}")
 RE_CODE_END = re.compile(r"/// @endcode")
 RE_DOC_LINE = re.compile(r"/// ?(.*)")
 RE_ACTOR = re.compile(
-    r"ACTOR\((\w+),\s*IN\((\w+),\s*(\w+)\),\s*OUT\((\w+),\s*(\w+)\)"
+    r"(?:template\s*<[^>]+>\s*)?ACTOR\((\w+),\s*IN\((\w+),\s*(\w+(?:\(\w+\))?)\),\s*OUT\((\w+),\s*(\w+(?:\(\w+\))?)\)"
 )
 
 
@@ -137,7 +137,7 @@ def parse_actors(src: str) -> list[dict]:
             # Find ACTOR macro line
             while i < len(lines):
                 line = lines[i]
-                am = RE_ACTOR.match(line.strip())
+                am = RE_ACTOR.search(line.strip())
                 if am:
                     actor["name"] = am.group(1)
                     actor["in_type"] = am.group(2)

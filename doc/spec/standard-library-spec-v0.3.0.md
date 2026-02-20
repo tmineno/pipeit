@@ -16,22 +16,23 @@
 | `impulse` | void | float[N] | Impulse train generator |
 | `fft` | float[N] | cfloat[N] | Fast Fourier Transform |
 | `c2r` | cfloat[N] | float[N] | Complex to Real conversion |
-| `fir` | float[N] | float[1] | Complex magnitude |
-| `mul` | float[N] | float[N] | Multiplication |
-| `add` | float[2] | float[1] | Addition |
-| `sub` | float[2] | float[1] | Subtraction |
-| `div` | float[2] | float[1] | Division |
-| `abs` | float[1] | float[1] | Absolute value |
-| `sqrt` | float[1] | float[1] | Square root |
-| `threshold` | float[1] | int32[1] | Threshold detector |
-| `mean` | float[N] | float[1] | Running mean |
-| `rms` | float[N] | float[1] | Root Mean Square |
-| `min` | float[N] | float[1] | Minimum value |
-| `max` | float[N] | float[1] | Maximum value |
-| `delay` | float[1] | float[1] | Feedback delay |
+| `mag` | cfloat[SHAPE(N)] | float[SHAPE(N)] | Complex magnitude |
+| `fir` | T[N] | T[1] | Finite Impulse Response filter |
+| `mul` | T[N] | T[N] | Multiplication |
+| `add` | T[2] | T[1] | Addition |
+| `sub` | T[2] | T[1] | Subtraction |
+| `div` | T[2] | T[1] | Division |
+| `abs` | T[1] | T[1] | Absolute value |
+| `sqrt` | T[1] | T[1] | Square root |
+| `threshold` | T[1] | int32[1] | Threshold detector |
+| `mean` | T[N] | T[1] | Running mean |
+| `rms` | T[N] | T[1] | Root Mean Square |
+| `min` | T[N] | T[1] | Minimum value |
+| `max` | T[N] | T[1] | Maximum value |
+| `delay` | T[1] | T[1] | Feedback delay |
 | `binread` | void | float[1] | Binary file reader |
 | `binwrite` | float[1] | void | Binary file writer |
-| `decimate` | float[N] | float[1] | Downsampling |
+| `decimate` | T[N] | T[1] | Downsampling |
 | `stdout` | float[1] | void | Standard output |
 | `stderr` | float[1] | void | Standard error output |
 | `stdin` | void | float[1] | Standard input |
@@ -257,14 +258,14 @@ c2r()
 
 ---
 
-### fir
+### mag
 
 **Complex magnitude** — Computes magnitude of complex signal (same as c2r).
 
 **Signature:**
 
 ```cpp
-ACTOR(fir, IN(float, N), OUT(float, 1), PARAM(std::span<const float>, coeff) PARAM(int, N))
+ACTOR(mag, IN(cfloat, SHAPE(N)), OUT(float, SHAPE(N)), PARAM(int, N))
 ```
 
 **Returns:** ACTOR_OK on success
@@ -277,16 +278,41 @@ mag()
 
 ---
 
-## Basic Arithmetic Actors
+### fir
 
-### mul
-
-**Multiplication** — Multiplies signal by a runtime-adjustable gain.
+**Finite Impulse Response filter** — Applies FIR filter with given coefficients. Polymorphic: works with float and double wire types.
 
 **Signature:**
 
 ```cpp
-ACTOR(mul, IN(float, N), OUT(float, N), RUNTIME_PARAM(float, gain) PARAM(int, N))
+ACTOR(fir, IN(T, N), OUT(T, 1), PARAM(std::span<const T>, coeff) PARAM(int, N))
+```
+
+**Parameters:**
+
+- `coeff` - Filter coefficients
+- `N` - Filter length (must match coefficient array size)
+
+**Returns:** ACTOR_OK on success
+
+**Example:**
+
+```pdl
+fir([0.1, 0.2, 0.4, 0.2, 0.1])
+```
+
+---
+
+## Basic Arithmetic Actors
+
+### mul
+
+**Multiplication** — Multiplies signal by a runtime-adjustable gain. Polymorphic: works with any numeric wire type (float, double, etc.).
+
+**Signature:**
+
+```cpp
+template <typename T> ACTOR(mul, IN(T, N), OUT(T, N), RUNTIME_PARAM(T, gain) PARAM(int, N))
 ```
 
 **Parameters:**
@@ -306,12 +332,12 @@ mul(2.5)
 
 ### add
 
-**Addition** — Adds two signals together.
+**Addition** — Adds two signals together. Polymorphic: works with any numeric wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(add, IN(float, 2), OUT(float, 1))
+template <typename T> ACTOR(add, IN(T, 2), OUT(T, 1))
 ```
 
 **Returns:** ACTOR_OK on success
@@ -326,12 +352,12 @@ ACTOR(add, IN(float, 2), OUT(float, 1))
 
 ### sub
 
-**Subtraction** — Subtracts second input from first (out = in[0] - in[1]).
+**Subtraction** — Subtracts second input from first (out = in[0] - in[1]). Polymorphic: works with any numeric wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(sub, IN(float, 2), OUT(float, 1))
+template <typename T> ACTOR(sub, IN(T, 2), OUT(T, 1))
 ```
 
 **Returns:** ACTOR_OK on success
@@ -346,12 +372,12 @@ ACTOR(sub, IN(float, 2), OUT(float, 1))
 
 ### div
 
-**Division** — Divides first input by second (out = in[0] / in[1]). Returns NaN on division by zero (IEEE 754 behavior).
+**Division** — Divides first input by second (out = in[0] / in[1]). Returns NaN on division by zero for floating-point types (IEEE 754). Returns zero on division by zero for integer types. Polymorphic: works with any numeric wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(div, IN(float, 2), OUT(float, 1))
+template <typename T> ACTOR(div, IN(T, 2), OUT(T, 1))
 ```
 
 **Returns:** ACTOR_OK on success
@@ -366,12 +392,12 @@ ACTOR(div, IN(float, 2), OUT(float, 1))
 
 ### abs
 
-**Absolute value** — Computes absolute value of signal.
+**Absolute value** — Computes absolute value of signal. Polymorphic: works with any numeric wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(abs, IN(float, 1), OUT(float, 1))
+template <typename T> ACTOR(abs, IN(T, 1), OUT(T, 1))
 ```
 
 **Returns:** ACTOR_OK on success
@@ -386,12 +412,12 @@ abs()
 
 ### sqrt
 
-**Square root** — Computes square root of signal. Returns NaN for negative inputs (IEEE 754 behavior).
+**Square root** — Computes square root of signal. Returns NaN for negative inputs (IEEE 754 behavior). Polymorphic: works with float and double wire types.
 
 **Signature:**
 
 ```cpp
-ACTOR(sqrt, IN(float, 1), OUT(float, 1))
+template <typename T> ACTOR(sqrt, IN(T, 1), OUT(T, 1))
 ```
 
 **Returns:** ACTOR_OK on success
@@ -406,12 +432,12 @@ sqrt()
 
 ### threshold
 
-**Threshold detector** — Converts float to int32 based on threshold. Outputs 1 if input > threshold, otherwise 0. Useful for control signals in modal tasks.
+**Threshold detector** — Converts signal to int32 based on threshold. Outputs 1 if input > threshold, otherwise 0. Useful for control signals in modal tasks. Polymorphic input: works with any comparable wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(threshold, IN(float, 1), OUT(int32, 1), RUNTIME_PARAM(float, value))
+template <typename T> ACTOR(threshold, IN(T, 1), OUT(int32, 1), RUNTIME_PARAM(T, value))
 ```
 
 **Parameters:**
@@ -432,12 +458,12 @@ threshold(0.5)
 
 ### mean
 
-**Running mean** — Computes mean (average) over N samples. Consumes N tokens, outputs 1 token.
+**Running mean** — Computes mean (average) over N samples. Consumes N tokens, outputs 1 token. Polymorphic: works with any numeric wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(mean, IN(float, N), OUT(float, 1), PARAM(int, N))
+template <typename T> ACTOR(mean, IN(T, N), OUT(T, 1), PARAM(int, N))
 ```
 
 **Parameters:**
@@ -456,12 +482,12 @@ mean(10)
 
 ### rms
 
-**Root Mean Square** — Computes RMS over N samples. Consumes N tokens, outputs 1 token.
+**Root Mean Square** — Computes RMS over N samples. Consumes N tokens, outputs 1 token. Polymorphic: works with float and double wire types.
 
 **Signature:**
 
 ```cpp
-ACTOR(rms, IN(float, N), OUT(float, 1), PARAM(int, N))
+template <typename T> ACTOR(rms, IN(T, N), OUT(T, 1), PARAM(int, N))
 ```
 
 **Parameters:**
@@ -480,12 +506,12 @@ rms(10)
 
 ### min
 
-**Minimum value** — Finds minimum value over N samples. Consumes N tokens, outputs 1 token.
+**Minimum value** — Finds minimum value over N samples. Consumes N tokens, outputs 1 token. Polymorphic: works with any comparable wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(min, IN(float, N), OUT(float, 1), PARAM(int, N))
+template <typename T> ACTOR(min, IN(T, N), OUT(T, 1), PARAM(int, N))
 ```
 
 **Parameters:**
@@ -504,12 +530,12 @@ min(10)
 
 ### max
 
-**Maximum value** — Finds maximum value over N samples. Consumes N tokens, outputs 1 token.
+**Maximum value** — Finds maximum value over N samples. Consumes N tokens, outputs 1 token. Polymorphic: works with any comparable wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(max, IN(float, N), OUT(float, 1), PARAM(int, N))
+template <typename T> ACTOR(max, IN(T, N), OUT(T, 1), PARAM(int, N))
 ```
 
 **Parameters:**
@@ -530,12 +556,12 @@ max(10)
 
 ### delay
 
-**Feedback delay** — Provides initial tokens for feedback loops. Built-in support: delay(N, init) provides N initial tokens.
+**Feedback delay** — Provides initial tokens for feedback loops. Built-in support: delay(N, init) provides N initial tokens. Polymorphic: works with any wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(delay, IN(float, 1), OUT(float, 1), PARAM(int, N) PARAM(float, init))
+template <typename T> ACTOR(delay, IN(T, 1), OUT(T, 1), PARAM(int, N) PARAM(T, init))
 ```
 
 **Parameters:**
@@ -609,12 +635,12 @@ binwrite("output.bin", "float")
 
 ### decimate
 
-**Downsampling** — Consumes N tokens, outputs first token (rate reduction by N).
+**Downsampling** — Consumes N tokens, outputs first token (rate reduction by N). Polymorphic: works with any wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(decimate, IN(float, N), OUT(float, 1), PARAM(int, N))
+template <typename T> ACTOR(decimate, IN(T, N), OUT(T, 1), PARAM(int, N))
 ```
 
 **Parameters:**

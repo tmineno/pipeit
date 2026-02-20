@@ -104,7 +104,7 @@ TEST(mag_zero) {
 
 // ── Test: fir actor ──
 TEST(fir_basic) {
-    Actor_fir actor;
+    Actor_fir<float> actor;
     actor.N = 3;
     float coeff[3] = {0.5f, 0.25f, 0.25f};
     actor.coeff = std::span<const float>(coeff, 3);
@@ -119,7 +119,7 @@ TEST(fir_basic) {
 }
 
 TEST(fir_uniform_coefficients) {
-    Actor_fir actor;
+    Actor_fir<float> actor;
     actor.N = 4;
     float coeff[4] = {0.25f, 0.25f, 0.25f, 0.25f};
     actor.coeff = std::span<const float>(coeff, 4);
@@ -134,7 +134,7 @@ TEST(fir_uniform_coefficients) {
 }
 
 TEST(fir_single_coefficient) {
-    Actor_fir actor;
+    Actor_fir<float> actor;
     actor.N = 1;
     float coeff[1] = {2.0f};
     actor.coeff = std::span<const float>(coeff, 1);
