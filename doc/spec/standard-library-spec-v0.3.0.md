@@ -1,30 +1,23 @@
 # Pipit Standard Library Reference
 
-<!-- Auto-generated from std_actors.h by scripts/gen-stdlib-doc.py -->
+<!-- Auto-generated from std_*.h by scripts/gen-stdlib-doc.py -->
 <!-- Do not edit manually -->
 
 ## Quick Reference
 
 | Actor | Input | Output | Description |
 |-------|-------|--------|-------------|
-| `constant` | void | float[N] | Constant signal source |
-| `sine` | void | float[N] | Sine wave generator |
-| `square` | void | float[N] | Square wave generator |
-| `sawtooth` | void | float[N] | Sawtooth wave generator |
-| `triangle` | void | float[N] | Triangle wave generator |
-| `noise` | void | float[N] | White noise generator |
-| `impulse` | void | float[N] | Impulse train generator |
+| `constant` | void | T[N] | Constant signal source |
+| `sine` | void | T[N] | Sine wave generator |
+| `square` | void | T[N] | Square wave generator |
+| `sawtooth` | void | T[N] | Sawtooth wave generator |
+| `triangle` | void | T[N] | Triangle wave generator |
+| `noise` | void | T[N] | White noise generator |
+| `impulse` | void | T[N] | Impulse train generator |
 | `fft` | float[N] | cfloat[N] | Fast Fourier Transform |
 | `c2r` | cfloat[N] | float[N] | Complex to Real conversion |
 | `mag` | cfloat[SHAPE(N)] | float[SHAPE(N)] | Complex magnitude |
 | `fir` | T[N] | T[1] | Finite Impulse Response filter |
-| `mul` | T[N] | T[N] | Multiplication |
-| `add` | T[2] | T[1] | Addition |
-| `sub` | T[2] | T[1] | Subtraction |
-| `div` | T[2] | T[1] | Division |
-| `abs` | T[1] | T[1] | Absolute value |
-| `sqrt` | T[1] | T[1] | Square root |
-| `threshold` | T[1] | int32[1] | Threshold detector |
 | `mean` | T[N] | T[1] | Running mean |
 | `rms` | T[N] | T[1] | Root Mean Square |
 | `min` | T[N] | T[1] | Minimum value |
@@ -33,21 +26,30 @@
 | `binread` | void | float[1] | Binary file reader |
 | `binwrite` | float[1] | void | Binary file writer |
 | `decimate` | T[N] | T[1] | Downsampling |
-| `stdout` | float[1] | void | Standard output |
-| `stderr` | float[1] | void | Standard error output |
-| `stdin` | void | float[1] | Standard input |
-| `stdout_fmt` | float[1] | void | Formatted standard output |
+| `stdout` | T[1] | void | Standard output |
+| `stderr` | T[1] | void | Standard error output |
+| `stdin` | void | T[1] | Standard input |
+| `stdout_fmt` | T[1] | void | Formatted standard output |
+| `mul` | T[N] | T[N] | Multiplication |
+| `add` | T[2] | T[1] | Addition |
+| `sub` | T[2] | T[1] | Subtraction |
+| `div` | T[2] | T[1] | Division |
+| `abs` | T[1] | T[1] | Absolute value |
+| `sqrt` | T[1] | T[1] | Square root |
+| `threshold` | T[1] | int32[1] | Threshold detector |
+| `socket_write` | float[N] | void | Send signal samples over UDP/IPC using PPKT protocol |
+| `socket_read` | void | float[N] | Receive signal samples over UDP/IPC using PPKT protocol |
 
 ## Source Actors
 
 ### constant
 
-**Constant signal source** — Generates a constant signal value. Useful for testing, DC signals, and gain/offset applications.
+**Constant signal source** — Generates a constant signal value. Useful for testing, DC signals, and gain/offset applications. Polymorphic: works with any numeric wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(constant, IN(void, 0), OUT(float, N), RUNTIME_PARAM(float, value) PARAM(int, N))
+ACTOR(constant, IN(void, 0), OUT(T, N), RUNTIME_PARAM(T, value) PARAM(int, N))
 ```
 
 **Parameters:**
@@ -66,12 +68,12 @@ clock 1kHz t { constant(1.0) | stdout() }
 
 ### sine
 
-**Sine wave generator** — Generates a sinusoidal signal: `amp * sin(2 * pi * freq * t)`. Time is derived from the task clock via pipit_iteration_index() and pipit_task_rate_hz(), ensuring phase continuity across firings.
+**Sine wave generator** — Generates a sinusoidal signal: `amp * sin(2 * pi * freq * t)`. Time is derived from the task clock via pipit_iteration_index() and pipit_task_rate_hz(), ensuring phase continuity across firings. Polymorphic: works with any numeric wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(sine, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N))
+ACTOR(sine, IN(void, 0), OUT(T, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N))
 ```
 
 **Parameters:**
@@ -91,12 +93,12 @@ clock 48kHz audio { sine(440.0, 1.0) | stdout() }
 
 ### square
 
-**Square wave generator** — Generates a square wave with 50% duty cycle: +amp for the first half of each period, -amp for the second half.
+**Square wave generator** — Generates a square wave with 50% duty cycle: +amp for the first half of each period, -amp for the second half. Polymorphic: works with any numeric wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(square, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N))
+ACTOR(square, IN(void, 0), OUT(T, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N))
 ```
 
 **Parameters:**
@@ -116,12 +118,12 @@ clock 1kHz t { square(100.0, 1.0) | stdout() }
 
 ### sawtooth
 
-**Sawtooth wave generator** — Generates a sawtooth wave that ramps linearly from -amp to +amp over each period.
+**Sawtooth wave generator** — Generates a sawtooth wave that ramps linearly from -amp to +amp over each period. Polymorphic: works with any numeric wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(sawtooth, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N))
+ACTOR(sawtooth, IN(void, 0), OUT(T, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N))
 ```
 
 **Parameters:**
@@ -141,12 +143,12 @@ clock 1kHz t { sawtooth(100.0, 1.0) | stdout() }
 
 ### triangle
 
-**Triangle wave generator** — Generates a triangle wave that ramps linearly from -amp to +amp and back over each period.
+**Triangle wave generator** — Generates a triangle wave that ramps linearly from -amp to +amp and back over each period. Polymorphic: works with any numeric wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(triangle, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N))
+ACTOR(triangle, IN(void, 0), OUT(T, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N))
 ```
 
 **Parameters:**
@@ -166,12 +168,12 @@ clock 1kHz t { triangle(100.0, 1.0) | stdout() }
 
 ### noise
 
-**White noise generator** — Generates uniformly distributed pseudo-random noise in the range [-amp, +amp] using a fast xorshift32 PRNG. Deterministic for a given sequence of firings (state persists across calls).
+**White noise generator** — Generates uniformly distributed pseudo-random noise in the range [-amp, +amp] using a fast xorshift32 PRNG. Deterministic for a given sequence of firings (state persists across calls). Polymorphic: works with any numeric wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(noise, IN(void, 0), OUT(float, N), PARAM(float, amp) PARAM(int, N))
+template <typename T> ACTOR(noise, IN(void, 0), OUT(T, N), PARAM(float, amp) PARAM(int, N))
 ```
 
 **Parameters:**
@@ -190,12 +192,12 @@ clock 1kHz t { noise(0.5) | stdout() }
 
 ### impulse
 
-**Impulse train generator** — Generates a periodic impulse: outputs 1.0 every `period` samples and 0.0 otherwise. Uses pipit_iteration_index() for sample position.
+**Impulse train generator** — Generates a periodic impulse: outputs 1.0 every `period` samples and 0.0 otherwise. Uses pipit_iteration_index() for sample position. Polymorphic: works with any numeric wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(impulse, IN(void, 0), OUT(float, N), PARAM(int, period) PARAM(int, N))
+template <typename T> ACTOR(impulse, IN(void, 0), OUT(T, N), PARAM(int, period) PARAM(int, N))
 ```
 
 **Parameters:**
@@ -208,6 +210,33 @@ ACTOR(impulse, IN(void, 0), OUT(float, N), PARAM(int, period) PARAM(int, N))
 
 ```pdl
 clock 1kHz t { impulse(100) | stdout() }
+```
+
+---
+
+### socket_read
+
+**Receive signal samples over UDP/IPC using PPKT protocol** — Receives float samples from an external process via non-blocking UDP or Unix domain sockets.  When no data is available, outputs zeros to keep the SDF schedule running. Preconditions: N >= 1, addr must be a valid address string Postconditions: Output buffer filled with received samples or zeros Failure modes: Returns ACTOR_ERROR only on socket bind failure.   Missing data results in zero-filled output with ACTOR_OK. Side effects: Binds a UDP/IPC socket on first firing (lazy init)
+
+**Signature:**
+
+```cpp
+ACTOR(socket_read, IN(void, 0), OUT(float, N), PARAM(std::span<const char>, addr) PARAM(int, N))
+```
+
+**Parameters:**
+
+- `N` - Number of output samples per firing
+- `addr` - Listen address ("host:port" for UDP, "unix:///path" for IPC)
+
+**Returns:** ACTOR_OK on success or no-data; ACTOR_ERROR on fatal init failure
+
+**Example:**
+
+```pdl
+clock 1kHz control {
+    socket_read("localhost:9200") | stdout()
+}
 ```
 
 ---
@@ -299,157 +328,6 @@ ACTOR(fir, IN(T, N), OUT(T, 1), PARAM(std::span<const T>, coeff) PARAM(int, N))
 
 ```pdl
 fir([0.1, 0.2, 0.4, 0.2, 0.1])
-```
-
----
-
-## Basic Arithmetic Actors
-
-### mul
-
-**Multiplication** — Multiplies signal by a runtime-adjustable gain. Polymorphic: works with any numeric wire type (float, double, etc.).
-
-**Signature:**
-
-```cpp
-template <typename T> ACTOR(mul, IN(T, N), OUT(T, N), RUNTIME_PARAM(T, gain) PARAM(int, N))
-```
-
-**Parameters:**
-
-- `gain` - Multiplication factor (runtime parameter)
-
-**Returns:** ACTOR_OK on success
-
-**Example:**
-
-```pdl
-mul($gain)
-mul(2.5)
-```
-
----
-
-### add
-
-**Addition** — Adds two signals together. Polymorphic: works with any numeric wire type.
-
-**Signature:**
-
-```cpp
-template <typename T> ACTOR(add, IN(T, 2), OUT(T, 1))
-```
-
-**Returns:** ACTOR_OK on success
-
-**Example:**
-
-```pdl
-:a | add(:b)
-```
-
----
-
-### sub
-
-**Subtraction** — Subtracts second input from first (out = in[0] - in[1]). Polymorphic: works with any numeric wire type.
-
-**Signature:**
-
-```cpp
-template <typename T> ACTOR(sub, IN(T, 2), OUT(T, 1))
-```
-
-**Returns:** ACTOR_OK on success
-
-**Example:**
-
-```pdl
-:a | sub(:b)
-```
-
----
-
-### div
-
-**Division** — Divides first input by second (out = in[0] / in[1]). Returns NaN on division by zero for floating-point types (IEEE 754). Returns zero on division by zero for integer types. Polymorphic: works with any numeric wire type.
-
-**Signature:**
-
-```cpp
-template <typename T> ACTOR(div, IN(T, 2), OUT(T, 1))
-```
-
-**Returns:** ACTOR_OK on success
-
-**Example:**
-
-```pdl
-:a | div(:b)
-```
-
----
-
-### abs
-
-**Absolute value** — Computes absolute value of signal. Polymorphic: works with any numeric wire type.
-
-**Signature:**
-
-```cpp
-template <typename T> ACTOR(abs, IN(T, 1), OUT(T, 1))
-```
-
-**Returns:** ACTOR_OK on success
-
-**Example:**
-
-```pdl
-abs()
-```
-
----
-
-### sqrt
-
-**Square root** — Computes square root of signal. Returns NaN for negative inputs (IEEE 754 behavior). Polymorphic: works with float and double wire types.
-
-**Signature:**
-
-```cpp
-template <typename T> ACTOR(sqrt, IN(T, 1), OUT(T, 1))
-```
-
-**Returns:** ACTOR_OK on success
-
-**Example:**
-
-```pdl
-sqrt()
-```
-
----
-
-### threshold
-
-**Threshold detector** — Converts signal to int32 based on threshold. Outputs 1 if input > threshold, otherwise 0. Useful for control signals in modal tasks. Polymorphic input: works with any comparable wire type.
-
-**Signature:**
-
-```cpp
-template <typename T> ACTOR(threshold, IN(T, 1), OUT(int32, 1), RUNTIME_PARAM(T, value))
-```
-
-**Parameters:**
-
-- `value` - Threshold value (runtime parameter)
-
-**Returns:** ACTOR_OK on success
-
-**Example:**
-
-```pdl
-threshold(0.5)
 ```
 
 ---
@@ -661,12 +539,12 @@ decimate(10)
 
 ### stdout
 
-**Standard output** — Writes signal values to stdout (one per line).
+**Standard output** — Writes signal values to stdout (one per line). Polymorphic: works with any numeric wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(stdout, IN(float, 1), OUT(void, 0))
+template <typename T> ACTOR(stdout, IN(T, 1), OUT(void, 0))
 ```
 
 **Returns:** ACTOR_OK on success
@@ -681,12 +559,12 @@ stdout()
 
 ### stderr
 
-**Standard error output** — Writes signal values to stderr (one per line). Useful for error reporting and monitoring.
+**Standard error output** — Writes signal values to stderr (one per line). Useful for error reporting and monitoring. Polymorphic: works with any numeric wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(stderr, IN(float, 1), OUT(void, 0))
+template <typename T> ACTOR(stderr, IN(T, 1), OUT(void, 0))
 ```
 
 **Returns:** ACTOR_OK on success
@@ -701,12 +579,12 @@ stderr()
 
 ### stdin
 
-**Standard input** — Reads signal values from stdin (one per line). Returns ACTOR_ERROR on EOF or parse failure.
+**Standard input** — Reads signal values from stdin (one per line). Returns ACTOR_ERROR on EOF or parse failure. Polymorphic: works with any numeric wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(stdin, IN(void, 0), OUT(float, 1))
+template <typename T> ACTOR(stdin, IN(void, 0), OUT(T, 1))
 ```
 
 **Returns:** ACTOR_OK on success, ACTOR_ERROR on EOF or parse failure
@@ -721,12 +599,12 @@ stdin()
 
 ### stdout_fmt
 
-**Formatted standard output** — Writes signal values to stdout with custom formatting. Formats: "default" (%.6f), "hex" (raw bytes), "scientific" (%.6e)
+**Formatted standard output** — Writes signal values to stdout with custom formatting. Formats: "default" (%.6f), "hex" (raw bytes), "scientific" (%.6e) Polymorphic: works with any numeric wire type.
 
 **Signature:**
 
 ```cpp
-ACTOR(stdout_fmt, IN(float, 1), OUT(void, 0), RUNTIME_PARAM(std::span<const char>, format))
+ACTOR(stdout_fmt, IN(T, 1), OUT(void, 0), RUNTIME_PARAM(std::span<const char>, format))
 ```
 
 **Parameters:**
@@ -739,6 +617,185 @@ ACTOR(stdout_fmt, IN(float, 1), OUT(void, 0), RUNTIME_PARAM(std::span<const char
 
 ```pdl
 stdout_fmt("hex")
+```
+
+---
+
+### socket_write
+
+**Send signal samples over UDP/IPC using PPKT protocol** — Streams float samples to an external process (oscilloscope, logger, etc.) via non-blocking UDP or Unix domain sockets.  Automatically chunks large payloads to fit within the network MTU. Preconditions: N >= 1, addr must be a valid address string Postconditions: Samples sent as PPKT packets (best-effort) Failure modes: Returns ACTOR_ERROR only on socket creation failure.   Send failures (EAGAIN, network error) are silently dropped. Side effects: Opens a UDP/IPC socket on first firing (lazy init)
+
+**Signature:**
+
+```cpp
+ACTOR(socket_write, IN(float, N), OUT(void, 0), PARAM(std::span<const char>, addr) PARAM(int, chan_id) PARAM(int, N))
+```
+
+**Parameters:**
+
+- `N` - Number of input samples per firing
+- `addr` - Destination address ("host:port" for UDP, "unix:///path" for IPC)
+- `chan_id` - PPKT channel identifier (for multiplexing on a single port)
+
+**Returns:** ACTOR_OK on success or silent drop; ACTOR_ERROR on fatal init failure
+
+**Example:**
+
+```pdl
+clock 48kHz audio {
+    sine(1000, 1.0) | socket_write("localhost:9100", 0)
+}
+```
+
+---
+
+## Basic Arithmetic Actors
+
+### mul
+
+**Multiplication** — Multiplies signal by a runtime-adjustable gain. Polymorphic: works with any numeric wire type (float, double, etc.).
+
+**Signature:**
+
+```cpp
+template <typename T> ACTOR(mul, IN(T, N), OUT(T, N), RUNTIME_PARAM(T, gain) PARAM(int, N))
+```
+
+**Parameters:**
+
+- `gain` - Multiplication factor (runtime parameter)
+
+**Returns:** ACTOR_OK on success
+
+**Example:**
+
+```pdl
+mul($gain)
+mul(2.5)
+```
+
+---
+
+### add
+
+**Addition** — Adds two signals together. Polymorphic: works with any numeric wire type.
+
+**Signature:**
+
+```cpp
+template <typename T> ACTOR(add, IN(T, 2), OUT(T, 1))
+```
+
+**Returns:** ACTOR_OK on success
+
+**Example:**
+
+```pdl
+:a | add(:b)
+```
+
+---
+
+### sub
+
+**Subtraction** — Subtracts second input from first (out = in[0] - in[1]). Polymorphic: works with any numeric wire type.
+
+**Signature:**
+
+```cpp
+template <typename T> ACTOR(sub, IN(T, 2), OUT(T, 1))
+```
+
+**Returns:** ACTOR_OK on success
+
+**Example:**
+
+```pdl
+:a | sub(:b)
+```
+
+---
+
+### div
+
+**Division** — Divides first input by second (out = in[0] / in[1]). Returns NaN on division by zero for floating-point types (IEEE 754). Returns zero on division by zero for integer types. Polymorphic: works with any numeric wire type.
+
+**Signature:**
+
+```cpp
+template <typename T> ACTOR(div, IN(T, 2), OUT(T, 1))
+```
+
+**Returns:** ACTOR_OK on success
+
+**Example:**
+
+```pdl
+:a | div(:b)
+```
+
+---
+
+### abs
+
+**Absolute value** — Computes absolute value of signal. Polymorphic: works with any numeric wire type.
+
+**Signature:**
+
+```cpp
+template <typename T> ACTOR(abs, IN(T, 1), OUT(T, 1))
+```
+
+**Returns:** ACTOR_OK on success
+
+**Example:**
+
+```pdl
+abs()
+```
+
+---
+
+### sqrt
+
+**Square root** — Computes square root of signal. Returns NaN for negative inputs (IEEE 754 behavior). Polymorphic: works with float and double wire types.
+
+**Signature:**
+
+```cpp
+template <typename T> ACTOR(sqrt, IN(T, 1), OUT(T, 1))
+```
+
+**Returns:** ACTOR_OK on success
+
+**Example:**
+
+```pdl
+sqrt()
+```
+
+---
+
+### threshold
+
+**Threshold detector** — Converts signal to int32 based on threshold. Outputs 1 if input > threshold, otherwise 0. Useful for control signals in modal tasks. Polymorphic input: works with any comparable wire type.
+
+**Signature:**
+
+```cpp
+template <typename T> ACTOR(threshold, IN(T, 1), OUT(int32, 1), RUNTIME_PARAM(T, value))
+```
+
+**Parameters:**
+
+- `value` - Threshold value (runtime parameter)
+
+**Returns:** ACTOR_OK on success
+
+**Example:**
+
+```pdl
+threshold(0.5)
 ```
 
 ---

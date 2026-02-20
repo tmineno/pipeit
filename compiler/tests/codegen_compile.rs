@@ -54,13 +54,8 @@ fn assert_pdl_file_compiles(pdl_name: &str) {
 
     let root = project_root();
     let pdl_path = root.join("examples").join(pdl_name);
-    let std_actors_h = root
-        .join("runtime")
-        .join("libpipit")
-        .join("include")
-        .join("std_actors.h");
-    let example_actors_h = root.join("examples").join("example_actors.h");
     let runtime_include = root.join("runtime").join("libpipit").join("include");
+    let example_actors_h = root.join("examples").join("example_actors.h");
 
     assert!(pdl_path.exists(), "missing {}", pdl_path.display());
 
@@ -70,7 +65,7 @@ fn assert_pdl_file_compiles(pdl_name: &str) {
     let gen = Command::new(&pcc)
         .arg(pdl_path.to_str().unwrap())
         .arg("-I")
-        .arg(std_actors_h.to_str().unwrap())
+        .arg(runtime_include.to_str().unwrap())
         .arg("-I")
         .arg(example_actors_h.to_str().unwrap())
         .arg("--emit")
@@ -111,10 +106,6 @@ fn assert_inline_compiles(pdl_source: &str, test_name: &str) {
     };
 
     let root = project_root();
-    let include_dir = root.join("runtime").join("libpipit").join("include");
-    let std_actors_h = include_dir.join("std_actors.h");
-    let std_sink_h = include_dir.join("std_sink.h");
-    let std_source_h = include_dir.join("std_source.h");
     let runtime_include = root.join("runtime").join("libpipit").join("include");
 
     // Write PDL to temp file
@@ -129,11 +120,7 @@ fn assert_inline_compiles(pdl_source: &str, test_name: &str) {
     let gen = Command::new(&pcc)
         .arg(pdl_file.to_str().unwrap())
         .arg("-I")
-        .arg(std_actors_h.to_str().unwrap())
-        .arg("-I")
-        .arg(std_sink_h.to_str().unwrap())
-        .arg("-I")
-        .arg(std_source_h.to_str().unwrap())
+        .arg(runtime_include.to_str().unwrap())
         .arg("--emit")
         .arg("cpp")
         .arg("-o")
@@ -174,10 +161,6 @@ fn assert_inline_fails(pdl_source: &str, test_name: &str) {
     };
 
     let root = project_root();
-    let include_dir = root.join("runtime").join("libpipit").join("include");
-    let std_actors_h = include_dir.join("std_actors.h");
-    let std_sink_h = include_dir.join("std_sink.h");
-    let std_source_h = include_dir.join("std_source.h");
     let runtime_include = root.join("runtime").join("libpipit").join("include");
 
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -191,11 +174,7 @@ fn assert_inline_fails(pdl_source: &str, test_name: &str) {
     let gen = Command::new(&pcc)
         .arg(pdl_file.to_str().unwrap())
         .arg("-I")
-        .arg(std_actors_h.to_str().unwrap())
-        .arg("-I")
-        .arg(std_sink_h.to_str().unwrap())
-        .arg("-I")
-        .arg(std_source_h.to_str().unwrap())
+        .arg(runtime_include.to_str().unwrap())
         .arg("--emit")
         .arg("cpp")
         .arg("-o")
@@ -238,11 +217,7 @@ fn assert_inline_fails(pdl_source: &str, test_name: &str) {
 /// Run pcc on inline PDL source and return generated C++ source.
 fn generate_inline_cpp(pdl_source: &str, test_name: &str) -> String {
     let root = project_root();
-    let std_actors_h = root
-        .join("runtime")
-        .join("libpipit")
-        .join("include")
-        .join("std_actors.h");
+    let runtime_include = root.join("runtime").join("libpipit").join("include");
 
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp_dir = std::env::temp_dir();
@@ -255,7 +230,7 @@ fn generate_inline_cpp(pdl_source: &str, test_name: &str) -> String {
     let gen = Command::new(&pcc)
         .arg(pdl_file.to_str().unwrap())
         .arg("-I")
-        .arg(std_actors_h.to_str().unwrap())
+        .arg(runtime_include.to_str().unwrap())
         .arg("--emit")
         .arg("cpp")
         .arg("-o")
@@ -615,13 +590,16 @@ fn actor_constant() {
 
 #[test]
 fn actor_sine() {
-    assert_inline_compiles("clock 1kHz t { sine(100.0, 1.0) | stdout() }", "actor_sine");
+    assert_inline_compiles(
+        "clock 1kHz t { sine<float>(100.0, 1.0) | stdout() }",
+        "actor_sine",
+    );
 }
 
 #[test]
 fn actor_square() {
     assert_inline_compiles(
-        "clock 1kHz t { square(100.0, 1.0) | stdout() }",
+        "clock 1kHz t { square<float>(100.0, 1.0) | stdout() }",
         "actor_square",
     );
 }
@@ -629,7 +607,7 @@ fn actor_square() {
 #[test]
 fn actor_sawtooth() {
     assert_inline_compiles(
-        "clock 1kHz t { sawtooth(100.0, 1.0) | stdout() }",
+        "clock 1kHz t { sawtooth<float>(100.0, 1.0) | stdout() }",
         "actor_sawtooth",
     );
 }
@@ -637,19 +615,25 @@ fn actor_sawtooth() {
 #[test]
 fn actor_triangle() {
     assert_inline_compiles(
-        "clock 1kHz t { triangle(100.0, 1.0) | stdout() }",
+        "clock 1kHz t { triangle<float>(100.0, 1.0) | stdout() }",
         "actor_triangle",
     );
 }
 
 #[test]
 fn actor_noise() {
-    assert_inline_compiles("clock 1kHz t { noise(1.0) | stdout() }", "actor_noise");
+    assert_inline_compiles(
+        "clock 1kHz t { noise<float>(1.0) | stdout() }",
+        "actor_noise",
+    );
 }
 
 #[test]
 fn actor_impulse() {
-    assert_inline_compiles("clock 1kHz t { impulse(100) | stdout() }", "actor_impulse");
+    assert_inline_compiles(
+        "clock 1kHz t { impulse<float>(100) | stdout() }",
+        "actor_impulse",
+    );
 }
 
 #[test]
@@ -805,7 +789,7 @@ fn actor_stderr() {
 
 #[test]
 fn actor_stdin() {
-    assert_inline_compiles("clock 1kHz t { stdin() | stdout() }", "actor_stdin");
+    assert_inline_compiles("clock 1kHz t { stdin<float>() | stdout() }", "actor_stdin");
 }
 
 #[test]
@@ -901,7 +885,7 @@ fn actor_binwrite_cfloat() {
 #[test]
 fn actor_socket_write() {
     assert_inline_compiles(
-        "clock 1kHz t { stdin() | socket_write(\"localhost:9100\", 0) }",
+        "clock 1kHz t { stdin<float>() | socket_write(\"localhost:9100\", 0) }",
         "actor_socket_write",
     );
 }
@@ -1266,13 +1250,8 @@ fn compile_and_run_pdl(pdl_name: &str, run_args: &[&str]) -> Option<(i32, String
     let cxx = find_cxx_compiler()?;
     let root = project_root();
     let pdl_path = root.join("examples").join(pdl_name);
-    let std_actors_h = root
-        .join("runtime")
-        .join("libpipit")
-        .join("include")
-        .join("std_actors.h");
-    let example_actors_h = root.join("examples").join("example_actors.h");
     let runtime_include = root.join("runtime").join("libpipit").join("include");
+    let example_actors_h = root.join("examples").join("example_actors.h");
 
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp_dir = std::env::temp_dir();
@@ -1283,7 +1262,7 @@ fn compile_and_run_pdl(pdl_name: &str, run_args: &[&str]) -> Option<(i32, String
     let gen = Command::new(&pcc)
         .arg(pdl_path.to_str().unwrap())
         .arg("-I")
-        .arg(std_actors_h.to_str().unwrap())
+        .arg(runtime_include.to_str().unwrap())
         .arg("-I")
         .arg(example_actors_h.to_str().unwrap())
         .arg("--emit")
@@ -1353,11 +1332,6 @@ fn compile_and_run_inline(
 ) -> Option<(i32, String, String)> {
     let cxx = find_cxx_compiler()?;
     let root = project_root();
-    let std_actors_h = root
-        .join("runtime")
-        .join("libpipit")
-        .join("include")
-        .join("std_actors.h");
     let runtime_include = root.join("runtime").join("libpipit").join("include");
 
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1371,7 +1345,7 @@ fn compile_and_run_inline(
     let gen = Command::new(&pcc)
         .arg(pdl_file.to_str().unwrap())
         .arg("-I")
-        .arg(std_actors_h.to_str().unwrap())
+        .arg(runtime_include.to_str().unwrap())
         .arg("--emit")
         .arg("cpp")
         .arg("-o")
@@ -1694,12 +1668,8 @@ fn assert_poly_inline_compiles(pdl_source: &str, test_name: &str) {
     };
 
     let root = project_root();
-    let include_dir = root.join("runtime").join("libpipit").join("include");
-    let std_actors_h = include_dir.join("std_actors.h");
-    let std_sink_h = include_dir.join("std_sink.h");
-    let std_source_h = include_dir.join("std_source.h");
-    let poly_actors_h = root.join("examples").join("poly_actors.h");
     let runtime_include = root.join("runtime").join("libpipit").join("include");
+    let poly_actors_h = root.join("examples").join("poly_actors.h");
 
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp_dir = std::env::temp_dir();
@@ -1712,11 +1682,7 @@ fn assert_poly_inline_compiles(pdl_source: &str, test_name: &str) {
     let gen = Command::new(&pcc)
         .arg(pdl_file.to_str().unwrap())
         .arg("-I")
-        .arg(std_actors_h.to_str().unwrap())
-        .arg("-I")
-        .arg(std_sink_h.to_str().unwrap())
-        .arg("-I")
-        .arg(std_source_h.to_str().unwrap())
+        .arg(runtime_include.to_str().unwrap())
         .arg("-I")
         .arg(poly_actors_h.to_str().unwrap())
         .arg("--emit")
@@ -1751,10 +1717,7 @@ fn assert_poly_inline_compiles(pdl_source: &str, test_name: &str) {
 /// Run pcc on inline PDL with poly actors and return generated C++ source.
 fn generate_poly_cpp(pdl_source: &str, test_name: &str) -> String {
     let root = project_root();
-    let include_dir = root.join("runtime").join("libpipit").join("include");
-    let std_actors_h = include_dir.join("std_actors.h");
-    let std_sink_h = include_dir.join("std_sink.h");
-    let std_source_h = include_dir.join("std_source.h");
+    let runtime_include = root.join("runtime").join("libpipit").join("include");
     let poly_actors_h = root.join("examples").join("poly_actors.h");
 
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1768,11 +1731,7 @@ fn generate_poly_cpp(pdl_source: &str, test_name: &str) -> String {
     let gen = Command::new(&pcc)
         .arg(pdl_file.to_str().unwrap())
         .arg("-I")
-        .arg(std_actors_h.to_str().unwrap())
-        .arg("-I")
-        .arg(std_sink_h.to_str().unwrap())
-        .arg("-I")
-        .arg(std_source_h.to_str().unwrap())
+        .arg(runtime_include.to_str().unwrap())
         .arg("-I")
         .arg(poly_actors_h.to_str().unwrap())
         .arg("--emit")

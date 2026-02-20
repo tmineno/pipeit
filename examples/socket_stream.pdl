@@ -21,7 +21,7 @@ param amp  = 0.8
 
 # Generate a sine wave and stream it out via UDP
 clock 100MHz sender {
-    sine($freq, $amp) | socket_write("localhost:9100", 0)
+    sine<float>($freq, $amp) | socket_write("localhost:9100", 0)
 }
 
 # Receive samples from another process and print them

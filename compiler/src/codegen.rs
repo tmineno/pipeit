@@ -2467,12 +2467,15 @@ mod tests {
             .unwrap()
             .to_path_buf();
         let std_actors = root.join("runtime/libpipit/include/std_actors.h");
+        let std_math = root.join("runtime/libpipit/include/std_math.h");
         let example_actors = root.join("examples/example_actors.h");
         let std_sink = root.join("runtime/libpipit/include/std_sink.h");
         let std_source = root.join("runtime/libpipit/include/std_source.h");
         let mut reg = Registry::new();
         reg.load_header(&std_actors)
             .expect("failed to load std_actors.h");
+        reg.load_header(&std_math)
+            .expect("failed to load std_math.h");
         reg.load_header(&example_actors)
             .expect("failed to load example_actors.h");
         reg.load_header(&std_sink)
@@ -3230,19 +3233,19 @@ mod tests {
     }
 
     #[test]
-    fn poly_non_polymorphic_unchanged() {
-        // Non-polymorphic actors should still emit Actor_name{} (no template syntax)
+    fn poly_now_polymorphic_constant() {
+        // constant and stdout are now polymorphic — should emit template syntax
         let reg = poly_registry();
         let cpp = codegen_poly_ok("clock 1kHz t { constant(0.0) | stdout() }", &reg);
         assert!(
-            cpp.contains("Actor_constant{"),
-            "non-polymorphic actor should use Actor_constant{{}} syntax, got:\n{}",
+            cpp.contains("Actor_constant<float>"),
+            "polymorphic constant should use Actor_constant<float> syntax, got:\n{}",
             cpp
         );
-        // Should NOT have any template angle brackets for constant/stdout
         assert!(
-            !cpp.contains("Actor_constant<"),
-            "non-polymorphic actor should not have template syntax"
+            cpp.contains("Actor_stdout<float>"),
+            "polymorphic stdout should use Actor_stdout<float> syntax, got:\n{}",
+            cpp
         );
     }
 

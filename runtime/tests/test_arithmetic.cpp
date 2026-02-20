@@ -9,7 +9,7 @@
 #include <cstdlib>
 #include <limits>
 #include <pipit.h>
-#include <std_actors.h>
+#include <std_math.h>
 
 #define TEST(name)                                                                                 \
     static void test_##name();                                                                     \

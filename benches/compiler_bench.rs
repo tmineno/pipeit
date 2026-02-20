@@ -97,15 +97,19 @@ fn create_loaded_registry() -> registry::Registry {
     let mut reg = registry::Registry::new();
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let project_root = manifest_dir.parent().unwrap();
-    let std_actors = project_root
+    let include_dir = project_root
         .join("runtime")
         .join("libpipit")
-        .join("include")
-        .join("std_actors.h");
+        .join("include");
+    let std_actors = include_dir.join("std_actors.h");
+    let std_math = include_dir.join("std_math.h");
     let example_actors = project_root.join("examples").join("example_actors.h");
 
     if std_actors.exists() {
         let _ = reg.load_header(&std_actors);
+    }
+    if std_math.exists() {
+        let _ = reg.load_header(&std_math);
     }
     if example_actors.exists() {
         let _ = reg.load_header(&example_actors);

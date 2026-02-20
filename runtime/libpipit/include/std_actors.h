@@ -11,6 +11,7 @@
 #include <limits>
 #include <pipit.h>
 #include <span>
+#include <std_math.h>
 
 /// @defgroup source_actors Source Actors
 /// @{
@@ -19,6 +20,7 @@
 ///
 /// Generates a constant signal value.
 /// Useful for testing, DC signals, and gain/offset applications.
+/// Polymorphic: works with any numeric wire type.
 ///
 /// @param value Constant output value (runtime parameter)
 /// @return ACTOR_OK on success
@@ -27,7 +29,8 @@
 /// @code{.pdl}
 /// clock 1kHz t { constant(1.0) | stdout() }
 /// @endcode
-ACTOR(constant, IN(void, 0), OUT(float, N), RUNTIME_PARAM(float, value) PARAM(int, N)) {
+template <typename T>
+ACTOR(constant, IN(void, 0), OUT(T, N), RUNTIME_PARAM(T, value) PARAM(int, N)) {
     (void)in;
     for (int i = 0; i < N; ++i) {
         out[i] = value;
@@ -42,6 +45,7 @@ ACTOR(constant, IN(void, 0), OUT(float, N), RUNTIME_PARAM(float, value) PARAM(in
 /// Generates a sinusoidal signal: `amp * sin(2 * pi * freq * t)`.
 /// Time is derived from the task clock via pipit_iteration_index() and
 /// pipit_task_rate_hz(), ensuring phase continuity across firings.
+/// Polymorphic: works with any numeric wire type.
 ///
 /// @param freq Frequency in Hz
 /// @param amp  Peak amplitude
@@ -51,13 +55,15 @@ ACTOR(constant, IN(void, 0), OUT(float, N), RUNTIME_PARAM(float, value) PARAM(in
 /// @code{.pdl}
 /// clock 48kHz audio { sine(440.0, 1.0) | stdout() }
 /// @endcode
-ACTOR(sine, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N)) {
+
+template <typename T>
+ACTOR(sine, IN(void, 0), OUT(T, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N)) {
     (void)in;
     uint64_t base = pipit_iteration_index();
     double sr = pipit_task_rate_hz();
     for (int i = 0; i < N; ++i) {
         double t = static_cast<double>(base + i) / sr;
-        out[i] = amp * static_cast<float>(std::sin(2.0 * M_PI * freq * t));
+        out[i] = amp * static_cast<T>(std::sin(2.0 * M_PI * freq * t));
     }
     return ACTOR_OK;
 }
@@ -68,6 +74,7 @@ ACTOR(sine, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) PAR
 ///
 /// Generates a square wave with 50% duty cycle: +amp for the first half of
 /// each period, -amp for the second half.
+/// Polymorphic: works with any numeric wire type.
 ///
 /// @param freq Frequency in Hz
 /// @param amp  Peak amplitude
@@ -77,7 +84,8 @@ ACTOR(sine, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) PAR
 /// @code{.pdl}
 /// clock 1kHz t { square(100.0, 1.0) | stdout() }
 /// @endcode
-ACTOR(square, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N)) {
+template <typename T>
+ACTOR(square, IN(void, 0), OUT(T, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N)) {
     (void)in;
     uint64_t base = pipit_iteration_index();
     double sr = pipit_task_rate_hz();
@@ -86,7 +94,7 @@ ACTOR(square, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) P
         double phase = std::fmod(t * freq, 1.0);
         if (phase < 0.0)
             phase += 1.0;
-        out[i] = (phase < 0.5) ? amp : -amp;
+        out[i] = (phase < 0.5) ? static_cast<T>(amp) : static_cast<T>(-amp);
     }
     return ACTOR_OK;
 }
@@ -97,6 +105,7 @@ ACTOR(square, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) P
 ///
 /// Generates a sawtooth wave that ramps linearly from -amp to +amp over
 /// each period.
+/// Polymorphic: works with any numeric wire type.
 ///
 /// @param freq Frequency in Hz
 /// @param amp  Peak amplitude
@@ -106,7 +115,8 @@ ACTOR(square, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) P
 /// @code{.pdl}
 /// clock 1kHz t { sawtooth(100.0, 1.0) | stdout() }
 /// @endcode
-ACTOR(sawtooth, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N)) {
+template <typename T>
+ACTOR(sawtooth, IN(void, 0), OUT(T, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N)) {
     (void)in;
     uint64_t base = pipit_iteration_index();
     double sr = pipit_task_rate_hz();
@@ -115,7 +125,7 @@ ACTOR(sawtooth, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp)
         double phase = std::fmod(t * freq, 1.0);
         if (phase < 0.0)
             phase += 1.0;
-        out[i] = amp * static_cast<float>(2.0 * phase - 1.0);
+        out[i] = amp * static_cast<T>(2.0 * phase - 1.0);
     }
     return ACTOR_OK;
 }
@@ -126,6 +136,7 @@ ACTOR(sawtooth, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp)
 ///
 /// Generates a triangle wave that ramps linearly from -amp to +amp and
 /// back over each period.
+/// Polymorphic: works with any numeric wire type.
 ///
 /// @param freq Frequency in Hz
 /// @param amp  Peak amplitude
@@ -135,7 +146,8 @@ ACTOR(sawtooth, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp)
 /// @code{.pdl}
 /// clock 1kHz t { triangle(100.0, 1.0) | stdout() }
 /// @endcode
-ACTOR(triangle, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N)) {
+template <typename T>
+ACTOR(triangle, IN(void, 0), OUT(T, N), PARAM(float, freq) PARAM(float, amp) PARAM(int, N)) {
     (void)in;
     uint64_t base = pipit_iteration_index();
     double sr = pipit_task_rate_hz();
@@ -146,7 +158,7 @@ ACTOR(triangle, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp)
             phase += 1.0;
         // Triangle: rises 0→1 in first half, falls 1→0 in second half
         // Map to [-amp, +amp]: 4*|phase-0.5| - 1
-        out[i] = amp * static_cast<float>(4.0 * std::abs(phase - 0.5) - 1.0);
+        out[i] = amp * static_cast<T>(4.0 * std::abs(phase - 0.5) - 1.0);
     }
     return ACTOR_OK;
 }
@@ -158,6 +170,7 @@ ACTOR(triangle, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp)
 /// Generates uniformly distributed pseudo-random noise in the range
 /// [-amp, +amp] using a fast xorshift32 PRNG. Deterministic for a given
 /// sequence of firings (state persists across calls).
+/// Polymorphic: works with any numeric wire type.
 ///
 /// @param amp Peak amplitude
 /// @return ACTOR_OK on success
@@ -166,7 +179,7 @@ ACTOR(triangle, IN(void, 0), OUT(float, N), PARAM(float, freq) PARAM(float, amp)
 /// @code{.pdl}
 /// clock 1kHz t { noise(0.5) | stdout() }
 /// @endcode
-ACTOR(noise, IN(void, 0), OUT(float, N), PARAM(float, amp) PARAM(int, N)) {
+template <typename T> ACTOR(noise, IN(void, 0), OUT(T, N), PARAM(float, amp) PARAM(int, N)) {
     (void)in;
     static uint32_t state = 2463534242u;
     for (int i = 0; i < N; ++i) {
@@ -176,7 +189,7 @@ ACTOR(noise, IN(void, 0), OUT(float, N), PARAM(float, amp) PARAM(int, N)) {
         state ^= state << 5;
         // Map to [-1.0, 1.0]
         float u = static_cast<float>(state) / static_cast<float>(UINT32_MAX);
-        out[i] = amp * (2.0f * u - 1.0f);
+        out[i] = amp * static_cast<T>(2.0f * u - 1.0f);
     }
     return ACTOR_OK;
 }
@@ -187,6 +200,7 @@ ACTOR(noise, IN(void, 0), OUT(float, N), PARAM(float, amp) PARAM(int, N)) {
 ///
 /// Generates a periodic impulse: outputs 1.0 every `period` samples and
 /// 0.0 otherwise. Uses pipit_iteration_index() for sample position.
+/// Polymorphic: works with any numeric wire type.
 ///
 /// @param period Impulse period in samples (must be > 0)
 /// @return ACTOR_OK on success
@@ -195,12 +209,13 @@ ACTOR(noise, IN(void, 0), OUT(float, N), PARAM(float, amp) PARAM(int, N)) {
 /// @code{.pdl}
 /// clock 1kHz t { impulse(100) | stdout() }
 /// @endcode
-ACTOR(impulse, IN(void, 0), OUT(float, N), PARAM(int, period) PARAM(int, N)) {
+template <typename T> ACTOR(impulse, IN(void, 0), OUT(T, N), PARAM(int, period) PARAM(int, N)) {
     (void)in;
     uint64_t base = pipit_iteration_index();
     for (int i = 0; i < N; ++i) {
         uint64_t idx = base + static_cast<uint64_t>(i);
-        out[i] = (period > 0 && idx % static_cast<uint64_t>(period) == 0) ? 1.0f : 0.0f;
+        out[i] = (period > 0 && idx % static_cast<uint64_t>(period) == 0) ? static_cast<T>(1.0f)
+                                                                          : static_cast<T>(0.0f);
     }
     return ACTOR_OK;
 }
@@ -337,151 +352,6 @@ ACTOR(fir, IN(T, N), OUT(T, 1), PARAM(std::span<const T>, coeff) PARAM(int, N)) 
     for (int i = 0; i < N; i++)
         y += coeff[i] * in[i];
     out[0] = y;
-    return ACTOR_OK;
-}
-}
-;
-
-/// @}
-
-/// @defgroup arithmetic_actors Basic Arithmetic Actors
-/// @{
-
-/// @brief Multiplication
-///
-/// Multiplies signal by a runtime-adjustable gain.
-/// Polymorphic: works with any numeric wire type (float, double, etc.).
-///
-/// @param gain Multiplication factor (runtime parameter)
-/// @return ACTOR_OK on success
-///
-/// Example usage:
-/// @code{.pdl}
-/// mul($gain)
-/// mul(2.5)
-/// @endcode
-template <typename T> ACTOR(mul, IN(T, N), OUT(T, N), RUNTIME_PARAM(T, gain) PARAM(int, N)) {
-    for (int i = 0; i < N; ++i) {
-        out[i] = in[i] * gain;
-    }
-    return ACTOR_OK;
-}
-}
-;
-
-/// @brief Addition
-///
-/// Adds two signals together.
-/// Polymorphic: works with any numeric wire type.
-///
-/// @return ACTOR_OK on success
-///
-/// Example usage:
-/// @code{.pdl}
-/// :a | add(:b)
-/// @endcode
-template <typename T> ACTOR(add, IN(T, 2), OUT(T, 1)) {
-    out[0] = in[0] + in[1];
-    return ACTOR_OK;
-}
-}
-;
-
-/// @brief Subtraction
-///
-/// Subtracts second input from first (out = in[0] - in[1]).
-/// Polymorphic: works with any numeric wire type.
-///
-/// @return ACTOR_OK on success
-///
-/// Example usage:
-/// @code{.pdl}
-/// :a | sub(:b)
-/// @endcode
-template <typename T> ACTOR(sub, IN(T, 2), OUT(T, 1)) {
-    out[0] = in[0] - in[1];
-    return ACTOR_OK;
-}
-}
-;
-
-/// @brief Division
-///
-/// Divides first input by second (out = in[0] / in[1]).
-/// Returns NaN on division by zero for floating-point types (IEEE 754).
-/// Returns zero on division by zero for integer types.
-/// Polymorphic: works with any numeric wire type.
-///
-/// @return ACTOR_OK on success
-///
-/// Example usage:
-/// @code{.pdl}
-/// :a | div(:b)
-/// @endcode
-template <typename T> ACTOR(div, IN(T, 2), OUT(T, 1)) {
-    if (in[1] == T{}) {
-        out[0] = std::numeric_limits<T>::quiet_NaN();
-    } else {
-        out[0] = in[0] / in[1];
-    }
-    return ACTOR_OK;
-}
-}
-;
-
-/// @brief Absolute value
-///
-/// Computes absolute value of signal.
-/// Polymorphic: works with any numeric wire type.
-///
-/// @return ACTOR_OK on success
-///
-/// Example usage:
-/// @code{.pdl}
-/// abs()
-/// @endcode
-template <typename T> ACTOR(abs, IN(T, 1), OUT(T, 1)) {
-    out[0] = std::abs(in[0]);
-    return ACTOR_OK;
-}
-}
-;
-
-/// @brief Square root
-///
-/// Computes square root of signal.
-/// Returns NaN for negative inputs (IEEE 754 behavior).
-/// Polymorphic: works with float and double wire types.
-///
-/// @return ACTOR_OK on success
-///
-/// Example usage:
-/// @code{.pdl}
-/// sqrt()
-/// @endcode
-template <typename T> ACTOR(sqrt, IN(T, 1), OUT(T, 1)) {
-    out[0] = std::sqrt(in[0]);
-    return ACTOR_OK;
-}
-}
-;
-
-/// @brief Threshold detector
-///
-/// Converts signal to int32 based on threshold.
-/// Outputs 1 if input > threshold, otherwise 0.
-/// Useful for control signals in modal tasks.
-/// Polymorphic input: works with any comparable wire type.
-///
-/// @param value Threshold value (runtime parameter)
-/// @return ACTOR_OK on success
-///
-/// Example usage:
-/// @code{.pdl}
-/// threshold(0.5)
-/// @endcode
-template <typename T> ACTOR(threshold, IN(T, 1), OUT(int32, 1), RUNTIME_PARAM(T, value)) {
-    out[0] = (in[0] > value) ? 1 : 0;
     return ACTOR_OK;
 }
 }
@@ -788,6 +658,7 @@ template <typename T> ACTOR(decimate, IN(T, N), OUT(T, 1), PARAM(int, N)) {
 /// @brief Standard output
 ///
 /// Writes signal values to stdout (one per line).
+/// Polymorphic: works with any numeric wire type.
 ///
 /// @return ACTOR_OK on success
 ///
@@ -795,8 +666,8 @@ template <typename T> ACTOR(decimate, IN(T, N), OUT(T, 1), PARAM(int, N)) {
 /// @code{.pdl}
 /// stdout()
 /// @endcode
-ACTOR(stdout, IN(float, 1), OUT(void, 0)) {
-    printf("%f\n", in[0]);
+template <typename T> ACTOR(stdout, IN(T, 1), OUT(void, 0)) {
+    printf("%f\n", static_cast<double>(in[0]));
     (void)out;
     return ACTOR_OK;
 }
@@ -807,6 +678,7 @@ ACTOR(stdout, IN(float, 1), OUT(void, 0)) {
 ///
 /// Writes signal values to stderr (one per line).
 /// Useful for error reporting and monitoring.
+/// Polymorphic: works with any numeric wire type.
 ///
 /// @return ACTOR_OK on success
 ///
@@ -814,8 +686,8 @@ ACTOR(stdout, IN(float, 1), OUT(void, 0)) {
 /// @code{.pdl}
 /// stderr()
 /// @endcode
-ACTOR(stderr, IN(float, 1), OUT(void, 0)) {
-    fprintf(stderr, "%f\n", in[0]);
+template <typename T> ACTOR(stderr, IN(T, 1), OUT(void, 0)) {
+    fprintf(stderr, "%f\n", static_cast<double>(in[0]));
     (void)out;
     return ACTOR_OK;
 }
@@ -826,6 +698,7 @@ ACTOR(stderr, IN(float, 1), OUT(void, 0)) {
 ///
 /// Reads signal values from stdin (one per line).
 /// Returns ACTOR_ERROR on EOF or parse failure.
+/// Polymorphic: works with any numeric wire type.
 ///
 /// @return ACTOR_OK on success, ACTOR_ERROR on EOF or parse failure
 ///
@@ -833,12 +706,14 @@ ACTOR(stderr, IN(float, 1), OUT(void, 0)) {
 /// @code{.pdl}
 /// stdin()
 /// @endcode
-ACTOR(stdin, IN(void, 0), OUT(float, 1)) {
+template <typename T> ACTOR(stdin, IN(void, 0), OUT(T, 1)) {
     (void)in;
-    float value;
-    if (scanf("%f", &value) != 1) {
+    T value;
+    float temp;
+    if (scanf("%f", &temp) != 1) {
         return ACTOR_ERROR;
     }
+    value = static_cast<T>(temp);
     out[0] = value;
     return ACTOR_OK;
 }
@@ -849,6 +724,7 @@ ACTOR(stdin, IN(void, 0), OUT(float, 1)) {
 ///
 /// Writes signal values to stdout with custom formatting.
 /// Formats: "default" (%.6f), "hex" (raw bytes), "scientific" (%.6e)
+/// Polymorphic: works with any numeric wire type.
 ///
 /// @param format Output format: "default", "hex", or "scientific" (runtime parameter)
 /// @return ACTOR_OK on success
@@ -857,14 +733,15 @@ ACTOR(stdin, IN(void, 0), OUT(float, 1)) {
 /// @code{.pdl}
 /// stdout_fmt("hex")
 /// @endcode
-ACTOR(stdout_fmt, IN(float, 1), OUT(void, 0), RUNTIME_PARAM(std::span<const char>, format)) {
+template <typename T>
+ACTOR(stdout_fmt, IN(T, 1), OUT(void, 0), RUNTIME_PARAM(std::span<const char>, format)) {
     std::string fmt(format.data(), format.size());
     if (fmt == "hex") {
         printf("0x%08x\n", *reinterpret_cast<const uint32_t *>(&in[0]));
     } else if (fmt == "scientific") {
-        printf("%.6e\n", in[0]);
+        printf("%.6e\n", static_cast<double>(in[0]));
     } else { // default
-        printf("%.6f\n", in[0]);
+        printf("%.6f\n", static_cast<double>(in[0]));
     }
     (void)out;
     return ACTOR_OK;

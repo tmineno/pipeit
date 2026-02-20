@@ -516,12 +516,15 @@ mod tests {
             .unwrap()
             .to_path_buf();
         let std_actors = root.join("runtime/libpipit/include/std_actors.h");
+        let std_math = root.join("runtime/libpipit/include/std_math.h");
         let example_actors = root.join("examples/example_actors.h");
         let std_sink = root.join("runtime/libpipit/include/std_sink.h");
         let std_source = root.join("runtime/libpipit/include/std_source.h");
         let mut reg = Registry::new();
         reg.load_header(&std_actors)
             .expect("failed to load std_actors.h");
+        reg.load_header(&std_math)
+            .expect("failed to load std_math.h");
         reg.load_header(&example_actors)
             .expect("failed to load example_actors.h");
         reg.load_header(&std_sink)

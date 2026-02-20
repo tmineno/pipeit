@@ -59,7 +59,7 @@ TEST(sine_basic) {
     pipit::detail::set_actor_iteration_index(0);
     pipit::detail::set_actor_task_rate_hz(1000.0);
 
-    Actor_sine actor;
+    Actor_sine<float> actor;
     actor.freq = 100.0f; // 100 Hz → period = 10 samples at 1kHz
     actor.amp = 1.0f;
     actor.N = 1;
@@ -86,7 +86,7 @@ TEST(sine_full_cycle) {
     pipit::detail::set_actor_iteration_index(0);
     pipit::detail::set_actor_task_rate_hz(1000.0);
 
-    Actor_sine actor;
+    Actor_sine<float> actor;
     actor.freq = 10.0f; // 10 Hz → period = 100 samples at 1kHz
     actor.amp = 2.0f;
     actor.N = 100;
@@ -109,7 +109,7 @@ TEST(sine_amplitude) {
     pipit::detail::set_actor_iteration_index(0);
     pipit::detail::set_actor_task_rate_hz(4000.0);
 
-    Actor_sine actor;
+    Actor_sine<float> actor;
     actor.freq = 1000.0f; // 1kHz at 4kHz → period = 4 samples
     actor.amp = 3.5f;
     actor.N = 1;
@@ -129,7 +129,7 @@ TEST(square_basic) {
     pipit::detail::set_actor_iteration_index(0);
     pipit::detail::set_actor_task_rate_hz(1000.0);
 
-    Actor_square actor;
+    Actor_square<float> actor;
     actor.freq = 100.0f; // period = 10 samples
     actor.amp = 1.0f;
     actor.N = 10;
@@ -154,7 +154,7 @@ TEST(square_duty_cycle) {
     pipit::detail::set_actor_iteration_index(0);
     pipit::detail::set_actor_task_rate_hz(1000.0);
 
-    Actor_square actor;
+    Actor_square<float> actor;
     actor.freq = 100.0f;
     actor.amp = 2.0f;
     actor.N = 20; // Two full periods
@@ -176,7 +176,7 @@ TEST(sawtooth_basic) {
     pipit::detail::set_actor_iteration_index(0);
     pipit::detail::set_actor_task_rate_hz(1000.0);
 
-    Actor_sawtooth actor;
+    Actor_sawtooth<float> actor;
     actor.freq = 100.0f; // period = 10 samples
     actor.amp = 1.0f;
     actor.N = 10;
@@ -202,7 +202,7 @@ TEST(triangle_basic) {
     pipit::detail::set_actor_iteration_index(0);
     pipit::detail::set_actor_task_rate_hz(1000.0);
 
-    Actor_triangle actor;
+    Actor_triangle<float> actor;
     actor.freq = 100.0f; // period = 10 samples
     actor.amp = 1.0f;
     actor.N = 10;
@@ -226,7 +226,7 @@ TEST(triangle_symmetry) {
     pipit::detail::set_actor_iteration_index(0);
     pipit::detail::set_actor_task_rate_hz(2000.0);
 
-    Actor_triangle actor;
+    Actor_triangle<float> actor;
     actor.freq = 100.0f; // period = 20 samples
     actor.amp = 1.0f;
     actor.N = 20;
@@ -248,7 +248,7 @@ TEST(noise_range) {
     pipit::detail::set_actor_iteration_index(0);
     pipit::detail::set_actor_task_rate_hz(1000.0);
 
-    Actor_noise actor;
+    Actor_noise<float> actor;
     actor.amp = 0.5f;
     actor.N = 1000;
 
@@ -268,7 +268,7 @@ TEST(noise_not_constant) {
     pipit::detail::set_actor_iteration_index(0);
     pipit::detail::set_actor_task_rate_hz(1000.0);
 
-    Actor_noise actor;
+    Actor_noise<float> actor;
     actor.amp = 1.0f;
     actor.N = 100;
 
@@ -294,7 +294,7 @@ TEST(impulse_basic) {
     pipit::detail::set_actor_iteration_index(0);
     pipit::detail::set_actor_task_rate_hz(1000.0);
 
-    Actor_impulse actor;
+    Actor_impulse<float> actor;
     actor.period = 10;
     actor.N = 10;
 
@@ -317,7 +317,7 @@ TEST(impulse_periodic) {
     pipit::detail::set_actor_iteration_index(0);
     pipit::detail::set_actor_task_rate_hz(1000.0);
 
-    Actor_impulse actor;
+    Actor_impulse<float> actor;
     actor.period = 5;
     actor.N = 20;
 

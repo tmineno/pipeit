@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate standard library reference documentation from std_actors.h.
+Generate standard library reference documentation from std_*.h headers.
 
 Parses Doxygen-style /// comments and ACTOR() macro signatures to produce
 a flat markdown specification at doc/spec/standard-library-spec-v0.3.0.md.
@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-INPUT = PROJECT_ROOT / "runtime" / "libpipit" / "include" / "std_actors.h"
+INCLUDE_DIR = PROJECT_ROOT / "runtime" / "libpipit" / "include"
 OUTPUT = PROJECT_ROOT / "doc" / "spec" / "standard-library-spec-v0.3.0.md"
 
 # Regex patterns
@@ -33,7 +33,7 @@ RE_ACTOR = re.compile(
 
 
 def parse_actors(src: str) -> list[dict]:
-    """Parse std_actors.h and extract actor documentation."""
+    """Parse a std_*.h header and extract actor documentation."""
     lines = src.splitlines()
     actors = []
     current_group = None
@@ -172,7 +172,7 @@ def generate_markdown(actors: list[dict]) -> str:
     lines = [
         "# Pipit Standard Library Reference",
         "",
-        "<!-- Auto-generated from std_actors.h by scripts/gen-stdlib-doc.py -->",
+        "<!-- Auto-generated from std_*.h by scripts/gen-stdlib-doc.py -->",
         "<!-- Do not edit manually -->",
         "",
         "## Quick Reference",
@@ -251,15 +251,21 @@ def generate_markdown(actors: list[dict]) -> str:
 
 
 def main() -> int:
-    if not INPUT.exists():
-        print(f"Error: {INPUT} not found", file=sys.stderr)
+    headers = sorted(INCLUDE_DIR.glob("std_*.h"))
+    if not headers:
+        print(f"Error: no std_*.h files found in {INCLUDE_DIR}", file=sys.stderr)
         return 1
 
-    src = INPUT.read_text()
-    actors = parse_actors(src)
+    actors: list[dict] = []
+    for header in headers:
+        src = header.read_text()
+        found = parse_actors(src)
+        actors.extend(found)
+        if found:
+            print(f"  {header.name}: {len(found)} actors")
 
     if not actors:
-        print("Error: no actors found in source", file=sys.stderr)
+        print("Error: no actors found in any std_*.h header", file=sys.stderr)
         return 1
 
     md = generate_markdown(actors)
@@ -267,7 +273,7 @@ def main() -> int:
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT.write_text(md)
 
-    print(f"Generated {OUTPUT} ({len(actors)} actors)")
+    print(f"Generated {OUTPUT} ({len(actors)} actors from {len(headers)} headers)")
     return 0
 
 

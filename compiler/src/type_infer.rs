@@ -933,6 +933,69 @@ mod tests {
         assert_eq!(mono.params[0].param_type, crate::registry::ParamType::Float);
     }
 
+    fn infer_source(source: &str) -> TypeInferResult {
+        use std::path::PathBuf;
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let mut registry = Registry::new();
+        registry
+            .load_header(&root.join("runtime/libpipit/include/std_actors.h"))
+            .expect("load std_actors.h");
+        registry
+            .load_header(&root.join("runtime/libpipit/include/std_math.h"))
+            .expect("load std_math.h");
+        let parse_result = crate::parser::parse(source);
+        assert!(
+            parse_result.errors.is_empty(),
+            "parse errors: {:?}",
+            parse_result.errors
+        );
+        let program = parse_result.program.expect("parse failed");
+        let resolve_result = crate::resolve::resolve(&program, &registry);
+        assert!(
+            resolve_result
+                .diagnostics
+                .iter()
+                .all(|d| d.level != DiagLevel::Error),
+            "resolve errors: {:#?}",
+            resolve_result.diagnostics
+        );
+        type_infer(&program, &resolve_result.resolved, &registry)
+    }
+
+    #[test]
+    fn ambiguous_poly_source_no_context() {
+        // sine() has no T-typed params and no upstream — T is ambiguous.
+        let result = infer_source("clock 1kHz t {\n    sine(100.0, 1.0) | stdout()\n}");
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.level == DiagLevel::Error
+                    && d.message.contains("ambiguous polymorphic")),
+            "expected 'ambiguous polymorphic' error, got: {:#?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn poly_stdout_infers_cfloat_from_fft() {
+        // constant(0.0) → T=float, fft → cfloat, stdout<T> → T=cfloat (valid)
+        let result = infer_source("clock 1kHz t {\n    constant(0.0) | fft(256) | stdout()\n}");
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "unexpected type_infer errors: {:#?}",
+            errors
+        );
+    }
+
     #[test]
     fn parse_type_names() {
         assert_eq!(parse_type_name("float"), Some(PipitType::Float));

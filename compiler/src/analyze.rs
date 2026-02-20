@@ -1788,12 +1788,15 @@ mod tests {
             .unwrap()
             .to_path_buf();
         let std_actors = root.join("runtime/libpipit/include/std_actors.h");
+        let std_math = root.join("runtime/libpipit/include/std_math.h");
         let example_actors = root.join("examples/example_actors.h");
         let std_sink = root.join("runtime/libpipit/include/std_sink.h");
         let std_source = root.join("runtime/libpipit/include/std_source.h");
         let mut reg = Registry::new();
         reg.load_header(&std_actors)
             .expect("failed to load std_actors.h");
+        reg.load_header(&std_math)
+            .expect("failed to load std_math.h");
         reg.load_header(&example_actors)
             .expect("failed to load example_actors.h");
         reg.load_header(&std_sink)
@@ -1957,16 +1960,28 @@ mod tests {
     #[test]
     fn type_check_mismatch() {
         let reg = test_registry();
-        // fft outputs cfloat, but stdout expects float → type mismatch
-        // (uses concrete actors; polymorphic actors defer type checks to type_infer)
+        // fft outputs cfloat, second fft expects float → type mismatch
+        // (both fft actors are concrete, so analysis catches the mismatch)
         let result = analyze_source(
-            "clock 1kHz t {\n    constant(0.0) | fft(256) | stdout()\n}",
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | fft(256) | stdout()\n}",
             &reg,
         );
         assert!(
             has_error(&result, "type mismatch"),
             "expected type mismatch error, got: {:#?}",
             result.diagnostics
+        );
+    }
+
+    #[test]
+    fn polymorphic_stdout_accepts_cfloat_from_fft() {
+        let reg = test_registry();
+        // constant(0.0) → float, fft(256) → cfloat, stdout<T> infers T=cfloat.
+        // Analysis phase sees stdout as polymorphic (out_type returns None),
+        // so the cfloat→stdout edge is not flagged — type_infer resolves it.
+        analyze_ok(
+            "clock 1kHz t {\n    constant(0.0) | fft(256) | stdout()\n}",
+            &reg,
         );
     }
 
@@ -2296,18 +2311,13 @@ mod tests {
     }
 
     #[test]
-    fn param_type_int_to_float_mismatch_error() {
+    fn param_type_int_to_polymorphic_ok() {
         let reg = test_registry();
-        // param val = 1 (int), constant has RUNTIME_PARAM(float, value) -> mismatch
-        // (uses concrete actor; polymorphic actors defer type checks to type_infer)
-        let result = analyze_source(
+        // param val = 1 (int), polymorphic constant has RUNTIME_PARAM(T, value)
+        // → T inferred as int32, no mismatch
+        analyze_ok(
             "param val = 1\nclock 1kHz t {\n    constant($val) | stdout()\n}",
             &reg,
-        );
-        assert!(
-            has_error(&result, "type mismatch"),
-            "expected param type mismatch error, got: {:#?}",
-            result.diagnostics
         );
     }
 
@@ -2622,14 +2632,19 @@ mod tests {
 
     #[test]
     fn ctrl_type_not_int32_error() {
-        // constant outputs float -> ctrl is NOT int32 -> error
-        // (uses concrete actor; polymorphic actors defer type checks to type_infer)
-        let reg = test_registry();
+        // float_src is a concrete float source → ctrl is NOT int32 → error
+        let reg = test_registry_with_extra_header(
+            r#"
+#include <pipit.h>
+ACTOR(float_src, IN(void, 0), OUT(float, 1), PARAM(float, value)) {
+    (void)in; out[0] = value; return ACTOR_OK;
+}};"#,
+        );
         let result = analyze_source(
             concat!(
                 "clock 1kHz t {\n",
                 "    control {\n",
-                "        constant(0.0) -> ctrl\n",
+                "        float_src(0.0) -> ctrl\n",
                 "    }\n",
                 "    mode a {\n        constant(0.0) | stdout()\n    }\n",
                 "    mode b {\n        constant(0.0) | stdout()\n    }\n",

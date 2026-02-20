@@ -192,6 +192,38 @@
 
 ---
 
+## v0.3.2 - Polymorphic Standard Actors & Library Split
+
+**Goal**: Apply v0.3.0 polymorphism to standard actor library; begin modular header organization.
+
+- [x] **Make 11 standard actors polymorphic** (`template<typename T>`):
+  - [x] Source actors: `constant`, `sine`, `square`, `sawtooth`, `triangle`, `noise`, `impulse`
+  - [x] I/O actors: `stdout`, `stderr`, `stdin`, `stdout_fmt`
+  - [x] Update doc comments with "Polymorphic: works with any numeric wire type."
+
+- [x] **Split arithmetic actors into `std_math.h`**:
+  - [x] Extract 7 actors (`mul`, `add`, `sub`, `div`, `abs`, `sqrt`, `threshold`) from `std_actors.h`
+  - [x] Add `#include <std_math.h>` to `std_actors.h` for C++ backward compatibility
+  - [x] Update all compiler test registries and bench to load `std_math.h`
+
+- [x] **Unify test include paths**:
+  - [x] Integration tests use `-I runtime/libpipit/include/` (directory) instead of individual headers
+  - [x] Runtime C++ tests updated with explicit `<float>` template params
+
+- [x] **Fix test regressions from polymorphic changes**:
+  - [x] 4 unit tests: update type-check tests for polymorphic actors (analysis skips polymorphic edges)
+  - [x] 8 integration tests: add explicit `<float>` annotations for source actors where T cannot be inferred
+  - [x] 16 runtime C++ tests: add `<float>` template params to actor instantiations
+
+- [x] **Verify compiler error assertion coverage**:
+  - [x] Analysis phase: concrete-to-concrete type mismatch (e.g., `fft | fft`) still caught
+  - [x] Type inference phase: ambiguous polymorphic calls (e.g., `sine() | stdout()`) correctly diagnosed
+  - [x] Polymorphic stdout accepts cfloat from fft (valid — no false error)
+
+- [x] 358 unit + 112 integration + 6 runtime tests passing
+
+---
+
 ## v0.4.0 - Language Evolution
 
 **Goal**: Improve PDL ergonomics based on real usage experience. Design-first approach.
@@ -292,9 +324,10 @@
   - [ ] SDR examples (if filters/transforms complete)
   - [ ] Simple sensor processing
 
-- [ ] **Actor header organization**:
-  - [ ] Split `actors.h` into categories: `io.h`, `filters.h`, `math.h`, etc.
-  - [ ] Maintain `actors.h` as umbrella include
+- [ ] **Actor header organization** (started in v0.3.2):
+  - [x] Split `std_math.h` from `std_actors.h` (arithmetic actors)
+  - [ ] Split remaining categories: `io.h`, `filters.h`, etc.
+  - [x] Maintain `std_actors.h` as umbrella include (via `#include <std_math.h>`)
   - [ ] Consider `--actor-path` for automatic discovery
 
 #### Performance & Benchmarking (deferred from v0.2.1)
@@ -394,7 +427,8 @@
 - **v0.3.0** Complete — polymorphism, type inference, monomorphization, lowering verification (L1-L5), template codegen; 458 tests passing
 - **New modules**: `type_infer.rs` (constraint-based type inference), `lower.rs` (typed lowering + L1-L5 verification)
 - **New pipeline**: `parse → resolve → type_infer → lower_verify → graph → analyze → schedule → codegen`
-- **ADR numbering**: ADR-015 = spec alignment (from review/spec), ADR-016 = polymorphism & safe widening
+- **ADR numbering**: ADR-015 = spec alignment (from review/spec), ADR-016 = polymorphism & safe widening, ADR-017 = analysis-owned node port-rate resolution
+- **v0.3.2** applies v0.3.0 polymorphism to 11 std actors; begins modular header split (`std_math.h`)
 - **v0.4.x** now includes former v0.3.0 stdlib expansion backlog
 - **v0.4.0** covers remaining language evolution after v0.3.0 type system work
 - **v0.5.0+** deferred until core is stable and well-characterized
