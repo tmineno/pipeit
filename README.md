@@ -42,7 +42,10 @@ target/release/pcc examples/gain.pdl \
   --emit cpp -o gain.cpp
 
 # Build the executable manually
-c++ -std=c++20 -O2 gain.cpp -I runtime/libpipit/include -lpthread -o gain
+c++ -std=c++20 -O2 gain.cpp \
+  -I runtime/libpipit/include \
+  -I runtime/libpipit/include/third_party \
+  -lpthread -o gain
 
 # Or compile directly to executable (one step, requires C++20)
 target/release/pcc examples/gain.pdl \
@@ -67,8 +70,11 @@ target/release/pcc examples/gain.pdl \
 
 ### Compiler (`pcc`)
 
-- Full pipeline: parse, resolve, graph, analyze, schedule, codegen
-- Type checking, SDF balance verification, feedback delay validation
+- Full pipeline: parse → resolve → type_infer → lower → graph → analyze → schedule → codegen
+- Polymorphic actors with constraint-based type inference (`actor<T>`)
+- Implicit safe widening: `int8 → int16 → int32 → float → double`, `cfloat → cdouble`
+- Dimension mismatch diagnostics (explicit arg vs shape constraint vs span-derived conflicts)
+- SDF balance verification, feedback delay validation
 - Overrun policies: `drop`, `slip`, `backlog`
 - Actor error propagation with structured exit codes (0/1/2)
 - Diagnostic hints for common errors
@@ -82,12 +88,12 @@ target/release/pcc examples/gain.pdl \
 - `--release` strips probes to zero cost
 - Adaptive spin-wait timer with EWMA calibration (ADR-014)
 
-### Standard Actors (31 actors)
+### Standard Actors (33 actors)
 
 - **I/O**: `stdin`, `stdout`, `stderr`, `stdout_fmt`, `binread`, `binwrite`
-- **Math**: `constant`, `mul`, `add`, `sub`, `div`, `abs`, `sqrt`, `threshold`
+- **Math**: `constant`, `mul`, `add`, `sub`, `div`, `abs`, `sqrt`, `threshold`, `convolution`
 - **Statistics**: `mean`, `rms`, `min`, `max`
-- **DSP**: `fft`, `c2r`, `mag`, `fir`, `delay`, `decimate`
+- **DSP**: `fft`, `c2r`, `mag`, `fir`, `delay`, `decimate` (PocketFFT + xsimd SIMD vectorization)
 - **Waveform generators**: `sine`, `square`, `sawtooth`, `triangle`, `noise`, `impulse`
 - **External I/O**: `socket_write`, `socket_read` (UDP/IPC via [PPKT protocol](doc/spec/ppkt-protocol-spec-v0.3.0.md))
 
@@ -128,4 +134,4 @@ benches/        Performance benchmarks (compiler, runtime, E2E)
 
 ## License
 
-See repository root for license information.
+MIT — see [LICENSE](LICENSE).

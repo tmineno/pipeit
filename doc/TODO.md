@@ -106,6 +106,20 @@
 
 ---
 
+## v0.3.3 - Vendored SIMD & FFT Acceleration
+
+- [x] Vendor PocketFFT (BSD-3) — replace naive Cooley-Tukey FFT (2.5–6x speedup)
+- [x] Vendor xsimd (BSD-3) — portable SIMD intrinsics
+- [x] Vectorize 8 actors with xsimd: `mul`, `fir`, `mean`, `rms`, `min`, `max`, `c2r`, `mag`
+- [x] Add `convolution` actor to `std_math.h`
+- [x] Skip `third_party/` in pcc header discovery to avoid architecture-specific sub-headers
+- [x] Add `third_party/` to all include paths (CMake, benches, tests)
+- [x] Refactor `codegen_compile.rs`: extract `run_pcc`, `temp_path`, `compile_cpp_to_binary` helpers
+- [x] Exclude `third_party/` from clang-format in CI and pre-commit
+- [x] Add MIT LICENSE at project root
+
+---
+
 ## v0.4.0 - Language Evolution
 
 **Goal**: Improve PDL ergonomics based on real usage experience. Design-first approach.
@@ -179,7 +193,7 @@
   - [ ] `std(N)` - Standard deviation
   - [ ] `xcorr(N)` - Cross-correlation
   - [ ] `acorr(N)` - Auto-correlation
-  - [ ] `convolve(N, kernel)` - Convolution
+  - [x] `convolve(N, kernel)` - Convolution (added in v0.3.3 as `convolution`)
 
 - [ ] **Control flow** (MEDIUM complexity):
   - [ ] `gate(threshold)` - Pass/block based on signal level
@@ -311,6 +325,7 @@
 - **New pipeline**: `parse → resolve → type_infer → lower_verify → graph → analyze → schedule → codegen`
 - **ADR numbering**: ADR-015 = spec alignment (from review/spec), ADR-016 = polymorphism & safe widening, ADR-017 = analysis-owned node port-rate resolution
 - **v0.3.2** applies v0.3.0 polymorphism to 11 std actors; begins modular header split (`std_math.h`)
+- **v0.3.3** vendors PocketFFT + xsimd, vectorizes 8 actors, adds convolution; MIT LICENSE added
 - **v0.4.x** now includes former v0.3.0 stdlib expansion backlog
 - **v0.4.0** covers remaining language evolution after v0.3.0 type system work
 - **v0.5.0+** deferred until core is stable and well-characterized
