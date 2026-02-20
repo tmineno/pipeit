@@ -105,6 +105,11 @@ struct AnalyzeCtx<'a> {
     span_derived_dims: HashMap<(NodeId, String), u32>,
 }
 
+struct BalanceGraph {
+    rates: HashMap<(NodeId, NodeId), (u32, u32)>,
+    adjacency: HashMap<NodeId, Vec<NodeId>>,
+}
+
 impl<'a> AnalyzeCtx<'a> {
     fn new(
         program: &'a Program,
@@ -950,114 +955,51 @@ impl<'a> AnalyzeCtx<'a> {
 
     fn check_shape_constraints_in_subgraph(&mut self, sub: &Subgraph) {
         for node in &sub.nodes {
-            if let NodeKind::Actor {
-                name,
-                args,
-                shape_constraint,
-                ..
-            } = &node.kind
-            {
-                // Note: runtime param as shape dim (§13.6 check 1) is already
-                // caught by the resolve phase (resolve.rs).
+            self.check_unresolved_frame_dims(node);
+        }
+        self.check_edge_shape_conflicts(sub);
+    }
 
-                // Check: unresolved frame dimensions after shape inference (§13.6)
-                // Only flag when:
-                // - both production and consumption rates are unresolvable
-                // - the actor was called with zero args (if args were provided,
-                //   the user intentionally left the frame dim to default)
-                // - no explicit shape constraint was provided
-                if shape_constraint.is_none() && args.is_empty() {
-                    if let Some(meta) = self.actor_meta(name) {
-                        let has_symbolic = meta
-                            .in_shape
-                            .dims
-                            .iter()
-                            .chain(meta.out_shape.dims.iter())
-                            .any(|d| matches!(d, TokenCount::Symbolic(_)));
+    fn check_unresolved_frame_dims(&mut self, node: &Node) {
+        let NodeKind::Actor {
+            name,
+            args,
+            shape_constraint,
+            ..
+        } = &node.kind
+        else {
+            return;
+        };
 
-                        if has_symbolic {
-                            let prod = self.production_rate(node);
-                            let cons = self.consumption_rate(node);
-
-                            if prod.is_none() && cons.is_none() {
-                                let sym_name = meta
-                                    .in_shape
-                                    .dims
-                                    .iter()
-                                    .chain(meta.out_shape.dims.iter())
-                                    .find_map(|d| match d {
-                                        TokenCount::Symbolic(s) => Some(s.as_str()),
-                                        _ => None,
-                                    })
-                                    .unwrap_or("?");
-
-                                self.error_with_hint(
-                                    node.span,
-                                    format!(
-                                        "unresolved frame dimension '{}' at actor '{}'",
-                                        sym_name, name
-                                    ),
-                                    format!(
-                                        "add explicit shape constraint, e.g. {}()[<size>]",
-                                        name
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+        if shape_constraint.is_some() || !args.is_empty() {
+            return;
         }
 
-        // Check 3: conflicting explicit vs edge-inferred shape constraints (§13.6)
+        let Some(meta) = self.actor_meta(name) else {
+            return;
+        };
+        let Some(sym_name) = first_symbolic_dim_name(meta).map(str::to_string) else {
+            return;
+        };
+
+        if self.production_rate(node).is_some() || self.consumption_rate(node).is_some() {
+            return;
+        }
+
+        self.error_with_hint(
+            node.span,
+            format!(
+                "unresolved frame dimension '{}' at actor '{}'",
+                sym_name, name
+            ),
+            format!("add explicit shape constraint, e.g. {}()[<size>]", name),
+        );
+    }
+
+    fn check_edge_shape_conflicts(&mut self, sub: &Subgraph) {
         for edge in &sub.edges {
-            let src = match find_node(sub, edge.source) {
-                Some(n) => n,
-                None => continue,
-            };
-            let tgt = match find_node(sub, edge.target) {
-                Some(n) => n,
-                None => continue,
-            };
-
-            let (tgt_name, tgt_sc) = match &tgt.kind {
-                NodeKind::Actor {
-                    name,
-                    shape_constraint: Some(sc),
-                    ..
-                } => (name.as_str(), sc),
-                _ => continue,
-            };
-
-            let src_dims = match self.resolve_output_shape_dims(src, sub) {
-                Some(d) => d,
-                None => continue,
-            };
-
-            let tgt_dims: Option<Vec<u32>> = tgt_sc
-                .dims
-                .iter()
-                .map(|d| self.resolve_shape_dim(d))
-                .collect();
-            let tgt_dims = match tgt_dims {
-                Some(d) => d,
-                None => continue,
-            };
-
-            if src_dims.len() == tgt_dims.len() {
-                for (i, (&sv, &tv)) in src_dims.iter().zip(tgt_dims.iter()).enumerate() {
-                    if sv != tv {
-                        self.error(
-                            tgt_sc.span,
-                            format!(
-                                "conflicting frame constraint for actor '{}': \
-                                 inferred dim[{}]={} from upstream, but explicit shape specifies {}",
-                                tgt_name, i, sv, tv
-                            ),
-                        );
-                        break;
-                    }
-                }
+            if let Some((span, message)) = self.find_shape_conflict_on_edge(sub, edge) {
+                self.error(span, message);
             }
         }
 
@@ -1098,6 +1040,43 @@ impl<'a> AnalyzeCtx<'a> {
         for (span, msg) in conflicts {
             self.error(span, msg);
         }
+    }
+
+    fn find_shape_conflict_on_edge(&self, sub: &Subgraph, edge: &Edge) -> Option<(Span, String)> {
+        let src = find_node(sub, edge.source)?;
+        let tgt = find_node(sub, edge.target)?;
+        let (tgt_name, tgt_sc) = match &tgt.kind {
+            NodeKind::Actor {
+                name,
+                shape_constraint: Some(sc),
+                ..
+            } => (name.as_str(), sc),
+            _ => return None,
+        };
+        let src_dims = self.resolve_output_shape_dims(src, sub)?;
+        let tgt_dims: Vec<u32> = tgt_sc
+            .dims
+            .iter()
+            .map(|d| self.resolve_shape_dim(d))
+            .collect::<Option<Vec<_>>>()?;
+
+        if src_dims.len() != tgt_dims.len() {
+            return None;
+        }
+
+        for (i, (&sv, &tv)) in src_dims.iter().zip(tgt_dims.iter()).enumerate() {
+            if sv != tv {
+                return Some((
+                    tgt_sc.span,
+                    format!(
+                        "conflicting frame constraint for actor '{}': \
+                         inferred dim[{}]={} from upstream, but explicit shape specifies {}",
+                        tgt_name, i, sv, tv
+                    ),
+                ));
+            }
+        }
+        None
     }
 
     // ── Phase 0c: Dimension PARAM order advisory ───────────────────────
@@ -1247,141 +1226,160 @@ impl<'a> AnalyzeCtx<'a> {
             return;
         }
 
-        // Pre-compute incoming edge counts per node.
-        // For multi-input actors (e.g. add(IN(float,2)) with 2 edges),
-        // the per-edge consumption rate is in_count / num_incoming_edges.
+        let balance = self.build_balance_graph(sub);
+        let rv_rat = self.solve_balance_ratios(sub, &balance);
+        let rv = normalize_repetition_vector(&rv_rat);
+        let consistent = self.verify_balance_equations(sub, task_name, &balance.rates, &rv);
+        if consistent && !rv.is_empty() {
+            self.repetition_vectors
+                .insert((task_name.to_string(), label.to_string()), rv);
+        }
+    }
+
+    fn build_balance_graph(&self, sub: &Subgraph) -> BalanceGraph {
         let mut incoming_count: HashMap<NodeId, u32> = HashMap::new();
         for edge in &sub.edges {
             *incoming_count.entry(edge.target).or_insert(0) += 1;
         }
 
-        // Build adjacency list: node -> [(neighbor, production, consumption)]
-        // For edge (u, v): production = prod(u), consumption = per-edge cons(v)
         let mut rates: HashMap<(NodeId, NodeId), (u32, u32)> = HashMap::new();
-        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-
+        let mut adjacency: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
         for node in &sub.nodes {
-            adj.entry(node.id).or_default();
+            adjacency.entry(node.id).or_default();
         }
 
         for edge in &sub.edges {
-            let src = match find_node(sub, edge.source) {
-                Some(n) => n,
-                None => continue,
+            let Some(src) = find_node(sub, edge.source) else {
+                continue;
             };
-            let tgt = match find_node(sub, edge.target) {
-                Some(n) => n,
-                None => continue,
+            let Some(tgt) = find_node(sub, edge.target) else {
+                continue;
             };
+
             let p = self.production_rate(src).unwrap_or(1);
             let total_c = self.consumption_rate(tgt).unwrap_or(1);
-            // Split consumption evenly across incoming edges
             let num_in = incoming_count.get(&edge.target).copied().unwrap_or(1);
             let c = if num_in > 1 {
                 total_c / num_in
             } else {
                 total_c
             };
+
             rates.insert((edge.source, edge.target), (p, c));
-            adj.entry(edge.source).or_default().push(edge.target);
-            adj.entry(edge.target).or_default().push(edge.source);
+            adjacency.entry(edge.source).or_default().push(edge.target);
+            adjacency.entry(edge.target).or_default().push(edge.source);
         }
 
-        // BFS with rational arithmetic to compute repetition vector.
-        // Each node gets a rational rv = (numerator, denominator).
+        BalanceGraph { rates, adjacency }
+    }
+
+    fn solve_balance_ratios(
+        &self,
+        sub: &Subgraph,
+        balance: &BalanceGraph,
+    ) -> HashMap<NodeId, (u64, u64)> {
         let mut rv_rat: HashMap<NodeId, (u64, u64)> = HashMap::new();
         let mut queue = std::collections::VecDeque::new();
 
-        // Process each connected component
         for node in &sub.nodes {
             if rv_rat.contains_key(&node.id) {
                 continue;
             }
-            // Start of new component
             rv_rat.insert(node.id, (1, 1));
             queue.push_back(node.id);
 
             while let Some(current) = queue.pop_front() {
-                let (cur_num, cur_den) = rv_rat[&current];
-                let neighbors: Vec<NodeId> = adj.get(&current).cloned().unwrap_or_default();
-                for &neighbor in &neighbors {
+                let Some((cur_num, cur_den)) = rv_rat.get(&current).copied() else {
+                    continue;
+                };
+                let Some(neighbors) = balance.adjacency.get(&current) else {
+                    continue;
+                };
+
+                for &neighbor in neighbors {
                     if rv_rat.contains_key(&neighbor) {
-                        continue; // already visited
+                        continue;
                     }
-                    // Find the edge between current and neighbor to get rates
-                    if let Some(&(p, c)) = rates.get(&(current, neighbor)) {
-                        // Edge current -> neighbor: rv[current]*p == rv[neighbor]*c
-                        // rv[neighbor] = rv[current] * p / c = (cur_num * p) / (cur_den * c)
-                        let n_num = cur_num * p as u64;
-                        let n_den = cur_den * c as u64;
-                        let g = gcd(n_num, n_den);
-                        rv_rat.insert(neighbor, (n_num / g, n_den / g));
-                        queue.push_back(neighbor);
-                    } else if let Some(&(p, c)) = rates.get(&(neighbor, current)) {
-                        // Edge neighbor -> current: rv[neighbor]*p == rv[current]*c
-                        // rv[neighbor] = rv[current] * c / p = (cur_num * c) / (cur_den * p)
-                        let n_num = cur_num * c as u64;
-                        let n_den = cur_den * p as u64;
-                        let g = gcd(n_num, n_den);
-                        rv_rat.insert(neighbor, (n_num / g, n_den / g));
+                    if let Some(next_ratio) =
+                        self.propagate_ratio(current, neighbor, cur_num, cur_den, &balance.rates)
+                    {
+                        rv_rat.insert(neighbor, next_ratio);
                         queue.push_back(neighbor);
                     }
                 }
             }
         }
 
-        // Normalize: find LCM of all denominators, then multiply each numerator
-        let lcm_den = rv_rat.values().fold(1u64, |acc, &(_, d)| lcm(acc, d));
-        let mut rv: HashMap<NodeId, u32> = HashMap::new();
-        for (&node_id, &(num, den)) in &rv_rat {
-            let val = num * (lcm_den / den);
-            rv.insert(node_id, val as u32);
-        }
+        rv_rat
+    }
 
-        // Reduce by GCD of all values
-        if !rv.is_empty() {
-            let g = rv.values().copied().fold(0u32, gcd32);
-            if g > 1 {
-                for val in rv.values_mut() {
-                    *val /= g;
-                }
-            }
+    fn propagate_ratio(
+        &self,
+        current: NodeId,
+        neighbor: NodeId,
+        cur_num: u64,
+        cur_den: u64,
+        rates: &HashMap<(NodeId, NodeId), (u32, u32)>,
+    ) -> Option<(u64, u64)> {
+        if let Some(&(p, c)) = rates.get(&(current, neighbor)) {
+            return Some(reduce_ratio(cur_num * p as u64, cur_den * c as u64));
         }
+        if let Some(&(p, c)) = rates.get(&(neighbor, current)) {
+            return Some(reduce_ratio(cur_num * c as u64, cur_den * p as u64));
+        }
+        None
+    }
 
-        // Verify all edges satisfy balance equation
+    fn verify_balance_equations(
+        &mut self,
+        sub: &Subgraph,
+        task_name: &str,
+        rates: &HashMap<(NodeId, NodeId), (u32, u32)>,
+        rv: &HashMap<NodeId, u32>,
+    ) -> bool {
         let mut consistent = true;
         for edge in &sub.edges {
-            if let Some(&(p, c)) = rates.get(&(edge.source, edge.target)) {
-                let lhs = rv.get(&edge.source).copied().unwrap_or(1) as u64 * p as u64;
-                let rhs = rv.get(&edge.target).copied().unwrap_or(1) as u64 * c as u64;
-                if lhs != rhs {
-                    consistent = false;
-                    let src = find_node(sub, edge.source);
-                    let tgt = find_node(sub, edge.target);
-                    let src_name = src.map(node_display_name).unwrap_or("?".into());
-                    let tgt_name = tgt.map(node_display_name).unwrap_or("?".into());
-                    self.error(
-                        edge.span,
-                        format!(
-                            "SDF balance equation unsolvable at edge '{} -> {}' in task '{}': \
-                             {}×{} ≠ {}×{}",
-                            src_name,
-                            tgt_name,
-                            task_name,
-                            rv.get(&edge.source).unwrap_or(&0),
-                            p,
-                            rv.get(&edge.target).unwrap_or(&0),
-                            c
-                        ),
-                    );
-                }
+            let Some(&(p, c)) = rates.get(&(edge.source, edge.target)) else {
+                continue;
+            };
+            let lhs = rv.get(&edge.source).copied().unwrap_or(1) as u64 * p as u64;
+            let rhs = rv.get(&edge.target).copied().unwrap_or(1) as u64 * c as u64;
+            if lhs == rhs {
+                continue;
             }
+            consistent = false;
+            self.report_balance_mismatch(sub, edge, task_name, rv, p, c);
         }
+        consistent
+    }
 
-        if consistent {
-            self.repetition_vectors
-                .insert((task_name.to_string(), label.to_string()), rv);
-        }
+    fn report_balance_mismatch(
+        &mut self,
+        sub: &Subgraph,
+        edge: &Edge,
+        task_name: &str,
+        rv: &HashMap<NodeId, u32>,
+        p: u32,
+        c: u32,
+    ) {
+        let src = find_node(sub, edge.source);
+        let tgt = find_node(sub, edge.target);
+        let src_name = src.map(node_display_name).unwrap_or("?".into());
+        let tgt_name = tgt.map(node_display_name).unwrap_or("?".into());
+        self.error(
+            edge.span,
+            format!(
+                "SDF balance equation unsolvable at edge '{} -> {}' in task '{}': \
+                 {}×{} ≠ {}×{}",
+                src_name,
+                tgt_name,
+                task_name,
+                rv.get(&edge.source).unwrap_or(&0),
+                p,
+                rv.get(&edge.target).unwrap_or(&0),
+                c
+            ),
+        );
     }
 
     // ── Phase 3: Feedback loop delay verification ───────────────────────
@@ -1697,6 +1695,17 @@ fn find_buffer_write_in_task(task_graph: &TaskGraph, buffer_name: &str) -> Optio
     None
 }
 
+fn first_symbolic_dim_name(meta: &ActorMeta) -> Option<&str> {
+    meta.in_shape
+        .dims
+        .iter()
+        .chain(meta.out_shape.dims.iter())
+        .find_map(|d| match d {
+            TokenCount::Symbolic(name) => Some(name.as_str()),
+            _ => None,
+        })
+}
+
 /// Display name for a node (for error messages).
 fn node_display_name(node: &Node) -> String {
     match &node.kind {
@@ -1731,6 +1740,11 @@ fn gcd(a: u64, b: u64) -> u64 {
     }
 }
 
+fn reduce_ratio(num: u64, den: u64) -> (u64, u64) {
+    let g = gcd(num, den);
+    (num / g, den / g)
+}
+
 /// GCD for u32.
 fn gcd32(a: u32, b: u32) -> u32 {
     if b == 0 {
@@ -1747,6 +1761,25 @@ fn lcm(a: u64, b: u64) -> u64 {
     } else {
         a / gcd(a, b) * b
     }
+}
+
+fn normalize_repetition_vector(rv_rat: &HashMap<NodeId, (u64, u64)>) -> HashMap<NodeId, u32> {
+    let lcm_den = rv_rat.values().fold(1u64, |acc, &(_, d)| lcm(acc, d));
+    let mut rv: HashMap<NodeId, u32> = HashMap::new();
+    for (&node_id, &(num, den)) in rv_rat {
+        let val = num * (lcm_den / den);
+        rv.insert(node_id, val as u32);
+    }
+    if rv.is_empty() {
+        return rv;
+    }
+    let g = rv.values().copied().fold(0u32, gcd32);
+    if g > 1 {
+        for val in rv.values_mut() {
+            *val /= g;
+        }
+    }
+    rv
 }
 
 /// Infer a ParamType from a scalar value.

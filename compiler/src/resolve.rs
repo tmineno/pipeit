@@ -538,99 +538,104 @@ impl<'a> ResolveCtx<'a> {
         taps: &mut HashMap<String, TapInfo>,
     ) {
         let name = &call.name.name;
-
-        // Check defines first (define shadows actor)
-        let is_define = self.resolved.defines.contains_key(name);
-        let is_actor = self.registry.lookup(name).is_some();
-
-        if is_define {
-            self.resolved
-                .call_resolutions
-                .insert(call.span, CallResolution::Define);
-            if is_actor {
-                self.warning(
-                    call.name.span,
-                    format!("define '{}' shadows actor with the same name", name),
-                );
-            }
-        } else if is_actor {
-            self.resolved
-                .call_resolutions
-                .insert(call.span, CallResolution::Actor);
-
-            // Validate type arguments for polymorphic actors
-            if let Some(meta) = self.registry.lookup(name) {
-                if !call.type_args.is_empty() && meta.type_params.is_empty() {
-                    self.error(
-                        call.name.span,
-                        format!(
-                            "actor '{}' is not polymorphic but was called with type arguments",
-                            name
-                        ),
-                    );
-                } else if !call.type_args.is_empty()
-                    && call.type_args.len() != meta.type_params.len()
-                {
-                    self.error(
-                        call.name.span,
-                        format!(
-                            "actor '{}' expects {} type argument(s), found {}",
-                            name,
-                            meta.type_params.len(),
-                            call.type_args.len()
-                        ),
-                    );
-                }
-                // Note: polymorphic actor with no type_args is valid (inferred)
-            }
-        } else {
-            self.diagnostics.push(Diagnostic {
-                level: DiagLevel::Error,
-                span: call.name.span,
-                message: format!("unknown actor or define '{}'", name),
-                hint: Some("check actor header includes (-I flag)".to_string()),
-            });
-        }
-
-        // Resolve arguments
+        self.resolve_call_target(call, name);
         for arg in &call.args {
-            match arg {
-                Arg::ParamRef(ident) => {
-                    if !self.resolved.params.contains_key(&ident.name) {
-                        self.error(ident.span, format!("undefined param '${}'", ident.name));
-                    }
-                }
-                Arg::ConstRef(ident) => {
-                    // In define body, check formal params first
-                    let in_formal_params = match scope {
-                        Scope::Define { formal_params, .. } => formal_params.contains(&ident.name),
-                        Scope::Task { .. } => false,
-                    };
-                    if !in_formal_params && !self.resolved.consts.contains_key(&ident.name) {
-                        self.error(ident.span, format!("undefined const '{}'", ident.name));
-                    }
-                }
-                Arg::Value(_) => {}
-                Arg::TapRef(ident) => {
-                    // Try immediate resolution (tap already declared)
-                    if let Some(info) = taps.get_mut(&ident.name) {
-                        info.consumed = true;
-                    } else {
-                        // Forward reference — defer validation until all lines processed
-                        self.pending_tap_refs.push(PendingTapRef {
-                            tap_name: ident.name.clone(),
-                            scope: scope.description(),
-                            span: ident.span,
-                            context_name: scope.context_name(),
-                        });
-                    }
-                }
-            }
+            self.resolve_call_arg(arg, scope, taps);
         }
 
         // Validate shape constraint dimensions (v0.2.0)
         if let Some(sc) = &call.shape_constraint {
             self.validate_shape_constraint(sc, scope);
+        }
+    }
+
+    fn resolve_call_target(&mut self, call: &ActorCall, name: &str) {
+        let is_define = self.resolved.defines.contains_key(name);
+        let actor_meta = self.registry.lookup(name);
+
+        if is_define {
+            self.resolved
+                .call_resolutions
+                .insert(call.span, CallResolution::Define);
+            if actor_meta.is_some() {
+                self.warning(
+                    call.name.span,
+                    format!("define '{}' shadows actor with the same name", name),
+                );
+            }
+            return;
+        }
+
+        if let Some(meta) = actor_meta {
+            self.resolved
+                .call_resolutions
+                .insert(call.span, CallResolution::Actor);
+            self.validate_actor_type_args(call, name, meta.type_params.len());
+            return;
+        }
+
+        self.diagnostics.push(Diagnostic {
+            level: DiagLevel::Error,
+            span: call.name.span,
+            message: format!("unknown actor or define '{}'", name),
+            hint: Some("check actor header includes (-I flag)".to_string()),
+        });
+    }
+
+    fn validate_actor_type_args(&mut self, call: &ActorCall, actor_name: &str, expected: usize) {
+        if call.type_args.is_empty() {
+            return;
+        }
+        if expected == 0 {
+            self.error(
+                call.name.span,
+                format!(
+                    "actor '{}' is not polymorphic but was called with type arguments",
+                    actor_name
+                ),
+            );
+            return;
+        }
+        if call.type_args.len() != expected {
+            self.error(
+                call.name.span,
+                format!(
+                    "actor '{}' expects {} type argument(s), found {}",
+                    actor_name,
+                    expected,
+                    call.type_args.len()
+                ),
+            );
+        }
+    }
+
+    fn resolve_call_arg(&mut self, arg: &Arg, scope: &Scope, taps: &mut HashMap<String, TapInfo>) {
+        match arg {
+            Arg::ParamRef(ident) => {
+                if !self.resolved.params.contains_key(&ident.name) {
+                    self.error(ident.span, format!("undefined param '${}'", ident.name));
+                }
+            }
+            Arg::ConstRef(ident) => {
+                if !scope_has_formal_param(scope, &ident.name)
+                    && !self.resolved.consts.contains_key(&ident.name)
+                {
+                    self.error(ident.span, format!("undefined const '{}'", ident.name));
+                }
+            }
+            Arg::Value(_) => {}
+            Arg::TapRef(ident) => {
+                if let Some(info) = taps.get_mut(&ident.name) {
+                    info.consumed = true;
+                } else {
+                    self.pending_tap_refs.push(PendingTapRef {
+                        tap_name: ident.name.clone(),
+                        scope: scope.description(),
+                        span: ident.span,
+                        context_name: scope.context_name(),
+                    });
+                }
+            }
         }
     }
 
@@ -644,12 +649,7 @@ impl<'a> ResolveCtx<'a> {
     ) {
         for dim in &constraint.dims {
             if let crate::ast::ShapeDim::ConstRef(ident) = dim {
-                // In define body, formal params are allowed as shape dims
-                let in_formal_params = match scope {
-                    Scope::Define { formal_params, .. } => formal_params.contains(&ident.name),
-                    Scope::Task { .. } => false,
-                };
-                if !in_formal_params {
+                if !scope_has_formal_param(scope, &ident.name) {
                     if self.resolved.params.contains_key(&ident.name) {
                         self.diagnostics.push(Diagnostic {
                             level: DiagLevel::Error,
@@ -846,6 +846,13 @@ impl Scope {
             Scope::Task { name } => format!("task '{}'", name),
             Scope::Define { name, .. } => format!("define '{}'", name),
         }
+    }
+}
+
+fn scope_has_formal_param(scope: &Scope, name: &str) -> bool {
+    match scope {
+        Scope::Define { formal_params, .. } => formal_params.iter().any(|p| p == name),
+        Scope::Task { .. } => false,
     }
 }
 
