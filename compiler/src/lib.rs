@@ -5,6 +5,7 @@
 pub mod analyze;
 pub mod ast;
 pub mod codegen;
+pub mod dim_resolve;
 pub mod dot;
 pub mod graph;
 pub mod lexer;

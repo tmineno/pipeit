@@ -334,78 +334,24 @@ impl<'a> AnalyzeCtx<'a> {
         actor_args: &[Arg],
         shape_constraint: Option<&ShapeConstraint>,
     ) -> Option<u32> {
-        let mut product: u32 = 1;
-        for (i, dim) in shape.dims.iter().enumerate() {
-            let val = match dim {
-                TokenCount::Literal(n) => Some(*n),
-                TokenCount::Symbolic(sym) => {
-                    // 1. Try resolving from explicit actor arguments
-                    let from_arg = actor_meta
-                        .params
-                        .iter()
-                        .position(|p| p.name == *sym)
-                        .and_then(|idx| actor_args.get(idx))
-                        .and_then(|arg| self.resolve_arg_to_u32(arg));
-                    if from_arg.is_some() {
-                        from_arg
-                    } else {
-                        // 2. Try resolving from shape constraint at call site
-                        let from_shape = shape_constraint
-                            .and_then(|sc| sc.dims.get(i))
-                            .and_then(|sd| self.resolve_shape_dim(sd));
-                        if from_shape.is_some() {
-                            from_shape
-                        } else {
-                            // 3. Fallback: infer from already-bound span args
-                            self.infer_dim_param_from_span_args(sym, actor_meta, actor_args)
-                        }
-                    }
-                }
-            };
-            product = product.checked_mul(val?)?;
-        }
-        Some(product)
+        crate::dim_resolve::resolve_port_rate(
+            shape,
+            actor_meta,
+            actor_args,
+            shape_constraint.map(|sc| sc.dims.as_slice()),
+            self.resolved,
+            self.program,
+        )
     }
 
     /// Resolve a single ShapeDim from a call-site shape constraint.
     fn resolve_shape_dim(&self, dim: &ShapeDim) -> Option<u32> {
-        match dim {
-            ShapeDim::Literal(n, _) => Some(*n),
-            ShapeDim::ConstRef(ident) => {
-                let entry = self.resolved.consts.get(&ident.name)?;
-                let stmt = &self.program.statements[entry.stmt_index];
-                if let StatementKind::Const(c) = &stmt.kind {
-                    match &c.value {
-                        Value::Scalar(Scalar::Number(n, _, _)) => Some(*n as u32),
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
-            }
-        }
+        crate::dim_resolve::resolve_shape_dim(dim, self.resolved, self.program)
     }
 
     /// Resolve an Arg to a u32 value (for token count resolution).
     fn resolve_arg_to_u32(&self, arg: &Arg) -> Option<u32> {
-        match arg {
-            Arg::Value(Value::Scalar(Scalar::Number(n, _, _))) => Some(*n as u32),
-            Arg::Value(Value::Array(elems, _)) => Some(elems.len() as u32),
-            Arg::ConstRef(ident) => {
-                let entry = self.resolved.consts.get(&ident.name)?;
-                let stmt = &self.program.statements[entry.stmt_index];
-                if let StatementKind::Const(c) = &stmt.kind {
-                    match &c.value {
-                        Value::Scalar(Scalar::Number(n, _, _)) => Some(*n as u32),
-                        Value::Array(elems, _) => Some(elems.len() as u32),
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
+        crate::dim_resolve::resolve_arg_to_u32(arg, self.resolved, self.program)
     }
 
     /// Get the clock frequency for a task from the AST.
@@ -835,65 +781,13 @@ impl<'a> AnalyzeCtx<'a> {
         actor_meta: &ActorMeta,
         actor_args: &[Arg],
     ) -> Option<u32> {
-        // Only applies to compile-time integer dimension params.
-        let dim_param = actor_meta.params.iter().find(|p| p.name == dim_name)?;
-        if dim_param.kind != ParamKind::Param || dim_param.param_type != ParamType::Int {
-            return None;
-        }
-        // Find a span length source (first span arg with known compile-time length).
-        let span_len = actor_meta
-            .params
-            .iter()
-            .enumerate()
-            .find_map(|(idx, param)| {
-                if param.kind != ParamKind::Param {
-                    return None;
-                }
-                if !matches!(
-                    param.param_type,
-                    ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
-                ) {
-                    return None;
-                }
-                actor_args
-                    .get(idx)
-                    .and_then(|arg| self.resolve_arg_to_u32(arg))
-            })?;
-
-        // Disambiguation rule: bind span length only to the first unresolved
-        // dimension param (in actor param declaration order).
-        let mut dim_names: HashSet<&str> = HashSet::new();
-        for dim in actor_meta
-            .in_shape
-            .dims
-            .iter()
-            .chain(actor_meta.out_shape.dims.iter())
-        {
-            if let TokenCount::Symbolic(sym) = dim {
-                dim_names.insert(sym.as_str());
-            }
-        }
-        let first_unresolved_dim = actor_meta.params.iter().enumerate().find_map(|(idx, p)| {
-            if p.kind != ParamKind::Param || p.param_type != ParamType::Int {
-                return None;
-            }
-            if !dim_names.contains(p.name.as_str()) {
-                return None;
-            }
-            let explicit = actor_args
-                .get(idx)
-                .and_then(|arg| self.resolve_arg_to_u32(arg));
-            if explicit.is_some() {
-                return None;
-            }
-            Some(p.name.as_str())
-        })?;
-
-        if first_unresolved_dim == dim_name {
-            Some(span_len)
-        } else {
-            None
-        }
+        crate::dim_resolve::infer_dim_param_from_span_args(
+            dim_name,
+            actor_meta,
+            actor_args,
+            self.resolved,
+            self.program,
+        )
     }
 
     // ── Phase 0a2: Record span-derived dimension params ─────────────────
@@ -956,8 +850,115 @@ impl<'a> AnalyzeCtx<'a> {
     fn check_shape_constraints_in_subgraph(&mut self, sub: &Subgraph) {
         for node in &sub.nodes {
             self.check_unresolved_frame_dims(node);
+            self.check_dim_source_conflicts(node);
         }
         self.check_edge_shape_conflicts(sub);
+    }
+
+    /// Check for conflicts between dimension resolution sources:
+    /// - explicit arg vs span-derived
+    /// - shape constraint vs span-derived
+    fn check_dim_source_conflicts(&mut self, node: &Node) {
+        let NodeKind::Actor {
+            name,
+            args,
+            shape_constraint,
+            ..
+        } = &node.kind
+        else {
+            return;
+        };
+        let Some(meta) = self.actor_meta(name).cloned() else {
+            return;
+        };
+
+        let mut seen = HashSet::new();
+        for dim in meta.in_shape.dims.iter().chain(meta.out_shape.dims.iter()) {
+            let sym = match dim {
+                TokenCount::Symbolic(s) => s,
+                _ => continue,
+            };
+            if !seen.insert(sym.clone()) {
+                continue;
+            }
+
+            // Compute span-inferred value directly (not from span_derived_dims map,
+            // since that map skips entries when explicit arg is present).
+            let span_val = crate::dim_resolve::span_arg_length_for_dim(
+                sym,
+                &meta,
+                args,
+                self.resolved,
+                self.program,
+            );
+            let span_val = match span_val {
+                Some(v) => v,
+                None => continue,
+            };
+
+            // Check: explicit arg vs span-derived
+            let from_arg = meta
+                .params
+                .iter()
+                .position(|p| p.name == *sym)
+                .and_then(|idx| args.get(idx))
+                .and_then(|arg| {
+                    crate::dim_resolve::resolve_arg_to_u32(arg, self.resolved, self.program)
+                });
+            if let Some(arg_val) = from_arg {
+                if arg_val != span_val {
+                    self.error_with_hint(
+                        node.span,
+                        format!(
+                            "conflicting dimension '{}' at actor '{}': \
+                             explicit argument specifies {}, but span-derived value is {}",
+                            sym, name, arg_val, span_val
+                        ),
+                        "remove explicit argument to auto-infer from span, \
+                         or align span length with explicit argument"
+                            .to_string(),
+                    );
+                }
+            }
+
+            // Check: shape constraint vs span-derived
+            // Find position of this sym in in_shape or out_shape for SC lookup
+            if let Some(sc) = shape_constraint {
+                let sc_idx = meta
+                    .in_shape
+                    .dims
+                    .iter()
+                    .enumerate()
+                    .find(|(_, d)| matches!(d, TokenCount::Symbolic(s) if s == sym))
+                    .map(|(i, _)| i)
+                    .or_else(|| {
+                        meta.out_shape
+                            .dims
+                            .iter()
+                            .enumerate()
+                            .find(|(_, d)| matches!(d, TokenCount::Symbolic(s) if s == sym))
+                            .map(|(i, _)| i)
+                    });
+                if let Some(idx) = sc_idx {
+                    if let Some(sc_val) = sc.dims.get(idx).and_then(|sd| {
+                        crate::dim_resolve::resolve_shape_dim(sd, self.resolved, self.program)
+                    }) {
+                        if sc_val != span_val {
+                            self.error_with_hint(
+                                sc.span,
+                                format!(
+                                    "conflicting dimension '{}' at actor '{}': \
+                                     shape constraint specifies {}, but span-derived value is {}",
+                                    sym, name, sc_val, span_val
+                                ),
+                                "align the shape constraint with the span argument length"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn check_unresolved_frame_dims(&mut self, node: &Node) {
@@ -1004,34 +1005,33 @@ impl<'a> AnalyzeCtx<'a> {
         }
 
         // Check 4: span-derived vs edge-inferred dimension conflicts (v0.3.1)
+        // Check both input and output shape dims by symbolic name.
         let mut conflicts = Vec::new();
         for node in &sub.nodes {
             if let NodeKind::Actor { name, .. } = &node.kind {
-                if let Some(inferred_sc) = self.inferred_shapes.get(&node.id) {
-                    if let Some(meta) = self.actor_meta(name) {
+                if let Some(inferred_sc) = self.inferred_shapes.get(&node.id).cloned() {
+                    if let Some(meta) = self.actor_meta(name).cloned() {
+                        // Check in_shape dims
                         for (i, dim) in meta.in_shape.dims.iter().enumerate() {
-                            if let TokenCount::Symbolic(sym) = dim {
-                                if let Some(&span_val) =
-                                    self.span_derived_dims.get(&(node.id, sym.clone()))
-                                {
-                                    if let Some(inferred_val) = inferred_sc
-                                        .dims
-                                        .get(i)
-                                        .and_then(|sd| self.resolve_shape_dim(sd))
-                                    {
-                                        if span_val != inferred_val {
-                                            conflicts.push((
-                                                node.span,
-                                                format!(
-                                                    "conflicting dimension '{}' at actor '{}': \
-                                                     span-derived value {} vs edge-inferred value {}",
-                                                    sym, name, span_val, inferred_val
-                                                ),
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
+                            self.check_span_vs_inferred_dim(
+                                node,
+                                name,
+                                dim,
+                                i,
+                                &inferred_sc,
+                                &mut conflicts,
+                            );
+                        }
+                        // Check out_shape dims
+                        for (i, dim) in meta.out_shape.dims.iter().enumerate() {
+                            self.check_span_vs_inferred_dim(
+                                node,
+                                name,
+                                dim,
+                                i,
+                                &inferred_sc,
+                                &mut conflicts,
+                            );
                         }
                     }
                 }
@@ -1039,6 +1039,37 @@ impl<'a> AnalyzeCtx<'a> {
         }
         for (span, msg) in conflicts {
             self.error(span, msg);
+        }
+    }
+
+    fn check_span_vs_inferred_dim(
+        &self,
+        node: &Node,
+        actor_name: &str,
+        dim: &TokenCount,
+        dim_idx: usize,
+        inferred_sc: &ShapeConstraint,
+        conflicts: &mut Vec<(Span, String)>,
+    ) {
+        if let TokenCount::Symbolic(sym) = dim {
+            if let Some(&span_val) = self.span_derived_dims.get(&(node.id, sym.clone())) {
+                if let Some(inferred_val) = inferred_sc
+                    .dims
+                    .get(dim_idx)
+                    .and_then(|sd| self.resolve_shape_dim(sd))
+                {
+                    if span_val != inferred_val {
+                        conflicts.push((
+                            node.span,
+                            format!(
+                                "conflicting dimension '{}' at actor '{}': \
+                                 span-derived value {} vs edge-inferred value {}",
+                                sym, actor_name, span_val, inferred_val
+                            ),
+                        ));
+                    }
+                }
+            }
         }
     }
 
@@ -2873,5 +2904,78 @@ ACTOR(float_src, IN(void, 0), OUT(float, 1), PARAM(float, value)) {
             .expect("mixdim should have precomputed node rates");
         assert_eq!(rates.in_rate, Some(20));
         assert_eq!(rates.out_rate, Some(20));
+    }
+
+    // ── Dimension mismatch diagnostic tests ──────────────────────────────
+
+    #[test]
+    fn dim_conflict_explicit_arg_vs_span() {
+        // fir(coeff, 5) where coeff has 3 elements → explicit N=5 vs span N=3
+        let reg = test_registry();
+        let source = concat!(
+            "const coeff = [0.1, 0.2, 0.1]\n",
+            "clock 1kHz t {\n    constant(0.0) | fir(coeff, 5) | stdout()\n}",
+        );
+        let result = analyze_source(source, &reg);
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(
+            errors
+                .iter()
+                .any(|d| d.message.contains("conflicting dimension")
+                    && d.message.contains("explicit argument specifies 5")
+                    && d.message.contains("span-derived value is 3")),
+            "expected explicit-vs-span conflict error, got: {:#?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn dim_conflict_shape_constraint_vs_span() {
+        // fir(coeff)[5] where coeff has 3 elements → shape constraint N=5 vs span N=3
+        let reg = test_registry();
+        let source = concat!(
+            "const coeff = [0.1, 0.2, 0.1]\n",
+            "clock 1kHz t {\n    constant(0.0) | fir(coeff)[5] | stdout()\n}",
+        );
+        let result = analyze_source(source, &reg);
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(
+            errors
+                .iter()
+                .any(|d| d.message.contains("conflicting dimension")
+                    && d.message.contains("shape constraint specifies 5")
+                    && d.message.contains("span-derived value is 3")),
+            "expected shape-constraint-vs-span conflict error, got: {:#?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn dim_no_conflict_when_sources_agree() {
+        // fir(coeff, 3) where coeff has 3 elements → both agree on N=3
+        let reg = test_registry();
+        let source = concat!(
+            "const coeff = [0.1, 0.2, 0.1]\n",
+            "clock 1kHz t {\n    constant(0.0) | fir(coeff, 3) | stdout()\n}",
+        );
+        let result = analyze_source(source, &reg);
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error && d.message.contains("conflicting dimension"))
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "no conflict expected when sources agree, got: {:#?}",
+            errors
+        );
     }
 }
