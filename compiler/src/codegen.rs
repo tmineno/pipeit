@@ -18,9 +18,7 @@ use crate::analyze::AnalyzedProgram;
 use crate::ast::*;
 use crate::graph::*;
 use crate::lower::LoweredProgram;
-use crate::registry::{
-    ActorMeta, ParamKind, ParamType, PipitType, PortShape, Registry, TokenCount,
-};
+use crate::registry::{ActorMeta, ParamKind, ParamType, PipitType, Registry, TokenCount};
 use crate::resolve::{Diagnostic, ResolvedProgram};
 use crate::schedule::*;
 
@@ -833,8 +831,8 @@ impl<'a> CodegenCtx<'a> {
             None => return,
         };
 
-        let in_count = self.resolve_port_rate_val(&meta.in_shape, meta, args, shape_constraint);
-        let out_count = self.resolve_port_rate_val(&meta.out_shape, meta, args, shape_constraint);
+        let in_count = self.node_in_rate(node.id);
+        let out_count = self.node_out_rate(node.id);
         let in_cpp = pipit_type_to_cpp(meta.in_type.as_concrete().unwrap_or(PipitType::Float));
         let _out_cpp = pipit_type_to_cpp(meta.out_type.as_concrete().unwrap_or(PipitType::Float));
 
@@ -2164,42 +2162,18 @@ impl<'a> CodegenCtx<'a> {
         (bytes / elem_size as u64).max(1) as u32
     }
 
-    /// Resolve a PortShape to a concrete rate (product of resolved dimensions).
-    fn resolve_port_rate_val(
-        &self,
-        shape: &PortShape,
-        actor_meta: &ActorMeta,
-        actor_args: &[Arg],
-        shape_constraint: Option<&ShapeConstraint>,
-    ) -> Option<u32> {
-        let mut product: u32 = 1;
-        for (i, dim) in shape.dims.iter().enumerate() {
-            let val = match dim {
-                TokenCount::Literal(n) => Some(*n),
-                TokenCount::Symbolic(sym) => {
-                    let from_arg = actor_meta
-                        .params
-                        .iter()
-                        .position(|p| p.name == *sym)
-                        .and_then(|idx| actor_args.get(idx))
-                        .and_then(|arg| self.resolve_arg_to_u32(arg));
-                    if from_arg.is_some() {
-                        from_arg
-                    } else {
-                        let from_shape = shape_constraint
-                            .and_then(|sc| sc.dims.get(i))
-                            .and_then(|sd| self.resolve_shape_dim(sd));
-                        if from_shape.is_some() {
-                            from_shape
-                        } else {
-                            self.infer_dim_param_from_span_args(sym, actor_meta, actor_args)
-                        }
-                    }
-                }
-            };
-            product = product.checked_mul(val?)?;
-        }
-        Some(product)
+    fn node_in_rate(&self, node_id: NodeId) -> Option<u32> {
+        self.analysis
+            .node_port_rates
+            .get(&node_id)
+            .and_then(|r| r.in_rate)
+    }
+
+    fn node_out_rate(&self, node_id: NodeId) -> Option<u32> {
+        self.analysis
+            .node_port_rates
+            .get(&node_id)
+            .and_then(|r| r.out_rate)
     }
 
     fn infer_dim_param_from_span_args(
@@ -2213,23 +2187,57 @@ impl<'a> CodegenCtx<'a> {
         if dim_param.kind != ParamKind::Param || dim_param.param_type != ParamType::Int {
             return None;
         }
-        for (idx, param) in actor_meta.params.iter().enumerate() {
-            if param.kind != ParamKind::Param {
-                continue;
-            }
-            if !matches!(
-                param.param_type,
-                ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
-            ) {
-                continue;
-            }
-            if let Some(arg) = actor_args.get(idx) {
-                if let Some(n) = self.resolve_arg_to_u32(arg) {
-                    return Some(n);
+        let span_len = actor_meta
+            .params
+            .iter()
+            .enumerate()
+            .find_map(|(idx, param)| {
+                if param.kind != ParamKind::Param {
+                    return None;
                 }
+                if !matches!(
+                    param.param_type,
+                    ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
+                ) {
+                    return None;
+                }
+                actor_args
+                    .get(idx)
+                    .and_then(|arg| self.resolve_arg_to_u32(arg))
+            })?;
+
+        let mut dim_names: HashSet<&str> = HashSet::new();
+        for dim in actor_meta
+            .in_shape
+            .dims
+            .iter()
+            .chain(actor_meta.out_shape.dims.iter())
+        {
+            if let TokenCount::Symbolic(sym) = dim {
+                dim_names.insert(sym.as_str());
             }
         }
-        None
+        let first_unresolved_dim = actor_meta.params.iter().enumerate().find_map(|(idx, p)| {
+            if p.kind != ParamKind::Param || p.param_type != ParamType::Int {
+                return None;
+            }
+            if !dim_names.contains(p.name.as_str()) {
+                return None;
+            }
+            let explicit = actor_args
+                .get(idx)
+                .and_then(|arg| self.resolve_arg_to_u32(arg));
+            if explicit.is_some() {
+                return None;
+            }
+            Some(p.name.as_str())
+        })?;
+
+        if first_unresolved_dim == dim_name {
+            Some(span_len)
+        } else {
+            None
+        }
     }
 
     fn resolve_shape_dim(&self, dim: &ShapeDim) -> Option<u32> {

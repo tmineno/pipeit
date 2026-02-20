@@ -20,7 +20,7 @@ use chumsky::span::Span as _;
 use crate::analyze::AnalyzedProgram;
 use crate::ast::*;
 use crate::graph::*;
-use crate::registry::{ActorMeta, ParamKind, ParamType, PortShape, Registry, TokenCount};
+use crate::registry::Registry;
 use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -94,10 +94,8 @@ pub fn schedule(
 
 struct ScheduleCtx<'a> {
     program: &'a Program,
-    resolved: &'a ResolvedProgram,
     graph: &'a ProgramGraph,
     analysis: &'a AnalyzedProgram,
-    registry: &'a Registry,
     diagnostics: Vec<Diagnostic>,
     task_schedules: HashMap<String, TaskMeta>,
 }
@@ -105,17 +103,15 @@ struct ScheduleCtx<'a> {
 impl<'a> ScheduleCtx<'a> {
     fn new(
         program: &'a Program,
-        resolved: &'a ResolvedProgram,
+        _resolved: &'a ResolvedProgram,
         graph: &'a ProgramGraph,
         analysis: &'a AnalyzedProgram,
-        registry: &'a Registry,
+        _registry: &'a Registry,
     ) -> Self {
         ScheduleCtx {
             program,
-            resolved,
             graph,
             analysis,
-            registry,
             diagnostics: Vec::new(),
             task_schedules: HashMap::new(),
         }
@@ -403,8 +399,7 @@ impl<'a> ScheduleCtx<'a> {
                 continue;
             }
 
-            let src_node = find_node(sub, edge.source);
-            let p = src_node.and_then(|n| self.production_rate(n)).unwrap_or(1);
+            let p = self.node_out_rate(edge.source).unwrap_or(1);
             let rv_src = rv.get(&edge.source).copied().unwrap_or(1);
             buffers.insert((edge.source, edge.target), p * rv_src);
         }
@@ -426,143 +421,11 @@ impl<'a> ScheduleCtx<'a> {
         1
     }
 
-    // ── Rate helpers (duplicated from analyze.rs) ───────────────────────
-
-    fn actor_meta(&self, name: &str) -> Option<&ActorMeta> {
-        self.registry.lookup(name)
-    }
-
-    fn production_rate(&self, node: &Node) -> Option<u32> {
-        match &node.kind {
-            NodeKind::Actor {
-                name,
-                args,
-                shape_constraint,
-                ..
-            } => {
-                let meta = self.actor_meta(name)?;
-                // Try explicit shape constraint first, then inferred from analysis
-                let result =
-                    self.resolve_port_rate(&meta.out_shape, meta, args, shape_constraint.as_ref());
-                if result.is_some() {
-                    return result;
-                }
-                self.resolve_port_rate(
-                    &meta.out_shape,
-                    meta,
-                    args,
-                    self.analysis.inferred_shapes.get(&node.id),
-                )
-            }
-            _ => Some(1),
-        }
-    }
-
-    /// Resolve a PortShape to a concrete rate (product of resolved dimensions).
-    fn resolve_port_rate(
-        &self,
-        shape: &PortShape,
-        actor_meta: &ActorMeta,
-        actor_args: &[Arg],
-        shape_constraint: Option<&ShapeConstraint>,
-    ) -> Option<u32> {
-        let mut product: u32 = 1;
-        for (i, dim) in shape.dims.iter().enumerate() {
-            let val = match dim {
-                TokenCount::Literal(n) => Some(*n),
-                TokenCount::Symbolic(sym) => {
-                    let from_arg = actor_meta
-                        .params
-                        .iter()
-                        .position(|p| p.name == *sym)
-                        .and_then(|idx| actor_args.get(idx))
-                        .and_then(|arg| self.resolve_arg_to_u32(arg));
-                    if from_arg.is_some() {
-                        from_arg
-                    } else {
-                        let from_shape = shape_constraint
-                            .and_then(|sc| sc.dims.get(i))
-                            .and_then(|sd| self.resolve_shape_dim(sd));
-                        if from_shape.is_some() {
-                            from_shape
-                        } else {
-                            self.infer_dim_param_from_span_args(sym, actor_meta, actor_args)
-                        }
-                    }
-                }
-            };
-            product = product.checked_mul(val?)?;
-        }
-        Some(product)
-    }
-
-    fn infer_dim_param_from_span_args(
-        &self,
-        dim_name: &str,
-        actor_meta: &ActorMeta,
-        actor_args: &[Arg],
-    ) -> Option<u32> {
-        // Only applies to compile-time integer dimension params.
-        let dim_param = actor_meta.params.iter().find(|p| p.name == dim_name)?;
-        if dim_param.kind != ParamKind::Param || dim_param.param_type != ParamType::Int {
-            return None;
-        }
-        for (idx, param) in actor_meta.params.iter().enumerate() {
-            if param.kind != ParamKind::Param {
-                continue;
-            }
-            if !matches!(
-                param.param_type,
-                ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
-            ) {
-                continue;
-            }
-            if let Some(arg) = actor_args.get(idx) {
-                if let Some(n) = self.resolve_arg_to_u32(arg) {
-                    return Some(n);
-                }
-            }
-        }
-        None
-    }
-
-    fn resolve_shape_dim(&self, dim: &ShapeDim) -> Option<u32> {
-        match dim {
-            ShapeDim::Literal(n, _) => Some(*n),
-            ShapeDim::ConstRef(ident) => {
-                let entry = self.resolved.consts.get(&ident.name)?;
-                let stmt = &self.program.statements[entry.stmt_index];
-                if let StatementKind::Const(c) = &stmt.kind {
-                    match &c.value {
-                        Value::Scalar(Scalar::Number(n, _, _)) => Some(*n as u32),
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-    fn resolve_arg_to_u32(&self, arg: &Arg) -> Option<u32> {
-        match arg {
-            Arg::Value(Value::Scalar(Scalar::Number(n, _, _))) => Some(*n as u32),
-            Arg::Value(Value::Array(elems, _)) => Some(elems.len() as u32),
-            Arg::ConstRef(ident) => {
-                let entry = self.resolved.consts.get(&ident.name)?;
-                let stmt = &self.program.statements[entry.stmt_index];
-                if let StatementKind::Const(c) = &stmt.kind {
-                    match &c.value {
-                        Value::Scalar(Scalar::Number(n, _, _)) => Some(*n as u32),
-                        Value::Array(elems, _) => Some(elems.len() as u32),
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
+    fn node_out_rate(&self, node_id: NodeId) -> Option<u32> {
+        self.analysis
+            .node_port_rates
+            .get(&node_id)
+            .and_then(|r| r.out_rate)
     }
 }
 

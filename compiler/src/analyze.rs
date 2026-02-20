@@ -53,6 +53,16 @@ pub struct AnalyzedProgram {
     /// argument length (e.g., `fir(coeff)` with `coeff=[...5 elems...]` → N=5).
     /// Authoritative: takes precedence over SDF edge-derived fallbacks in codegen.
     pub span_derived_dims: HashMap<(NodeId, String), u32>,
+    /// Concrete input/output port rates per node, resolved once in analysis.
+    /// `None` means the corresponding side could not be resolved statically.
+    pub node_port_rates: HashMap<NodeId, NodePortRates>,
+}
+
+/// Concrete input/output token rates for a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodePortRates {
+    pub in_rate: Option<u32>,
+    pub out_rate: Option<u32>,
 }
 
 // ── Public entry point ──────────────────────────────────────────────────────
@@ -144,6 +154,7 @@ impl<'a> AnalyzeCtx<'a> {
     }
 
     fn build_result(self) -> AnalysisResult {
+        let node_port_rates = self.compute_node_port_rates();
         AnalysisResult {
             analysis: AnalyzedProgram {
                 repetition_vectors: self.repetition_vectors,
@@ -151,9 +162,28 @@ impl<'a> AnalyzeCtx<'a> {
                 total_memory: self.total_memory,
                 inferred_shapes: self.inferred_shapes,
                 span_derived_dims: self.span_derived_dims,
+                node_port_rates,
             },
             diagnostics: self.diagnostics,
         }
+    }
+
+    fn compute_node_port_rates(&self) -> HashMap<NodeId, NodePortRates> {
+        let mut rates = HashMap::new();
+        for task_graph in self.graph.tasks.values() {
+            for sub in subgraphs_of(task_graph) {
+                for node in &sub.nodes {
+                    rates.insert(
+                        node.id,
+                        NodePortRates {
+                            in_rate: self.consumption_rate(node),
+                            out_rate: self.production_rate(node),
+                        },
+                    );
+                }
+            }
+        }
+        rates
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────
@@ -434,39 +464,118 @@ impl<'a> AnalyzeCtx<'a> {
                 };
 
                 // Try: propagate from src's output shape → tgt's input shape
-                // Skip if target has span-derived dims (authoritative, §13.5.2)
-                if !self.has_span_derived_dims(tgt.id) {
-                    if let Some(sc) = self.try_propagate_shape(src, tgt, sub) {
-                        if let std::collections::hash_map::Entry::Vacant(e) =
-                            self.inferred_shapes.entry(tgt.id)
-                        {
-                            e.insert(sc);
-                            changed = true;
-                        }
+                if let Some(sc) = self.try_propagate_shape(src, tgt, sub) {
+                    if self.upsert_inferred_shape(tgt.id, sc) {
+                        changed = true;
                     }
                 }
 
                 // Try: propagate from tgt's input shape → src's output shape
-                // Skip if source has span-derived dims (authoritative, §13.5.2)
-                if !self.has_span_derived_dims(src.id) {
-                    if let Some(sc) = self.try_propagate_shape_reverse(tgt, src, sub) {
-                        if let std::collections::hash_map::Entry::Vacant(e) =
-                            self.inferred_shapes.entry(src.id)
-                        {
-                            e.insert(sc);
-                            changed = true;
-                        }
+                if let Some(sc) = self.try_propagate_shape_reverse(tgt, src, sub) {
+                    if self.upsert_inferred_shape(src.id, sc) {
+                        changed = true;
                     }
                 }
             }
         }
     }
 
-    /// Check if a node has any span-derived dimension parameters.
-    fn has_span_derived_dims(&self, node_id: NodeId) -> bool {
-        self.span_derived_dims
-            .keys()
-            .any(|(nid, _)| *nid == node_id)
+    /// Insert/update inferred shape and report whether anything changed.
+    fn upsert_inferred_shape(&mut self, node_id: NodeId, sc: ShapeConstraint) -> bool {
+        match self.inferred_shapes.get(&node_id) {
+            Some(prev) if prev == &sc => false,
+            _ => {
+                self.inferred_shapes.insert(node_id, sc);
+                true
+            }
+        }
+    }
+
+    /// Resolve a symbolic dimension from explicit actor args.
+    fn resolve_symbolic_dim_from_args(
+        &self,
+        sym: &str,
+        meta: &ActorMeta,
+        args: &[Arg],
+    ) -> Option<u32> {
+        meta.params
+            .iter()
+            .position(|p| p.name == sym)
+            .and_then(|idx| args.get(idx))
+            .and_then(|arg| self.resolve_arg_to_u32(arg))
+    }
+
+    /// Resolve a single port dimension using precedence:
+    /// explicit arg / explicit shape / span-derived / existing inferred.
+    fn resolve_port_dim_preferred(
+        &self,
+        node_id: NodeId,
+        dim_idx: usize,
+        dim: &TokenCount,
+        meta: &ActorMeta,
+        args: &[Arg],
+        explicit_sc: Option<&ShapeConstraint>,
+        existing_inferred_sc: Option<&ShapeConstraint>,
+    ) -> Option<u32> {
+        match dim {
+            TokenCount::Literal(n) => Some(*n),
+            TokenCount::Symbolic(sym) => self
+                .resolve_symbolic_dim_from_args(sym, meta, args)
+                .or_else(|| {
+                    explicit_sc
+                        .and_then(|sc| sc.dims.get(dim_idx))
+                        .and_then(|sd| self.resolve_shape_dim(sd))
+                })
+                .or_else(|| self.span_derived_dims.get(&(node_id, sym.clone())).copied())
+                .or_else(|| {
+                    existing_inferred_sc
+                        .and_then(|sc| sc.dims.get(dim_idx))
+                        .and_then(|sd| self.resolve_shape_dim(sd))
+                }),
+        }
+    }
+
+    /// Merge edge-propagated dimensions into a target/source actor shape.
+    /// Per-dimension behavior:
+    /// - keep dimensions already fixed by higher-priority sources
+    /// - fill only unresolved dimensions from propagated dims
+    /// Returns merged shape and whether any unresolved dimension was newly filled.
+    fn merge_propagated_shape(
+        &self,
+        node_id: NodeId,
+        port_shape: &PortShape,
+        meta: &ActorMeta,
+        args: &[Arg],
+        explicit_sc: Option<&ShapeConstraint>,
+        existing_inferred_sc: Option<&ShapeConstraint>,
+        propagated_dims: &[u32],
+        span: Span,
+    ) -> Option<(ShapeConstraint, bool)> {
+        if propagated_dims.len() != port_shape.rank() {
+            return None;
+        }
+
+        let mut changed = false;
+        let mut dims = Vec::with_capacity(port_shape.rank());
+        for (i, dim) in port_shape.dims.iter().enumerate() {
+            let val = if let Some(preferred) = self.resolve_port_dim_preferred(
+                node_id,
+                i,
+                dim,
+                meta,
+                args,
+                explicit_sc,
+                existing_inferred_sc,
+            ) {
+                preferred
+            } else {
+                changed = true;
+                propagated_dims[i]
+            };
+            dims.push(ShapeDim::Literal(val, span));
+        }
+
+        Some((ShapeConstraint { dims, span }, changed))
     }
 
     /// Try to propagate shape from src's output to tgt's input.
@@ -488,36 +597,31 @@ impl<'a> AnalyzeCtx<'a> {
             _ => return None,
         };
 
-        // Skip if tgt already has explicit shape constraint or inferred shape
-        if tgt_sc.is_some() || self.inferred_shapes.contains_key(&tgt.id) {
+        // Explicit shape constraints are authoritative at call-site.
+        if tgt_sc.is_some() {
             return None;
         }
 
         let tgt_meta = self.actor_meta(tgt_name)?;
 
-        // Check if tgt has unresolved symbolic dims in its input shape
-        if !self.has_unresolved_dims(&tgt_meta.in_shape, tgt_meta, tgt_args) {
-            return None;
-        }
-
         // Get src's resolved output shape (as a list of concrete dim values)
         let src_dims = self.resolve_output_shape_dims(src, sub)?;
-        let tgt_in_rank = tgt_meta.in_shape.rank();
-
-        // Only propagate if ranks match
-        if src_dims.len() != tgt_in_rank {
-            return None;
+        let existing = self.inferred_shapes.get(&tgt.id);
+        let (sc, changed) = self.merge_propagated_shape(
+            tgt.id,
+            &tgt_meta.in_shape,
+            tgt_meta,
+            tgt_args,
+            tgt_sc,
+            existing,
+            &src_dims,
+            tgt.span,
+        )?;
+        if changed {
+            Some(sc)
+        } else {
+            None
         }
-
-        // Build a ShapeConstraint from src's resolved output dims
-        let span = tgt.span;
-        Some(ShapeConstraint {
-            dims: src_dims
-                .into_iter()
-                .map(|v| ShapeDim::Literal(v, span))
-                .collect(),
-            span,
-        })
     }
 
     /// Try to propagate shape from tgt's input back to src's output.
@@ -539,15 +643,12 @@ impl<'a> AnalyzeCtx<'a> {
             _ => return None,
         };
 
-        if src_sc.is_some() || self.inferred_shapes.contains_key(&src.id) {
+        // Explicit shape constraints are authoritative at call-site.
+        if src_sc.is_some() {
             return None;
         }
 
         let src_meta = self.actor_meta(src_name)?;
-
-        if !self.has_unresolved_dims(&src_meta.out_shape, src_meta, src_args) {
-            return None;
-        }
 
         // Only propagate backward when tgt's input shape has symbolic dimensions.
         // If all dims are Literal, the shape is fixed by the actor definition
@@ -576,33 +677,22 @@ impl<'a> AnalyzeCtx<'a> {
             return None;
         }
 
-        let span = src.span;
-        Some(ShapeConstraint {
-            dims: tgt_dims
-                .into_iter()
-                .map(|v| ShapeDim::Literal(v, span))
-                .collect(),
-            span,
-        })
-    }
-
-    /// Check if a PortShape has any unresolved symbolic dimensions.
-    fn has_unresolved_dims(&self, shape: &PortShape, meta: &ActorMeta, args: &[Arg]) -> bool {
-        for dim in &shape.dims {
-            if let TokenCount::Symbolic(sym) = dim {
-                // Check if resolved from args
-                let from_arg = meta
-                    .params
-                    .iter()
-                    .position(|p| p.name == *sym)
-                    .and_then(|idx| args.get(idx))
-                    .and_then(|arg| self.resolve_arg_to_u32(arg));
-                if from_arg.is_none() {
-                    return true;
-                }
-            }
+        let existing = self.inferred_shapes.get(&src.id);
+        let (sc, changed) = self.merge_propagated_shape(
+            src.id,
+            &src_meta.out_shape,
+            src_meta,
+            src_args,
+            src_sc,
+            existing,
+            &tgt_dims,
+            src.span,
+        )?;
+        if changed {
+            Some(sc)
+        } else {
+            None
         }
-        false
     }
 
     /// Resolve a node's output shape to concrete dim values.
@@ -745,23 +835,60 @@ impl<'a> AnalyzeCtx<'a> {
         if dim_param.kind != ParamKind::Param || dim_param.param_type != ParamType::Int {
             return None;
         }
-        for (idx, param) in actor_meta.params.iter().enumerate() {
-            if param.kind != ParamKind::Param {
-                continue;
-            }
-            if !matches!(
-                param.param_type,
-                ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
-            ) {
-                continue;
-            }
-            if let Some(arg) = actor_args.get(idx) {
-                if let Some(n) = self.resolve_arg_to_u32(arg) {
-                    return Some(n);
+        // Find a span length source (first span arg with known compile-time length).
+        let span_len = actor_meta
+            .params
+            .iter()
+            .enumerate()
+            .find_map(|(idx, param)| {
+                if param.kind != ParamKind::Param {
+                    return None;
                 }
+                if !matches!(
+                    param.param_type,
+                    ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
+                ) {
+                    return None;
+                }
+                actor_args
+                    .get(idx)
+                    .and_then(|arg| self.resolve_arg_to_u32(arg))
+            })?;
+
+        // Disambiguation rule: bind span length only to the first unresolved
+        // dimension param (in actor param declaration order).
+        let mut dim_names: HashSet<&str> = HashSet::new();
+        for dim in actor_meta
+            .in_shape
+            .dims
+            .iter()
+            .chain(actor_meta.out_shape.dims.iter())
+        {
+            if let TokenCount::Symbolic(sym) = dim {
+                dim_names.insert(sym.as_str());
             }
         }
-        None
+        let first_unresolved_dim = actor_meta.params.iter().enumerate().find_map(|(idx, p)| {
+            if p.kind != ParamKind::Param || p.param_type != ParamType::Int {
+                return None;
+            }
+            if !dim_names.contains(p.name.as_str()) {
+                return None;
+            }
+            let explicit = actor_args
+                .get(idx)
+                .and_then(|arg| self.resolve_arg_to_u32(arg));
+            if explicit.is_some() {
+                return None;
+            }
+            Some(p.name.as_str())
+        })?;
+
+        if first_unresolved_dim == dim_name {
+            Some(span_len)
+        } else {
+            None
+        }
     }
 
     // ── Phase 0a2: Record span-derived dimension params ─────────────────
@@ -1673,6 +1800,22 @@ mod tests {
             .expect("failed to load std_sink.h");
         reg.load_header(&std_source)
             .expect("failed to load std_source.h");
+        reg
+    }
+
+    fn test_registry_with_extra_header(header_src: &str) -> Registry {
+        let mut reg = test_registry();
+        let tmp = std::env::temp_dir().join(format!(
+            "pipit_extra_actor_{}_{}.h",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock before UNIX_EPOCH")
+                .as_nanos()
+        ));
+        std::fs::write(&tmp, header_src).expect("write temp actor header");
+        reg.load_header(&tmp).expect("load temp actor header");
+        let _ = std::fs::remove_file(&tmp);
         reg
     }
 
@@ -2611,5 +2754,76 @@ mod tests {
             !result.analysis.inferred_shapes.contains_key(&fir_id),
             "fir should not have edge-inferred shape when span-derived dims exist"
         );
+    }
+
+    #[test]
+    fn mixed_dims_span_and_edge_inference_merge_per_dimension() {
+        // Generalized case: one symbolic dim (H) resolved from span arg length,
+        // the other dim (W) inferred from connected edge shape.
+        let reg = test_registry_with_extra_header(concat!(
+            "ACTOR(src2d, IN(void, 0), OUT(float, SHAPE(5, 4))) {\n",
+            "    (void)in;\n",
+            "    for (int i = 0; i < 20; ++i) out[i] = 0.0f;\n",
+            "    return ACTOR_OK;\n",
+            "}\n",
+            "ACTOR(mixdim,\n",
+            "      IN(float, SHAPE(H, W)), OUT(float, SHAPE(H, W)),\n",
+            "      PARAM(std::span<const float>, coeff) PARAM(int, H) PARAM(int, W)) {\n",
+            "    (void)coeff;\n",
+            "    for (int i = 0; i < H * W; ++i) out[i] = in[i];\n",
+            "    return ACTOR_OK;\n",
+            "}\n",
+            "ACTOR(sink2d, IN(float, SHAPE(H, W)), OUT(void, 0), PARAM(int, H) PARAM(int, W)) {\n",
+            "    (void)in;\n",
+            "    (void)out;\n",
+            "    (void)H;\n",
+            "    (void)W;\n",
+            "    return ACTOR_OK;\n",
+            "}\n",
+        ));
+        let source = concat!(
+            "const coeff = [1, 2, 3, 4, 5]\n",
+            "clock 1kHz t {\n",
+            "    src2d() | mixdim(coeff) | sink2d()\n",
+            "}",
+        );
+        let (result, graph) = analyze_with_graph(source, &reg);
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(errors.is_empty(), "unexpected errors: {:#?}", errors);
+
+        let mix_id = find_actor_id(&graph, "t", "mixdim");
+        assert_eq!(
+            result
+                .analysis
+                .span_derived_dims
+                .get(&(mix_id, "H".to_string())),
+            Some(&5),
+            "H should be span-derived from coeff length"
+        );
+        let inferred = result
+            .analysis
+            .inferred_shapes
+            .get(&mix_id)
+            .expect("mixdim should have inferred shape");
+        assert_eq!(inferred.dims.len(), 2);
+        assert!(
+            matches!(inferred.dims[0], ShapeDim::Literal(5, _)),
+            "H should remain 5 from span-derived source"
+        );
+        assert!(
+            matches!(inferred.dims[1], ShapeDim::Literal(4, _)),
+            "W should be inferred from upstream edge"
+        );
+        let rates = result
+            .analysis
+            .node_port_rates
+            .get(&mix_id)
+            .expect("mixdim should have precomputed node rates");
+        assert_eq!(rates.in_rate, Some(20));
+        assert_eq!(rates.out_rate, Some(20));
     }
 }
