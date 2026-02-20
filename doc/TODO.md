@@ -68,81 +68,16 @@
 
 ## v0.3.0 - Type System Ergonomics (Polymorphism) ✅
 
-**Goal**: Remove duplicated actor implementations caused by wire-type variation and reduce explicit type plumbing in PDL.
+- [x] Actor polymorphism: `actor<T>(...)` syntax, inferred T from pipe context, ambiguity diagnostics (lang-spec §3.5, ADR-016)
+- [x] Principal type inference for const/param (lang-spec §3.3)
+- [x] Implicit safe widening: `int8→...→double`, `cfloat→cdouble` (lang-spec §3.4)
+- [x] `type_infer.rs`: constraint-based inference, monomorphization, widening chain detection
+- [x] `lower.rs`: widening node insertion, L1–L5 proof obligations with `Cert` evidence
+- [x] Manifest pipeline: `actors.meta.json` schema v1, header-hash cache, CLI flags
+- [x] Codegen: `Actor_name<float>` template instantiation, backward-compatible
+- [x] 458 tests (344 unit + 108 integration + 6 runtime)
 
-### Phase 1: Spec & Design ✅
-
-- [x] **Actor polymorphism model** (lang-spec §3.5, §4.1, §10 BNF):
-  - [x] Define generic actor call syntax (`actor<float>(...)`)
-  - [x] Define inferred call form (`actor(...)` with type inferred from context)
-  - [x] Define ambiguity rules (when explicit type args are required)
-  - [x] Define compatibility with shape constraints (`actor<T>(...)[N]`)
-  - [x] **Create ADR-016**: Monomorphization strategy and diagnostics policy
-
-- [x] **Principal type inference for const/param** (lang-spec §3.3):
-  - [x] Infer principal numeric type from initializer and usage constraints
-  - [x] Keep explicit override syntax for future compatibility
-  - [x] Specify mixed numeric literal resolution in arrays and call arguments
-
-- [x] **Implicit conversions (safe widening only)** (lang-spec §3.4):
-  - [x] Allow `int8 -> int16 -> int32 -> float -> double` and `cfloat -> cdouble`
-  - [x] Keep lossy / semantic conversions explicit (`double -> float`, `cfloat -> float`, etc.)
-  - [x] Add warnings for suspicious narrowing in explicit conversions (lang-spec §3.4)
-
-### Phase 2: Compiler Implementation ✅
-
-- [x] **1) Runtime / ACTOR Macro Foundation**
-  - [x] Support `template <typename T> ACTOR(name, IN(T, N), ...)` expansion as class template
-  - [x] Ensure generated class template instantiates correctly via `Actor_name<float>` etc.
-  - [x] Example polymorphic actors in `examples/poly_actors.h` (poly_scale, poly_pass, poly_block_pass, poly_accum)
-
-- [x] **2) Actor Metadata Manifest Pipeline (pcc)**
-  - [x] `TypeExpr` enum (`Concrete(PipitType)` / `TypeParam(String)`) for polymorphic port types
-  - [x] `type_params: Vec<String>` on `ActorMeta` (empty for concrete actors)
-  - [x] `actors.meta.json` schema v1 manifest loading (`load_manifest()`)
-  - [x] Manifest generation from header scan (`generate_manifest()`)
-  - [x] CLI flags: `--actor-meta`, `--meta-cache-dir`, `--no-meta-cache`
-  - [x] Header-hash manifest cache with invalidation
-
-- [x] **3) Frontend Updates**
-  - [x] `type_args: Vec<Ident>` on `ActorCall` AST node
-  - [x] `<`/`>` tokens in lexer for actor call context
-  - [x] Parser: `IDENT ('<' pipit_type (',' pipit_type)* '>')? '(' args? ')' shape_constraint?`
-  - [x] Resolver: polymorphic actor lookup by base name, type arg arity validation
-
-- [x] **4) Type Engine (new `type_infer.rs` module)**
-  - [x] Constraint-based type inference from actor signatures and pipe connections
-  - [x] Explicit type argument resolution (`fir<float>(coeff)`)
-  - [x] Inferred type argument resolution from pipe context
-  - [x] Widening chain detection (`int8→...→double`, `cfloat→cdouble`)
-  - [x] Monomorphization: produce concrete `ActorMeta` for each polymorphic call
-  - [x] Ambiguity diagnostics with fix suggestions
-
-- [x] **5) Typed Lowering & Verification (new `lower.rs` module)**
-  - [x] Widening node insertion (synthetic `_widen_{from}_to_{to}` actors)
-  - [x] Concrete actor map construction (monomorphized + original concrete)
-  - [x] L1-L5 proof obligation verification with `Cert` evidence
-  - [x] L1: type consistency, L2: widening safety, L3: rate/shape preservation, L4: monomorphization soundness, L5: no fallback typing
-
-- [x] **6) Pipeline Integration & Codegen**
-  - [x] New pipeline: `parse → resolve → type_infer → lower_verify → graph → analyze → schedule → codegen`
-  - [x] `codegen_with_lowered()` consumes `LoweredProgram` for template instantiation
-  - [x] `Actor_name<float>` template syntax in generated C++
-  - [x] `lookup_actor()` prefers lowered concrete metadata over raw registry
-  - [x] Full backward compatibility: non-polymorphic programs unchanged
-
-- [x] **7) Tests**
-  - [x] 458 tests passing (344 unit + 108 integration + 6 runtime)
-  - [x] Manifest loading/generation tests
-  - [x] Template actor header scanning tests
-  - [x] Parser tests for `actor<type>(...)` syntax
-  - [x] Resolver tests for polymorphic actor lookup
-  - [x] Type inference unit tests (explicit + inferred + widening)
-  - [x] L1-L5 verification unit tests (pass + fail cases)
-  - [x] Codegen template instantiation syntax tests
-  - [x] Integration tests: polymorphic PDL → C++ → compile
-
-### Deferred to follow-up
+### Deferred
 
 - [ ] Narrowing conversion warnings (SHOULD-level, lang-spec §3.4)
 - [ ] Comprehensive golden test suite (full type matrix coverage)
@@ -152,75 +87,22 @@
 
 ## v0.3.1 - Codegen Correctness & Throughput Hardening
 
-**Goal**: Fix implementation-side regressions in shape/dimension resolution and shared-buffer codegen, then lock behavior with targeted tests.
-
-- [x] **Fix dimension inference precedence for symbolic actor params (e.g., `fir(coeff)`)**
-  - [x] Treat span-derived dimension inference as a first-class resolved source when deciding whether shape is unresolved
-  - [x] Prevent reverse shape propagation from overriding already-resolved symbolic dimensions
-  - [x] Add explicit mismatch diagnostics when inferred dimension value conflicts with explicit arg/shape constraint
-  - [x] Verify generated actor params preserve stdlib semantics (`fir(coeff)` uses `N = len(coeff)` unless explicitly constrained)
-
-- [x] **Fix shared-buffer I/O granularity in codegen**
-  - [x] Stop modeling inter-task `BufferRead`/`BufferWrite` as effectively one-token firings in emitted loops
-  - [x] Emit block ring-buffer operations whenever schedule information allows (`read(..., count>1)`, `write(..., count>1)`)
-  - [x] Keep fail-fast + retry semantics intact while reducing retry-loop frequency
-
-- [x] **Reduce actor construction overhead in hot loops**
-  - [x] Hoist actor object construction out of per-firing inner loops when semantics permit
-  - [x] Keep runtime-parameter update behavior correct at iteration boundaries
-  - [x] Add a clear policy for actors that cannot be safely hoisted
-
-- [x] **Add regression tests for these issues**
-  - [x] `analyze` tests: symbolic dimension resolution prefers explicit args/span-derived values over propagated shape when both exist
-  - [x] `schedule`/`codegen` tests: generated FIR call sites do not emit out-of-bounds pointer strides for `fir(coeff)` pipelines
-  - [x] `codegen` tests: shared-buffer I/O emits block-size ring-buffer ops for multi-token edges
-  - [x] `codegen` tests: actor construction count in generated C++ is hoisted (no per-firing temporary construction where hoistable)
-  - [x] Integration test: `examples/example.pdl` compile/codegen smoke assertion for safe FIR indexing and stable shared-buffer transfer shape
-
-- [x] **Unify node port-rate resolution in `analyze` and remove duplicate rate inference in downstream phases**
-  - [x] Add precomputed `node_port_rates` to analysis result
-  - [x] Consume analysis-owned rates in `schedule` edge-buffer sizing
-  - [x] Consume analysis-owned rates in `codegen` actor firing stride resolution
-
-- [x] **Runtime performance verification (2026-02-20)**
-  - [x] Compare `b06071d` vs `5842279` on `BM_E2E_PipelineOnly` (5 reps, median) with no clear regression (within measurement noise)
-  - [x] Compare generated-PDL runtime stats (`--filter pdl`) with no systematic throughput degradation
-  - [ ] ~~Re-run socket-loopback benchmark after local port-bind issue (`localhost:19876`) is resolved~~ (deferred — port-bind infra issue)
-
-- [x] **Follow-up simplification**
-  - [x] Collapse remaining dimension-parameter fallback duplication (`analyze`/`codegen`) into a single analysis-owned artifact (`dim_resolve.rs`)
-
----
+- [x] Fix dimension inference precedence for symbolic actor params (`fir(coeff)`)
+- [x] Add dimension mismatch diagnostics (explicit arg / shape constraint / span-derived conflicts)
+- [x] Fix shared-buffer I/O granularity — emit block ring-buffer ops
+- [x] Hoist actor construction out of per-firing inner loops
+- [x] Unify node port-rate resolution into analysis-owned `node_port_rates`
+- [x] Extract shared dim-resolution helpers into `dim_resolve.rs`
+- [x] Regression tests for all above (analyze, schedule, codegen, integration)
+- [x] Runtime perf verification (no regression vs `5842279`)
+- [ ] ~~Socket-loopback benchmark~~ (deferred — port-bind infra issue)
 
 ## v0.3.2 - Polymorphic Standard Actors & Library Split
 
-**Goal**: Apply v0.3.0 polymorphism to standard actor library; begin modular header organization.
-
-- [x] **Make 11 standard actors polymorphic** (`template<typename T>`):
-  - [x] Source actors: `constant`, `sine`, `square`, `sawtooth`, `triangle`, `noise`, `impulse`
-  - [x] I/O actors: `stdout`, `stderr`, `stdin`, `stdout_fmt`
-  - [x] Update doc comments with "Polymorphic: works with any numeric wire type."
-
-- [x] **Split arithmetic actors into `std_math.h`**:
-  - [x] Extract 7 actors (`mul`, `add`, `sub`, `div`, `abs`, `sqrt`, `threshold`) from `std_actors.h`
-  - [x] Add `#include <std_math.h>` to `std_actors.h` for C++ backward compatibility
-  - [x] Update all compiler test registries and bench to load `std_math.h`
-
-- [x] **Unify test include paths**:
-  - [x] Integration tests use `-I runtime/libpipit/include/` (directory) instead of individual headers
-  - [x] Runtime C++ tests updated with explicit `<float>` template params
-
-- [x] **Fix test regressions from polymorphic changes**:
-  - [x] 4 unit tests: update type-check tests for polymorphic actors (analysis skips polymorphic edges)
-  - [x] 8 integration tests: add explicit `<float>` annotations for source actors where T cannot be inferred
-  - [x] 16 runtime C++ tests: add `<float>` template params to actor instantiations
-
-- [x] **Verify compiler error assertion coverage**:
-  - [x] Analysis phase: concrete-to-concrete type mismatch (e.g., `fft | fft`) still caught
-  - [x] Type inference phase: ambiguous polymorphic calls (e.g., `sine() | stdout()`) correctly diagnosed
-  - [x] Polymorphic stdout accepts cfloat from fft (valid — no false error)
-
-- [x] 358 unit + 112 integration + 6 runtime tests passing
+- [x] Make 11 standard actors polymorphic (`constant`, `sine`, `square`, `sawtooth`, `triangle`, `noise`, `impulse`, `stdout`, `stderr`, `stdin`, `stdout_fmt`)
+- [x] Split 7 arithmetic actors into `std_math.h` (backward-compatible via `#include`)
+- [x] Fix test regressions: 4 unit + 8 integration + 16 runtime C++ tests updated
+- [x] Verify error coverage: concrete type mismatch, ambiguous polymorphic, cfloat-through-fft
 
 ---
 
