@@ -3,8 +3,11 @@
 /// @brief PPKT packet receiver with per-channel sample buffers for pipscope
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -59,52 +62,80 @@ struct SampleBuffer {
 
 // ── DType → float conversion ─────────────────────────────────────────────────
 
+inline size_t dtype_sample_bytes(uint8_t dtype) {
+    switch (static_cast<pipit::net::DType>(dtype)) {
+    case pipit::net::DTYPE_F32:
+    case pipit::net::DTYPE_I32:
+        return 4;
+    case pipit::net::DTYPE_CF32:
+    case pipit::net::DTYPE_F64:
+        return 8;
+    case pipit::net::DTYPE_I16:
+        return 2;
+    case pipit::net::DTYPE_I8:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+template <typename T>
+inline size_t convert_scalar_to_float(const uint8_t *payload, size_t sample_count, float *out) {
+    for (size_t i = 0; i < sample_count; i++) {
+        T value{};
+        std::memcpy(&value, payload + i * sizeof(T), sizeof(T));
+        out[i] = static_cast<float>(value);
+    }
+    return sample_count;
+}
+
+inline size_t convert_f32_to_float(const uint8_t *payload, size_t sample_count, float *out) {
+    std::memcpy(out, payload, sample_count * sizeof(float));
+    return sample_count;
+}
+
+inline size_t convert_cf32_to_magnitude(const uint8_t *payload, size_t sample_count, float *out) {
+    for (size_t i = 0; i < sample_count; i++) {
+        float re = 0.0f;
+        float im = 0.0f;
+        std::memcpy(&re, payload + i * 8, 4);
+        std::memcpy(&im, payload + i * 8 + 4, 4);
+        out[i] = std::sqrt(re * re + im * im);
+    }
+    return sample_count;
+}
+
 /// Convert PPKT payload of any dtype to float samples.
 /// Returns number of float samples written to out.
 inline size_t convert_to_float(const uint8_t *payload, uint32_t sample_count, uint8_t dtype,
                                float *out) {
     switch (static_cast<pipit::net::DType>(dtype)) {
     case pipit::net::DTYPE_F32:
-        std::memcpy(out, payload, sample_count * sizeof(float));
-        return sample_count;
+        return convert_f32_to_float(payload, sample_count, out);
     case pipit::net::DTYPE_I32:
-        for (uint32_t i = 0; i < sample_count; i++) {
-            int32_t v;
-            std::memcpy(&v, payload + i * 4, 4);
-            out[i] = static_cast<float>(v);
-        }
-        return sample_count;
+        return convert_scalar_to_float<int32_t>(payload, sample_count, out);
     case pipit::net::DTYPE_CF32:
-        // Extract magnitude from complex pairs
-        for (uint32_t i = 0; i < sample_count; i++) {
-            float re, im;
-            std::memcpy(&re, payload + i * 8, 4);
-            std::memcpy(&im, payload + i * 8 + 4, 4);
-            out[i] = std::sqrt(re * re + im * im);
-        }
-        return sample_count;
+        return convert_cf32_to_magnitude(payload, sample_count, out);
     case pipit::net::DTYPE_F64:
-        for (uint32_t i = 0; i < sample_count; i++) {
-            double v;
-            std::memcpy(&v, payload + i * 8, 8);
-            out[i] = static_cast<float>(v);
-        }
-        return sample_count;
+        return convert_scalar_to_float<double>(payload, sample_count, out);
     case pipit::net::DTYPE_I16:
-        for (uint32_t i = 0; i < sample_count; i++) {
-            int16_t v;
-            std::memcpy(&v, payload + i * 2, 2);
-            out[i] = static_cast<float>(v);
-        }
-        return sample_count;
+        return convert_scalar_to_float<int16_t>(payload, sample_count, out);
     case pipit::net::DTYPE_I8:
-        for (uint32_t i = 0; i < sample_count; i++) {
-            out[i] = static_cast<float>(static_cast<int8_t>(payload[i]));
-        }
-        return sample_count;
+        return convert_scalar_to_float<int8_t>(payload, sample_count, out);
     default:
         return 0;
     }
+}
+
+/// Bounded conversion that never reads beyond `payload_bytes`.
+inline size_t convert_to_float(const uint8_t *payload, size_t payload_bytes, uint32_t sample_count,
+                               uint8_t dtype, float *out) {
+    size_t sample_bytes = dtype_sample_bytes(dtype);
+    if (sample_bytes == 0) {
+        return 0;
+    }
+    size_t bounded_samples = std::min<size_t>(sample_count, payload_bytes / sample_bytes);
+    return convert_to_float(payload, static_cast<uint32_t>(bounded_samples), dtype, out);
 }
 
 // ── ChannelState ─────────────────────────────────────────────────────────────
@@ -213,62 +244,103 @@ class PpktReceiver {
     PpktReceiver &operator=(const PpktReceiver &) = delete;
 
   private:
+    static constexpr size_t kMaxPacketBytes = 65536;
+    static constexpr size_t kMaxConvertedSamples = 8192;
+    static constexpr auto kPollSleep = std::chrono::microseconds(100);
+
+    enum class RecvStatus { Retry, Packet, Fatal };
+
+    RecvStatus recv_datagram(uint8_t *buf, size_t buf_cap, size_t &bytes_received) const {
+        ssize_t n = ::recvfrom(fd_, buf, buf_cap, 0, nullptr, nullptr);
+        if (n > 0) {
+            bytes_received = static_cast<size_t>(n);
+            return RecvStatus::Packet;
+        }
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            return RecvStatus::Fatal;
+        }
+        std::this_thread::sleep_for(kPollSleep);
+        return RecvStatus::Retry;
+    }
+
+    bool decode_packet(const uint8_t *packet, size_t packet_size, pipit::net::PpktHeader &hdr,
+                       const uint8_t *&payload, size_t &payload_bytes) const {
+        if (packet_size < sizeof(pipit::net::PpktHeader)) {
+            return false;
+        }
+
+        std::memcpy(&hdr, packet, sizeof(pipit::net::PpktHeader));
+        if (!pipit::net::ppkt_validate(hdr)) {
+            return false;
+        }
+
+        size_t payload_offset = sizeof(pipit::net::PpktHeader);
+        size_t payload_avail = packet_size - payload_offset;
+        if (payload_avail < hdr.payload_bytes) {
+            return false;
+        }
+
+        payload = packet + payload_offset;
+        payload_bytes = hdr.payload_bytes;
+        return true;
+    }
+
+    bool decode_samples(const uint8_t *payload, size_t payload_bytes,
+                        const pipit::net::PpktHeader &hdr, float *conv_buf, size_t conv_capacity,
+                        size_t &converted) const {
+        size_t bounded_count = std::min<size_t>(hdr.sample_count, conv_capacity);
+        converted = convert_to_float(payload, payload_bytes, static_cast<uint32_t>(bounded_count),
+                                     hdr.dtype, conv_buf);
+        return converted > 0;
+    }
+
+    ChannelState &get_or_create_channel(uint16_t chan_id) {
+        auto it = channels_.find(chan_id);
+        if (it != channels_.end()) {
+            return it->second;
+        }
+        auto [inserted, _] = channels_.emplace(chan_id, ChannelState(chan_id, buffer_capacity_));
+        return inserted->second;
+    }
+
+    void push_samples(const pipit::net::PpktHeader &hdr, const float *samples,
+                      size_t sample_count) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto &ch = get_or_create_channel(hdr.chan_id);
+        ch.sample_rate_hz = hdr.sample_rate_hz;
+        ch.last_sequence = hdr.sequence;
+        ch.packet_count++;
+        ch.buffer.push(samples, sample_count);
+    }
+
     void recv_loop() {
-        alignas(8) uint8_t buf[65536];
-        // Temporary buffer for float conversion
-        float conv_buf[8192];
+        alignas(8) std::array<uint8_t, kMaxPacketBytes> buf{};
+        std::array<float, kMaxConvertedSamples> conv_buf{};
 
         while (running_.load()) {
-            ssize_t n = ::recvfrom(fd_, buf, sizeof(buf), 0, nullptr, nullptr);
-            if (n <= 0) {
-                if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-                    // Actual error — break
-                    break;
-                }
-                // No data: sleep briefly to avoid busy-wait
-                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            size_t packet_size = 0;
+            RecvStatus status = recv_datagram(buf.data(), buf.size(), packet_size);
+            if (status == RecvStatus::Retry) {
+                continue;
+            }
+            if (status == RecvStatus::Fatal) {
+                break;
+            }
+
+            pipit::net::PpktHeader hdr{};
+            const uint8_t *payload = nullptr;
+            size_t payload_bytes = 0;
+            if (!decode_packet(buf.data(), packet_size, hdr, payload, payload_bytes)) {
                 continue;
             }
 
-            // Validate minimum size
-            if (static_cast<size_t>(n) < sizeof(pipit::net::PpktHeader))
+            size_t converted = 0;
+            if (!decode_samples(payload, payload_bytes, hdr, conv_buf.data(), conv_buf.size(),
+                                converted)) {
                 continue;
-
-            pipit::net::PpktHeader hdr;
-            std::memcpy(&hdr, buf, sizeof(pipit::net::PpktHeader));
-
-            if (!pipit::net::ppkt_validate(hdr))
-                continue;
-
-            // Validate payload size
-            size_t payload_offset = sizeof(pipit::net::PpktHeader);
-            size_t payload_avail = static_cast<size_t>(n) - payload_offset;
-            if (payload_avail < hdr.payload_bytes)
-                continue;
-
-            // Convert payload to float
-            uint32_t sample_count = hdr.sample_count;
-            if (sample_count > 8192)
-                sample_count = 8192; // clamp to conv_buf size
-            size_t converted =
-                convert_to_float(buf + payload_offset, sample_count, hdr.dtype, conv_buf);
-            if (converted == 0)
-                continue;
-
-            // Push into channel buffer
-            std::lock_guard<std::mutex> lock(mutex_);
-            auto it = channels_.find(hdr.chan_id);
-            if (it == channels_.end()) {
-                auto [ins, _] =
-                    channels_.emplace(hdr.chan_id, ChannelState(hdr.chan_id, buffer_capacity_));
-                it = ins;
             }
 
-            auto &ch = it->second;
-            ch.sample_rate_hz = hdr.sample_rate_hz;
-            ch.last_sequence = hdr.sequence;
-            ch.packet_count++;
-            ch.buffer.push(conv_buf, converted);
+            push_samples(hdr, conv_buf.data(), converted);
         }
     }
 };
