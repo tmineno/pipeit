@@ -106,6 +106,78 @@
 
 ---
 
+## v0.3.3 - Compiler Refactor Strategy (Analyze/Codegen)
+
+**Goal**: Reduce algorithmic bottlenecks and maintenance cost in compiler hot paths after v0.3.2 merge.
+
+- [x] **Phase 1: Graph index layer (shared lookup cache)**
+  - [x] Add subgraph-local indexes: `NodeId -> Node`, incoming/outgoing edge lists
+  - [x] Add analysis/codegen lookup helpers backed by indexes (replace repeated linear `find_node` / edge scans)
+  - [x] Add task/node repetition-vector index for O(1) cross-clock lookups
+  - [x] Keep deterministic behavior/output unchanged
+
+- [x] **Phase 2: Analyze worklist propagation**
+  - [x] Refactor shape inference fixpoint to worklist-driven propagation (process only affected nodes/edges)
+  - [x] Rework passthrough tracing to use indexed adjacency instead of repeated `iter().find(...)`
+  - [x] Preserve dimension precedence and existing diagnostics
+
+- [x] **Phase 3: Codegen decomposition**
+  - [x] Split `emit_task_functions` into smaller schedule/mode/timer emission helpers
+  - [x] Split `emit_firing` + `emit_actor_firing` into planning vs emission steps
+  - [x] Extract actor-call plan struct (in/out ptr, strides, params, hoist metadata)
+  - [x] Keep generated C++ output deterministic
+
+- [x] **Phase 4: Dimension-override safety hardening**
+  - [x] Remove first-edge-wins behavior in `build_schedule_dim_overrides` for symbolic dimensions
+  - [x] Add deterministic multi-edge resolution/validation rules
+  - [x] Align override conflict handling with `dim_resolve` helpers and analysis diagnostics
+
+- [x] **Exit Criteria**
+  - [x] Reduce ~50% NLOC/complexity for prioritized hotspots:
+    - [x] `compiler/src/codegen.rs`: `emit_task_functions`, `emit_firing`, `emit_actor_firing`
+    - [x] `compiler/src/analyze.rs`: shape propagation/tracing hot path
+  - [x] No correctness regressions (existing unit/integration/runtime tests pass)
+  - [x] No statistically significant codegen/analyze benchmark regression vs pre-refactor baseline
+
+---
+
+## v0.3.4 - Compiler Performance Follow-up (Next)
+
+**Goal**: Improve end-to-end compile latency using profiler-guided optimization after v0.3.3 refactor.
+
+- [ ] **Phase 1: Measurement hardening**
+  - [x] Adopt `benches/compiler_bench_stable.sh` as the default local performance workflow
+  - [x] Add profiling notes doc for reproducible method + hotspot evidence (`doc/PROFILING_NOTES_v0.3.3.md`)
+  - [ ] Add CI job for pinned, sequential A/B compiler KPI runs (`--save-baseline/--baseline`)
+  - [ ] Store baseline artifact/report for `kpi/full_compile_latency/*` and `kpi/phase_latency/*`
+
+- [ ] **Phase 2: Type inference allocation/clone reduction (profile-priority)**
+  - [ ] Remove or minimize `ActorMeta` cloning in `type_infer` hot paths
+  - [ ] Add cache for `get_effective_meta` / monomorphized meta lookup
+  - [ ] Reduce String/HashMap churn in monomorphization keys (prefer reused keys/interned forms)
+
+- [ ] **Phase 3: Registry + header loading costs**
+  - [ ] Cache parsed header metadata across repeated invocations (hash-keyed)
+  - [ ] Avoid redundant overlay work when include-set + header hashes are unchanged
+  - [ ] Re-benchmark repeated single-file compiles (`simple`, `multitask`, `modal`) after cache changes
+
+- [ ] **Phase 4: Remaining compiler hotspots**
+  - [x] Reduce complexity/duplication in:
+    - [x] `compiler/src/analyze.rs`: `check_dim_source_conflicts`
+    - [x] `compiler/src/codegen.rs`: `format_actor_params`
+    - [x] `compiler/src/codegen.rs`: `build_schedule_dim_overrides`
+  - [ ] `compiler/src/analyze.rs`: optimize `record_span_derived_dims` (dedup/indexing/allocation reduction)
+  - [ ] `compiler/src/codegen.rs`: optimize `param_cpp_type` and literal/type conversion helpers
+  - [ ] Re-profile to confirm hotspot migration after each optimization phase
+
+- [ ] **Exit Criteria**
+  - [ ] `kpi/full_compile_latency/complex` median improved by >= 5% vs v0.3.3 baseline
+  - [ ] `kpi/full_compile_latency/modal` median improved by >= 5% vs v0.3.3 baseline
+  - [ ] No statistically significant regressions in analyze/codegen phase KPIs
+  - [ ] No correctness regressions (all unit/integration/runtime tests pass)
+
+---
+
 ## v0.4.0 - Language Evolution
 
 **Goal**: Improve PDL ergonomics based on real usage experience. Design-first approach.

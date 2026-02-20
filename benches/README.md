@@ -63,3 +63,29 @@ If `--json` is not specified, report input JSON files are discovered from benchm
 - `kpi/full_compile_latency`: full compile latency (`parse -> resolve -> graph -> analyze -> schedule -> codegen`)
 - `kpi/phase_latency/*`: per-phase latency breakdown on a non-trivial pipeline
 - `kpi/parse_scaling`: parser scalability vs number of tasks
+
+## Stable Compiler Measurements
+
+Use `./compiler_bench_stable.sh` for reproducible compiler KPI runs.
+
+What it enforces:
+
+- CPU pinning via `taskset`
+- fixed Criterion timing knobs
+- optional sequential baseline-vs-current runs via `git worktree`
+
+Examples:
+
+```bash
+# Full compile KPI set on pinned CPU
+./compiler_bench_stable.sh
+
+# Single KPI
+./compiler_bench_stable.sh --filter 'kpi/full_compile_latency/complex'
+
+# A/B against baseline ref
+./compiler_bench_stable.sh --baseline-ref HEAD
+```
+
+`--baseline-ref` mode uses a shared cargo target dir plus Criterion
+`--save-baseline/--baseline`, so the reported `change:` numbers are true A/B.
