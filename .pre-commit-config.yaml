@@ -39,6 +39,7 @@ repos:
     hooks:
       - id: clang-format
         types_or: [c, c++]
+        exclude: third_party/
 
   # Markdown
   - repo: https://github.com/DavidAnson/markdownlint-cli2

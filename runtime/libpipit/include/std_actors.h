@@ -13,6 +13,16 @@
 #include <span>
 #include <std_math.h>
 
+// PocketFFT: disable threading (actors are single-threaded),
+// enable plan caching for repeated same-N firings.
+#ifndef POCKETFFT_NO_MULTITHREADING
+#define POCKETFFT_NO_MULTITHREADING
+#endif
+#ifndef POCKETFFT_CACHE_SIZE
+#define POCKETFFT_CACHE_SIZE 16
+#endif
+#include <third_party/pocketfft_hdronly.h>
+
 /// @defgroup source_actors Source Actors
 /// @{
 
@@ -229,8 +239,14 @@ template <typename T> ACTOR(impulse, IN(void, 0), OUT(T, N), PARAM(int, period) 
 
 /// @brief Fast Fourier Transform
 ///
-/// Computes FFT using Cooley-Tukey algorithm (radix-2, DIT).
-/// Requires N to be a power of 2.
+/// Computes real-to-complex FFT using PocketFFT (BSD-3, Max-Planck-Society).
+/// Requires N to be a power of 2. Outputs full N-point complex spectrum
+/// (Hermitian reconstruction for bins N/2+1 through N-1).
+///
+/// Preconditions: N > 0 and N is a power of 2.
+/// Postconditions: out[0..N-1] contains the full DFT spectrum.
+/// Failure modes: Returns ACTOR_ERROR if N is not a power of 2.
+/// Side effects: PocketFFT caches twiddle factors internally.
 ///
 /// @param N FFT size (must be power of 2)
 /// @return ACTOR_OK on success, ACTOR_ERROR if N is not a power of 2
@@ -245,49 +261,16 @@ ACTOR(fft, IN(float, N), OUT(cfloat, N), PARAM(int, N)) {
         return ACTOR_ERROR;
     }
 
-    // Copy input to output (convert real to complex)
-    for (int i = 0; i < N; ++i) {
-        out[i] = cfloat(in[i], 0.0f);
-    }
+    const pocketfft::shape_t shape{static_cast<size_t>(N)};
+    const pocketfft::stride_t stride_in{sizeof(float)};
+    const pocketfft::stride_t stride_out{sizeof(cfloat)};
 
-    // Bit-reversal permutation
-    int bits = 0;
-    int temp = N;
-    while (temp > 1) {
-        bits++;
-        temp >>= 1;
-    }
+    // r2c produces N/2+1 complex values into out[0..N/2]
+    pocketfft::r2c(shape, stride_in, stride_out, 0, pocketfft::FORWARD, in, out, 1.0f);
 
-    for (int i = 0; i < N; ++i) {
-        int j = 0;
-        for (int b = 0; b < bits; ++b) {
-            if (i & (1 << b)) {
-                j |= 1 << (bits - 1 - b);
-            }
-        }
-        if (j > i) {
-            cfloat tmp = out[i];
-            out[i] = out[j];
-            out[j] = tmp;
-        }
-    }
-
-    // Cooley-Tukey FFT (iterative, decimation-in-time)
-    const float PI = 3.14159265358979323846f;
-    for (int len = 2; len <= N; len *= 2) {
-        float angle = -2.0f * PI / len;
-        cfloat wlen(std::cos(angle), std::sin(angle));
-
-        for (int i = 0; i < N; i += len) {
-            cfloat w(1.0f, 0.0f);
-            for (int j = 0; j < len / 2; ++j) {
-                cfloat u = out[i + j];
-                cfloat v = out[i + j + len / 2] * w;
-                out[i + j] = u + v;
-                out[i + j + len / 2] = u - v;
-                w *= wlen;
-            }
-        }
+    // Reconstruct full spectrum via Hermitian symmetry
+    for (int k = N / 2 + 1; k < N; ++k) {
+        out[k] = std::conj(out[N - k]);
     }
 
     return ACTOR_OK;
@@ -306,9 +289,15 @@ ACTOR(fft, IN(float, N), OUT(cfloat, N), PARAM(int, N)) {
 /// c2r()
 /// @endcode
 ACTOR(c2r, IN(cfloat, N), OUT(float, N), PARAM(int, N)) {
-    for (int i = 0; i < N; ++i) {
-        out[i] = std::abs(in[i]);
+    using cbatch = xsimd::batch<std::complex<float>>;
+    constexpr int S = static_cast<int>(cbatch::size);
+    int i = 0;
+    for (; i + S <= N; i += S) {
+        auto cv = cbatch::load_unaligned(&in[i]);
+        xsimd::abs(cv).store_unaligned(&out[i]);
     }
+    for (; i < N; ++i)
+        out[i] = std::abs(in[i]);
     return ACTOR_OK;
 }
 }
@@ -325,9 +314,15 @@ ACTOR(c2r, IN(cfloat, N), OUT(float, N), PARAM(int, N)) {
 /// mag()
 /// @endcode
 ACTOR(mag, IN(cfloat, SHAPE(N)), OUT(float, SHAPE(N)), PARAM(int, N)) {
-    for (int i = 0; i < N; ++i) {
-        out[i] = std::abs(in[i]);
+    using cbatch = xsimd::batch<std::complex<float>>;
+    constexpr int S = static_cast<int>(cbatch::size);
+    int i = 0;
+    for (; i + S <= N; i += S) {
+        auto cv = cbatch::load_unaligned(&in[i]);
+        xsimd::abs(cv).store_unaligned(&out[i]);
     }
+    for (; i < N; ++i)
+        out[i] = std::abs(in[i]);
     return ACTOR_OK;
 }
 }
@@ -348,8 +343,17 @@ ACTOR(mag, IN(cfloat, SHAPE(N)), OUT(float, SHAPE(N)), PARAM(int, N)) {
 /// @endcode
 template <typename T>
 ACTOR(fir, IN(T, N), OUT(T, 1), PARAM(std::span<const T>, coeff) PARAM(int, N)) {
-    T y = T{};
-    for (int i = 0; i < N; i++)
+    using batch = xsimd::batch<T>;
+    constexpr int S = static_cast<int>(batch::size);
+    batch acc(T{});
+    int i = 0;
+    for (; i + S <= N; i += S) {
+        auto vc = batch::load_unaligned(&coeff[i]);
+        auto vi = batch::load_unaligned(&in[i]);
+        acc = xsimd::fma(vc, vi, acc);
+    }
+    T y = xsimd::reduce_add(acc);
+    for (; i < N; ++i)
         y += coeff[i] * in[i];
     out[0] = y;
     return ACTOR_OK;
@@ -376,10 +380,15 @@ ACTOR(fir, IN(T, N), OUT(T, 1), PARAM(std::span<const T>, coeff) PARAM(int, N)) 
 /// mean(10)
 /// @endcode
 template <typename T> ACTOR(mean, IN(T, N), OUT(T, 1), PARAM(int, N)) {
-    T sum = T{};
-    for (int i = 0; i < N; ++i) {
+    using batch = xsimd::batch<T>;
+    constexpr int S = static_cast<int>(batch::size);
+    batch acc(T{});
+    int i = 0;
+    for (; i + S <= N; i += S)
+        acc += batch::load_unaligned(&in[i]);
+    T sum = xsimd::reduce_add(acc);
+    for (; i < N; ++i)
         sum += in[i];
-    }
     out[0] = sum / N;
     return ACTOR_OK;
 }
@@ -400,10 +409,17 @@ template <typename T> ACTOR(mean, IN(T, N), OUT(T, 1), PARAM(int, N)) {
 /// rms(10)
 /// @endcode
 template <typename T> ACTOR(rms, IN(T, N), OUT(T, 1), PARAM(int, N)) {
-    T sum_sq = T{};
-    for (int i = 0; i < N; ++i) {
-        sum_sq += in[i] * in[i];
+    using batch = xsimd::batch<T>;
+    constexpr int S = static_cast<int>(batch::size);
+    batch acc(T{});
+    int i = 0;
+    for (; i + S <= N; i += S) {
+        auto v = batch::load_unaligned(&in[i]);
+        acc = xsimd::fma(v, v, acc);
     }
+    T sum_sq = xsimd::reduce_add(acc);
+    for (; i < N; ++i)
+        sum_sq += in[i] * in[i];
     out[0] = std::sqrt(sum_sq / N);
     return ACTOR_OK;
 }
@@ -424,12 +440,20 @@ template <typename T> ACTOR(rms, IN(T, N), OUT(T, 1), PARAM(int, N)) {
 /// min(10)
 /// @endcode
 template <typename T> ACTOR(min, IN(T, N), OUT(T, 1), PARAM(int, N)) {
-    T min_val = in[0];
-    for (int i = 1; i < N; ++i) {
-        if (in[i] < min_val) {
-            min_val = in[i];
-        }
+    using batch = xsimd::batch<T>;
+    constexpr int S = static_cast<int>(batch::size);
+    int i = 0;
+    batch vmin;
+    if (N >= S) {
+        vmin = batch::load_unaligned(&in[0]);
+        i = S;
+        for (; i + S <= N; i += S)
+            vmin = xsimd::min(vmin, batch::load_unaligned(&in[i]));
     }
+    T min_val = (i > 0) ? xsimd::reduce_min(vmin) : in[0];
+    for (; i < N; ++i)
+        if (in[i] < min_val)
+            min_val = in[i];
     out[0] = min_val;
     return ACTOR_OK;
 }
@@ -450,12 +474,20 @@ template <typename T> ACTOR(min, IN(T, N), OUT(T, 1), PARAM(int, N)) {
 /// max(10)
 /// @endcode
 template <typename T> ACTOR(max, IN(T, N), OUT(T, 1), PARAM(int, N)) {
-    T max_val = in[0];
-    for (int i = 1; i < N; ++i) {
-        if (in[i] > max_val) {
-            max_val = in[i];
-        }
+    using batch = xsimd::batch<T>;
+    constexpr int S = static_cast<int>(batch::size);
+    int i = 0;
+    batch vmax;
+    if (N >= S) {
+        vmax = batch::load_unaligned(&in[0]);
+        i = S;
+        for (; i + S <= N; i += S)
+            vmax = xsimd::max(vmax, batch::load_unaligned(&in[i]));
     }
+    T max_val = (i > 0) ? xsimd::reduce_max(vmax) : in[0];
+    for (; i < N; ++i)
+        if (in[i] > max_val)
+            max_val = in[i];
     out[0] = max_val;
     return ACTOR_OK;
 }

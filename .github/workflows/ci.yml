@@ -46,6 +46,7 @@ jobs:
       - name: Format
         run: |
           find runtime/ examples/ -name '*.h' -o -name '*.cpp' | \
+            grep -v third_party | \
             xargs clang-format --dry-run --Werror
 
   markdown:

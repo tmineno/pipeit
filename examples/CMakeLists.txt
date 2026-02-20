@@ -35,7 +35,7 @@ function(add_pdl_example PDL_NAME)
 
     # Compile generated C++ to binary
     add_executable(${PDL_NAME} ${CPP_FILE})
-    target_include_directories(${PDL_NAME} PRIVATE ${RUNTIME_INCLUDE} ${EXAMPLES_DIR})
+    target_include_directories(${PDL_NAME} PRIVATE ${RUNTIME_INCLUDE} ${RUNTIME_INCLUDE}/third_party ${EXAMPLES_DIR})
     target_link_libraries(${PDL_NAME} PRIVATE pthread)
 endfunction()
 

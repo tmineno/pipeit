@@ -42,6 +42,144 @@ fn find_cxx_compiler() -> Option<String> {
 /// Unique counter for temp file names (avoids collisions in parallel tests).
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+/// Generate a unique temp file path. Pass empty string for ext to omit extension.
+fn temp_path(prefix: &str, ext: &str) -> PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_dir = std::env::temp_dir();
+    if ext.is_empty() {
+        tmp_dir.join(format!("{}_{}", prefix, n))
+    } else {
+        tmp_dir.join(format!("{}_{}.{}", prefix, n, ext))
+    }
+}
+
+/// Runtime include directory path.
+fn runtime_include_dir() -> PathBuf {
+    project_root()
+        .join("runtime")
+        .join("libpipit")
+        .join("include")
+}
+
+/// Run pcc on a PDL input file with given include paths.
+/// Returns the pcc Output and the path to the generated .cpp file.
+fn run_pcc(pdl_input: &Path, include_paths: &[&Path]) -> (std::process::Output, PathBuf) {
+    let cpp_out = temp_path("pipit_gen", "cpp");
+    let pcc = pcc_binary();
+    let mut cmd = Command::new(&pcc);
+    cmd.arg(pdl_input.to_str().unwrap());
+    for path in include_paths {
+        cmd.arg("-I").arg(path.to_str().unwrap());
+    }
+    cmd.arg("--emit")
+        .arg("cpp")
+        .arg("-o")
+        .arg(cpp_out.to_str().unwrap());
+    let output = cmd.output().expect("failed to run pcc");
+    (output, cpp_out)
+}
+
+/// Write inline PDL source to temp file, run pcc, and return generated C++ string.
+/// Panics if pcc fails or produces empty output.
+fn generate_cpp_from_inline(pdl_source: &str, test_name: &str, include_paths: &[&Path]) -> String {
+    let pdl_file = temp_path("pipit_pdl", "pdl");
+    std::fs::write(&pdl_file, pdl_source).expect("write pdl temp");
+
+    let (gen, cpp_out) = run_pcc(&pdl_file, include_paths);
+    let _ = std::fs::remove_file(&pdl_file);
+
+    assert!(
+        gen.status.success(),
+        "pcc failed for '{}':\n{}",
+        test_name,
+        String::from_utf8_lossy(&gen.stderr)
+    );
+
+    let cpp = std::fs::read_to_string(&cpp_out).expect("failed to read generated cpp");
+    let _ = std::fs::remove_file(&cpp_out);
+    assert!(!cpp.is_empty(), "empty output for '{}'", test_name);
+    cpp
+}
+
+/// Syntax-check a C++ source string with the system compiler.
+fn compile_cpp(
+    cxx: &str,
+    cpp_source: &str,
+    label: &str,
+    runtime_include: &Path,
+    examples_dir: &Path,
+) {
+    let tmp_file = temp_path("pipit_cxx", "cpp");
+    std::fs::write(&tmp_file, cpp_source).expect("write cpp temp");
+
+    let third_party = runtime_include.join("third_party");
+    let out = Command::new(cxx)
+        .arg("-std=c++20")
+        .arg("-fsyntax-only")
+        .arg("-I")
+        .arg(runtime_include.to_str().unwrap())
+        .arg("-I")
+        .arg(third_party.to_str().unwrap())
+        .arg("-I")
+        .arg(examples_dir.to_str().unwrap())
+        .arg(tmp_file.to_str().unwrap())
+        .output()
+        .expect("failed to run C++ compiler");
+
+    let _ = std::fs::remove_file(&tmp_file);
+
+    assert!(
+        out.status.success(),
+        "C++ syntax error in '{}':\n{}\n\nSource:\n{}",
+        label,
+        String::from_utf8_lossy(&out.stderr),
+        cpp_source
+    );
+}
+
+/// Compile C++ source file to a binary. Returns the binary path.
+/// Panics on failure with the source code in the error message.
+fn compile_cpp_to_binary(
+    cxx: &str,
+    cpp_file: &Path,
+    label: &str,
+    runtime_include: &Path,
+    examples_dir: &Path,
+) -> PathBuf {
+    let cpp = std::fs::read_to_string(cpp_file).expect("read cpp source");
+    let bin_file = temp_path("pipit_bin", "");
+    let third_party = runtime_include.join("third_party");
+    let compile = Command::new(cxx)
+        .arg("-std=c++20")
+        .arg("-O0")
+        .arg("-I")
+        .arg(runtime_include.to_str().unwrap())
+        .arg("-I")
+        .arg(third_party.to_str().unwrap())
+        .arg("-I")
+        .arg(examples_dir.to_str().unwrap())
+        .arg(cpp_file.to_str().unwrap())
+        .arg("-lpthread")
+        .arg("-o")
+        .arg(bin_file.to_str().unwrap())
+        .output()
+        .expect("failed to compile");
+
+    let _ = std::fs::remove_file(cpp_file);
+
+    if !compile.status.success() {
+        let _ = std::fs::remove_file(&bin_file);
+        panic!(
+            "C++ compile failed for '{}':\n{}\n\nSource:\n{}",
+            label,
+            String::from_utf8_lossy(&compile.stderr),
+            cpp
+        );
+    }
+
+    bin_file
+}
+
 /// Run pcc on an example .pdl file and syntax-check the output.
 fn assert_pdl_file_compiles(pdl_name: &str) {
     let cxx = match find_cxx_compiler() {
@@ -54,26 +192,12 @@ fn assert_pdl_file_compiles(pdl_name: &str) {
 
     let root = project_root();
     let pdl_path = root.join("examples").join(pdl_name);
-    let runtime_include = root.join("runtime").join("libpipit").join("include");
+    let runtime_include = runtime_include_dir();
     let example_actors_h = root.join("examples").join("example_actors.h");
 
     assert!(pdl_path.exists(), "missing {}", pdl_path.display());
 
-    let pcc = pcc_binary();
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let cpp_out = std::env::temp_dir().join(format!("pipit_gen_{}.cpp", n));
-    let gen = Command::new(&pcc)
-        .arg(pdl_path.to_str().unwrap())
-        .arg("-I")
-        .arg(runtime_include.to_str().unwrap())
-        .arg("-I")
-        .arg(example_actors_h.to_str().unwrap())
-        .arg("--emit")
-        .arg("cpp")
-        .arg("-o")
-        .arg(cpp_out.to_str().unwrap())
-        .output()
-        .expect("failed to run pcc");
+    let (gen, cpp_out) = run_pcc(&pdl_path, &[&runtime_include, &example_actors_h]);
 
     assert!(
         gen.status.success(),
@@ -106,41 +230,8 @@ fn assert_inline_compiles(pdl_source: &str, test_name: &str) {
     };
 
     let root = project_root();
-    let runtime_include = root.join("runtime").join("libpipit").join("include");
-
-    // Write PDL to temp file
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_dir = std::env::temp_dir();
-    let pdl_file = tmp_dir.join(format!("pipit_inline_{}.pdl", n));
-    std::fs::write(&pdl_file, pdl_source).expect("write pdl temp");
-
-    let pcc = pcc_binary();
-    let n2 = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let cpp_out = std::env::temp_dir().join(format!("pipit_gen_inline_{}.cpp", n2));
-    let gen = Command::new(&pcc)
-        .arg(pdl_file.to_str().unwrap())
-        .arg("-I")
-        .arg(runtime_include.to_str().unwrap())
-        .arg("--emit")
-        .arg("cpp")
-        .arg("-o")
-        .arg(cpp_out.to_str().unwrap())
-        .output()
-        .expect("failed to run pcc");
-
-    let _ = std::fs::remove_file(&pdl_file);
-
-    assert!(
-        gen.status.success(),
-        "pcc failed for '{}':\n{}",
-        test_name,
-        String::from_utf8_lossy(&gen.stderr)
-    );
-
-    let cpp = std::fs::read_to_string(&cpp_out).expect("failed to read generated cpp");
-    let _ = std::fs::remove_file(&cpp_out);
-    assert!(!cpp.is_empty(), "empty output for '{}'", test_name);
-
+    let runtime_include = runtime_include_dir();
+    let cpp = generate_cpp_from_inline(pdl_source, test_name, &[&runtime_include]);
     compile_cpp(
         &cxx,
         &cpp,
@@ -161,45 +252,34 @@ fn assert_inline_fails(pdl_source: &str, test_name: &str) {
     };
 
     let root = project_root();
-    let runtime_include = root.join("runtime").join("libpipit").join("include");
+    let runtime_include = runtime_include_dir();
 
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_dir = std::env::temp_dir();
-    let pdl_file = tmp_dir.join(format!("pipit_inline_fail_{}.pdl", n));
+    let pdl_file = temp_path("pipit_pdl", "pdl");
     std::fs::write(&pdl_file, pdl_source).expect("write pdl temp");
 
-    let pcc = pcc_binary();
-    let n2 = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let cpp_out = std::env::temp_dir().join(format!("pipit_gen_inline_fail_{}.cpp", n2));
-    let gen = Command::new(&pcc)
-        .arg(pdl_file.to_str().unwrap())
-        .arg("-I")
-        .arg(runtime_include.to_str().unwrap())
-        .arg("--emit")
-        .arg("cpp")
-        .arg("-o")
-        .arg(cpp_out.to_str().unwrap())
-        .output()
-        .expect("failed to run pcc");
-
+    let (gen, cpp_out) = run_pcc(&pdl_file, &[&runtime_include]);
     let _ = std::fs::remove_file(&pdl_file);
+
     if !gen.status.success() {
         let _ = std::fs::remove_file(&cpp_out);
-        return;
+        return; // pcc failed — expected
     }
 
     let cpp = std::fs::read_to_string(&cpp_out).expect("failed to read generated cpp");
     let _ = std::fs::remove_file(&cpp_out);
     assert!(!cpp.is_empty(), "empty output for '{}'", test_name);
 
-    let n3 = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_cpp = tmp_dir.join(format!("pipit_fail_cxx_{}.cpp", n3));
+    // C++ compile should also fail
+    let tmp_cpp = temp_path("pipit_cxx", "cpp");
     std::fs::write(&tmp_cpp, &cpp).expect("write cpp temp");
+    let third_party = runtime_include.join("third_party");
     let out = Command::new(&cxx)
         .arg("-std=c++20")
         .arg("-fsyntax-only")
         .arg("-I")
         .arg(runtime_include.to_str().unwrap())
+        .arg("-I")
+        .arg(third_party.to_str().unwrap())
         .arg("-I")
         .arg(root.join("examples").to_str().unwrap())
         .arg(tmp_cpp.to_str().unwrap())
@@ -216,76 +296,8 @@ fn assert_inline_fails(pdl_source: &str, test_name: &str) {
 
 /// Run pcc on inline PDL source and return generated C++ source.
 fn generate_inline_cpp(pdl_source: &str, test_name: &str) -> String {
-    let root = project_root();
-    let runtime_include = root.join("runtime").join("libpipit").join("include");
-
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_dir = std::env::temp_dir();
-    let pdl_file = tmp_dir.join(format!("pipit_inline_gen_{}.pdl", n));
-    std::fs::write(&pdl_file, pdl_source).expect("write pdl temp");
-
-    let pcc = pcc_binary();
-    let n2 = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let cpp_out = std::env::temp_dir().join(format!("pipit_gen_check_{}.cpp", n2));
-    let gen = Command::new(&pcc)
-        .arg(pdl_file.to_str().unwrap())
-        .arg("-I")
-        .arg(runtime_include.to_str().unwrap())
-        .arg("--emit")
-        .arg("cpp")
-        .arg("-o")
-        .arg(cpp_out.to_str().unwrap())
-        .output()
-        .expect("failed to run pcc");
-
-    let _ = std::fs::remove_file(&pdl_file);
-
-    assert!(
-        gen.status.success(),
-        "pcc failed for '{}':\n{}",
-        test_name,
-        String::from_utf8_lossy(&gen.stderr)
-    );
-
-    let cpp = std::fs::read_to_string(&cpp_out).expect("failed to read generated cpp");
-    let _ = std::fs::remove_file(&cpp_out);
-    assert!(!cpp.is_empty(), "empty output for '{}'", test_name);
-    cpp
-}
-
-/// Syntax-check a C++ source string with the system compiler.
-fn compile_cpp(
-    cxx: &str,
-    cpp_source: &str,
-    label: &str,
-    runtime_include: &Path,
-    examples_dir: &Path,
-) {
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_dir = std::env::temp_dir();
-    let tmp_file = tmp_dir.join(format!("pipit_cxx_{}.cpp", n));
-    std::fs::write(&tmp_file, cpp_source).expect("write cpp temp");
-
-    let out = Command::new(cxx)
-        .arg("-std=c++20")
-        .arg("-fsyntax-only")
-        .arg("-I")
-        .arg(runtime_include.to_str().unwrap())
-        .arg("-I")
-        .arg(examples_dir.to_str().unwrap())
-        .arg(tmp_file.to_str().unwrap())
-        .output()
-        .expect("failed to run C++ compiler");
-
-    let _ = std::fs::remove_file(&tmp_file);
-
-    assert!(
-        out.status.success(),
-        "C++ syntax error in '{}':\n{}\n\nSource:\n{}",
-        label,
-        String::from_utf8_lossy(&out.stderr),
-        cpp_source
-    );
+    let runtime_include = runtime_include_dir();
+    generate_cpp_from_inline(pdl_source, test_name, &[&runtime_include])
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -324,24 +336,9 @@ fn include_directory_path() {
     // -I with a directory should discover all headers recursively
     let root = project_root();
     let pdl_path = root.join("examples").join("gain.pdl");
-    let runtime_include = root.join("runtime").join("libpipit").join("include");
+    let runtime_include = runtime_include_dir();
 
-    let pcc = pcc_binary();
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let cpp_out = std::env::temp_dir().join(format!("pipit_gen_dir_{}.cpp", n));
-    let gen = Command::new(&pcc)
-        .arg(pdl_path.to_str().unwrap())
-        .arg("-I")
-        .arg(runtime_include.to_str().unwrap())
-        .arg("-I")
-        .arg(root.join("examples").to_str().unwrap())
-        .arg("--emit")
-        .arg("cpp")
-        .arg("-o")
-        .arg(cpp_out.to_str().unwrap())
-        .output()
-        .expect("failed to run pcc");
-
+    let (gen, cpp_out) = run_pcc(&pdl_path, &[&runtime_include, &root.join("examples")]);
     let _ = std::fs::remove_file(&cpp_out);
 
     assert!(
@@ -1250,27 +1247,10 @@ fn compile_and_run_pdl(pdl_name: &str, run_args: &[&str]) -> Option<(i32, String
     let cxx = find_cxx_compiler()?;
     let root = project_root();
     let pdl_path = root.join("examples").join(pdl_name);
-    let runtime_include = root.join("runtime").join("libpipit").join("include");
+    let runtime_include = runtime_include_dir();
     let example_actors_h = root.join("examples").join("example_actors.h");
 
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_dir = std::env::temp_dir();
-    let cpp_file = tmp_dir.join(format!("pipit_run_{}.cpp", n));
-    let bin_file = tmp_dir.join(format!("pipit_run_{}", n));
-
-    let pcc = pcc_binary();
-    let gen = Command::new(&pcc)
-        .arg(pdl_path.to_str().unwrap())
-        .arg("-I")
-        .arg(runtime_include.to_str().unwrap())
-        .arg("-I")
-        .arg(example_actors_h.to_str().unwrap())
-        .arg("--emit")
-        .arg("cpp")
-        .arg("-o")
-        .arg(cpp_file.to_str().unwrap())
-        .output()
-        .expect("failed to run pcc");
+    let (gen, cpp_file) = run_pcc(&pdl_path, &[&runtime_include, &example_actors_h]);
 
     if !gen.status.success() {
         panic!(
@@ -1280,33 +1260,13 @@ fn compile_and_run_pdl(pdl_name: &str, run_args: &[&str]) -> Option<(i32, String
         );
     }
 
-    let cpp = std::fs::read_to_string(&cpp_file).expect("read generated cpp");
-
-    let compile = Command::new(&cxx)
-        .arg("-std=c++20")
-        .arg("-O0")
-        .arg("-I")
-        .arg(runtime_include.to_str().unwrap())
-        .arg("-I")
-        .arg(root.join("examples").to_str().unwrap())
-        .arg(&cpp_file)
-        .arg("-lpthread")
-        .arg("-o")
-        .arg(&bin_file)
-        .output()
-        .expect("failed to compile");
-
-    let _ = std::fs::remove_file(&cpp_file);
-
-    if !compile.status.success() {
-        let _ = std::fs::remove_file(&bin_file);
-        panic!(
-            "C++ compile failed for '{}':\n{}\n\nSource:\n{}",
-            pdl_name,
-            String::from_utf8_lossy(&compile.stderr),
-            cpp
-        );
-    }
+    let bin_file = compile_cpp_to_binary(
+        &cxx,
+        &cpp_file,
+        pdl_name,
+        &runtime_include,
+        &root.join("examples"),
+    );
 
     let run = Command::new("timeout")
         .arg("10")
@@ -1332,27 +1292,12 @@ fn compile_and_run_inline(
 ) -> Option<(i32, String, String)> {
     let cxx = find_cxx_compiler()?;
     let root = project_root();
-    let runtime_include = root.join("runtime").join("libpipit").join("include");
+    let runtime_include = runtime_include_dir();
 
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_dir = std::env::temp_dir();
-    let pdl_file = tmp_dir.join(format!("pipit_runinl_{}.pdl", n));
-    let cpp_file = tmp_dir.join(format!("pipit_runinl_{}.cpp", n));
-    let bin_file = tmp_dir.join(format!("pipit_runinl_{}", n));
+    let pdl_file = temp_path("pipit_pdl", "pdl");
     std::fs::write(&pdl_file, pdl_source).expect("write pdl");
 
-    let pcc = pcc_binary();
-    let gen = Command::new(&pcc)
-        .arg(pdl_file.to_str().unwrap())
-        .arg("-I")
-        .arg(runtime_include.to_str().unwrap())
-        .arg("--emit")
-        .arg("cpp")
-        .arg("-o")
-        .arg(cpp_file.to_str().unwrap())
-        .output()
-        .expect("failed to run pcc");
-
+    let (gen, cpp_file) = run_pcc(&pdl_file, &[&runtime_include]);
     let _ = std::fs::remove_file(&pdl_file);
 
     if !gen.status.success() {
@@ -1363,33 +1308,13 @@ fn compile_and_run_inline(
         );
     }
 
-    let cpp = std::fs::read_to_string(&cpp_file).expect("read generated cpp");
-
-    let compile = Command::new(&cxx)
-        .arg("-std=c++20")
-        .arg("-O0")
-        .arg("-I")
-        .arg(runtime_include.to_str().unwrap())
-        .arg("-I")
-        .arg(root.join("examples").to_str().unwrap())
-        .arg(&cpp_file)
-        .arg("-lpthread")
-        .arg("-o")
-        .arg(&bin_file)
-        .output()
-        .expect("failed to compile");
-
-    let _ = std::fs::remove_file(&cpp_file);
-
-    if !compile.status.success() {
-        let _ = std::fs::remove_file(&bin_file);
-        panic!(
-            "C++ compile failed for '{}':\n{}\n\nSource:\n{}",
-            test_name,
-            String::from_utf8_lossy(&compile.stderr),
-            cpp
-        );
-    }
+    let bin_file = compile_cpp_to_binary(
+        &cxx,
+        &cpp_file,
+        test_name,
+        &runtime_include,
+        &root.join("examples"),
+    );
 
     let run = Command::new("timeout")
         .arg("10")
@@ -1668,43 +1593,9 @@ fn assert_poly_inline_compiles(pdl_source: &str, test_name: &str) {
     };
 
     let root = project_root();
-    let runtime_include = root.join("runtime").join("libpipit").join("include");
+    let runtime_include = runtime_include_dir();
     let poly_actors_h = root.join("examples").join("poly_actors.h");
-
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_dir = std::env::temp_dir();
-    let pdl_file = tmp_dir.join(format!("pipit_poly_{}.pdl", n));
-    std::fs::write(&pdl_file, pdl_source).expect("write pdl temp");
-
-    let pcc = pcc_binary();
-    let n2 = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let cpp_out = std::env::temp_dir().join(format!("pipit_gen_poly_{}.cpp", n2));
-    let gen = Command::new(&pcc)
-        .arg(pdl_file.to_str().unwrap())
-        .arg("-I")
-        .arg(runtime_include.to_str().unwrap())
-        .arg("-I")
-        .arg(poly_actors_h.to_str().unwrap())
-        .arg("--emit")
-        .arg("cpp")
-        .arg("-o")
-        .arg(cpp_out.to_str().unwrap())
-        .output()
-        .expect("failed to run pcc");
-
-    let _ = std::fs::remove_file(&pdl_file);
-
-    assert!(
-        gen.status.success(),
-        "pcc failed for '{}':\n{}",
-        test_name,
-        String::from_utf8_lossy(&gen.stderr)
-    );
-
-    let cpp = std::fs::read_to_string(&cpp_out).expect("failed to read generated cpp");
-    let _ = std::fs::remove_file(&cpp_out);
-    assert!(!cpp.is_empty(), "empty output for '{}'", test_name);
-
+    let cpp = generate_cpp_from_inline(pdl_source, test_name, &[&runtime_include, &poly_actors_h]);
     compile_cpp(
         &cxx,
         &cpp,
@@ -1716,43 +1607,9 @@ fn assert_poly_inline_compiles(pdl_source: &str, test_name: &str) {
 
 /// Run pcc on inline PDL with poly actors and return generated C++ source.
 fn generate_poly_cpp(pdl_source: &str, test_name: &str) -> String {
-    let root = project_root();
-    let runtime_include = root.join("runtime").join("libpipit").join("include");
-    let poly_actors_h = root.join("examples").join("poly_actors.h");
-
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_dir = std::env::temp_dir();
-    let pdl_file = tmp_dir.join(format!("pipit_poly_gen_{}.pdl", n));
-    std::fs::write(&pdl_file, pdl_source).expect("write pdl temp");
-
-    let pcc = pcc_binary();
-    let n2 = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let cpp_out = tmp_dir.join(format!("pipit_gen_poly_cpp_{}.cpp", n2));
-    let gen = Command::new(&pcc)
-        .arg(pdl_file.to_str().unwrap())
-        .arg("-I")
-        .arg(runtime_include.to_str().unwrap())
-        .arg("-I")
-        .arg(poly_actors_h.to_str().unwrap())
-        .arg("--emit")
-        .arg("cpp")
-        .arg("-o")
-        .arg(cpp_out.to_str().unwrap())
-        .output()
-        .expect("failed to run pcc");
-
-    let _ = std::fs::remove_file(&pdl_file);
-
-    assert!(
-        gen.status.success(),
-        "pcc failed for '{}':\n{}",
-        test_name,
-        String::from_utf8_lossy(&gen.stderr)
-    );
-
-    let cpp = std::fs::read_to_string(&cpp_out).expect("failed to read generated cpp");
-    let _ = std::fs::remove_file(&cpp_out);
-    cpp
+    let runtime_include = runtime_include_dir();
+    let poly_actors_h = project_root().join("examples").join("poly_actors.h");
+    generate_cpp_from_inline(pdl_source, test_name, &[&runtime_include, &poly_actors_h])
 }
 
 #[test]

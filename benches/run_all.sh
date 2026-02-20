@@ -300,7 +300,7 @@ build_and_run_gbench() {
     local exe="$BUILD_DIR/$name"
 
     echo "  Building $name..."
-    if ! $CXX $CXX_FLAGS -I "$RUNTIME_INCLUDE" -I "$EXAMPLES_DIR" \
+    if ! $CXX $CXX_FLAGS -I "$RUNTIME_INCLUDE" -I "$RUNTIME_INCLUDE/third_party" -I "$EXAMPLES_DIR" \
          "$src" $BENCH_LIB_FLAGS -o "$exe" 2>/dev/null; then
         echo "  Build failed for $name"
         return 1
@@ -396,6 +396,7 @@ run_benchmarks() {
 
         PCC="$PROJECT_ROOT/target/release/pcc"
         STD_ACTORS_HEADER="$RUNTIME_INCLUDE/std_actors.h"
+        STD_MATH_HEADER="$RUNTIME_INCLUDE/std_math.h"
         EXAMPLE_ACTORS_HEADER="$EXAMPLES_DIR/example_actors.h"
 
         echo "  Building pcc..."
@@ -416,13 +417,13 @@ run_benchmarks() {
                     exe="$BUILD_DIR/${name}_bench"
 
                     echo "Compiling $name.pdl..."
-                    if ! "$PCC" "$pdl" -I "$STD_ACTORS_HEADER" -I "$EXAMPLE_ACTORS_HEADER" --emit cpp -o "$cpp_file" 2>/dev/null; then
+                    if ! "$PCC" "$pdl" -I "$STD_ACTORS_HEADER" -I "$STD_MATH_HEADER" -I "$EXAMPLE_ACTORS_HEADER" --emit cpp -o "$cpp_file" 2>/dev/null; then
                         echo "  SKIP: $name (pcc compilation failed)"
                         pdl_fail=$((pdl_fail + 1))
                         continue
                     fi
 
-                    if ! $CXX $CXX_FLAGS -I "$RUNTIME_INCLUDE" -I "$EXAMPLES_DIR" "$cpp_file" -lpthread -o "$exe" 2>/dev/null; then
+                    if ! $CXX $CXX_FLAGS -I "$RUNTIME_INCLUDE" -I "$RUNTIME_INCLUDE/third_party" -I "$EXAMPLES_DIR" "$cpp_file" -lpthread -o "$exe" 2>/dev/null; then
                         echo "  SKIP: $name (C++ compilation failed)"
                         pdl_fail=$((pdl_fail + 1))
                         continue
