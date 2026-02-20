@@ -38,8 +38,8 @@ static void BM_E2E_PipelineOnly(benchmark::State &state) {
 
     // Actor instances (same structs as codegen creates)
     Actor_constant gen{1.0f, N};
-    Actor_mul mul1{2.0f, N};
-    Actor_mul mul2{0.5f, N};
+    Actor_mul<float> mul1{2.0f, N};
+    Actor_mul<float> mul2{0.5f, N};
 
     for (auto _ : state) {
         // PASS firing order: constant → mul(2.0) → mul(0.5)
@@ -217,7 +217,7 @@ static void BM_E2E_SocketLoopback(benchmark::State &state) {
             std::vector<float> tx_buf0(N);
             std::vector<float> tx_buf1(N);
             Actor_constant gen{1.0f, N};
-            Actor_mul mul1{2.0f, N};
+            Actor_mul<float> mul1{2.0f, N};
 
             pipit::net::PpktHeader hdr = pipit::net::ppkt_make_header(pipit::net::DTYPE_F32, 0);
 
