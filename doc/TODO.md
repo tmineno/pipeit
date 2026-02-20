@@ -155,27 +155,40 @@
 **Goal**: Fix implementation-side regressions in shape/dimension resolution and shared-buffer codegen, then lock behavior with targeted tests.
 
 - [ ] **Fix dimension inference precedence for symbolic actor params (e.g., `fir(coeff)`)**
-  - [ ] Treat span-derived dimension inference as a first-class resolved source when deciding whether shape is unresolved
-  - [ ] Prevent reverse shape propagation from overriding already-resolved symbolic dimensions
+  - [x] Treat span-derived dimension inference as a first-class resolved source when deciding whether shape is unresolved
+  - [x] Prevent reverse shape propagation from overriding already-resolved symbolic dimensions
   - [ ] Add explicit mismatch diagnostics when inferred dimension value conflicts with explicit arg/shape constraint
-  - [ ] Verify generated actor params preserve stdlib semantics (`fir(coeff)` uses `N = len(coeff)` unless explicitly constrained)
+  - [x] Verify generated actor params preserve stdlib semantics (`fir(coeff)` uses `N = len(coeff)` unless explicitly constrained)
 
-- [ ] **Fix shared-buffer I/O granularity in codegen**
-  - [ ] Stop modeling inter-task `BufferRead`/`BufferWrite` as effectively one-token firings in emitted loops
-  - [ ] Emit block ring-buffer operations whenever schedule information allows (`read(..., count>1)`, `write(..., count>1)`)
-  - [ ] Keep fail-fast + retry semantics intact while reducing retry-loop frequency
+- [x] **Fix shared-buffer I/O granularity in codegen**
+  - [x] Stop modeling inter-task `BufferRead`/`BufferWrite` as effectively one-token firings in emitted loops
+  - [x] Emit block ring-buffer operations whenever schedule information allows (`read(..., count>1)`, `write(..., count>1)`)
+  - [x] Keep fail-fast + retry semantics intact while reducing retry-loop frequency
 
-- [ ] **Reduce actor construction overhead in hot loops**
-  - [ ] Hoist actor object construction out of per-firing inner loops when semantics permit
-  - [ ] Keep runtime-parameter update behavior correct at iteration boundaries
-  - [ ] Add a clear policy for actors that cannot be safely hoisted
+- [x] **Reduce actor construction overhead in hot loops**
+  - [x] Hoist actor object construction out of per-firing inner loops when semantics permit
+  - [x] Keep runtime-parameter update behavior correct at iteration boundaries
+  - [x] Add a clear policy for actors that cannot be safely hoisted
 
-- [ ] **Add regression tests for these issues**
-  - [ ] `analyze` tests: symbolic dimension resolution prefers explicit args/span-derived values over propagated shape when both exist
-  - [ ] `schedule`/`codegen` tests: generated FIR call sites do not emit out-of-bounds pointer strides for `fir(coeff)` pipelines
-  - [ ] `codegen` tests: shared-buffer I/O emits block-size ring-buffer ops for multi-token edges
-  - [ ] `codegen` tests: actor construction count in generated C++ is hoisted (no per-firing temporary construction where hoistable)
-  - [ ] Integration test: `examples/example.pdl` compile/codegen smoke assertion for safe FIR indexing and stable shared-buffer transfer shape
+- [x] **Add regression tests for these issues**
+  - [x] `analyze` tests: symbolic dimension resolution prefers explicit args/span-derived values over propagated shape when both exist
+  - [x] `schedule`/`codegen` tests: generated FIR call sites do not emit out-of-bounds pointer strides for `fir(coeff)` pipelines
+  - [x] `codegen` tests: shared-buffer I/O emits block-size ring-buffer ops for multi-token edges
+  - [x] `codegen` tests: actor construction count in generated C++ is hoisted (no per-firing temporary construction where hoistable)
+  - [x] Integration test: `examples/example.pdl` compile/codegen smoke assertion for safe FIR indexing and stable shared-buffer transfer shape
+
+- [x] **Unify node port-rate resolution in `analyze` and remove duplicate rate inference in downstream phases**
+  - [x] Add precomputed `node_port_rates` to analysis result
+  - [x] Consume analysis-owned rates in `schedule` edge-buffer sizing
+  - [x] Consume analysis-owned rates in `codegen` actor firing stride resolution
+
+- [x] **Runtime performance verification (2026-02-20)**
+  - [x] Compare `b06071d` vs `5842279` on `BM_E2E_PipelineOnly` (5 reps, median) with no clear regression (within measurement noise)
+  - [x] Compare generated-PDL runtime stats (`--filter pdl`) with no systematic throughput degradation
+  - [ ] Re-run socket-loopback benchmark after local port-bind issue (`localhost:19876`) is resolved
+
+- [ ] **Follow-up simplification**
+  - [ ] Collapse remaining dimension-parameter fallback duplication (`analyze`/`codegen`) into a single analysis-owned artifact
 
 ---
 
