@@ -256,6 +256,44 @@ run_section() {
     esac
 }
 
+# Convert Criterion bencher-format output to Google Benchmark JSON.
+# Input: file with lines like "test name ... bench:  1234 ns/iter (+/- 56)"
+# Output: Google Benchmark JSON to stdout
+bencher_to_gbench_json() {
+    local input_file="$1"
+    if ! command -v jq >/dev/null 2>&1; then
+        # Fallback: raw awk JSON generation
+        awk '
+        BEGIN { printf "{\n  \"context\": {\"date\": \"%s\", \"library_version\": \"criterion\"},\n  \"benchmarks\": [\n", strftime("%Y-%m-%dT%H:%M:%S%z") }
+        /bench:/ {
+            # Parse: test <name> ... bench:  <time> ns/iter (+/- <var>)
+            name = $2
+            for (i = 3; i <= NF; i++) {
+                if ($i == "bench:") { time_val = $(i+1); break }
+            }
+            if (count > 0) printf ",\n"
+            printf "    {\"name\": \"%s\", \"cpu_time\": %s, \"real_time\": %s, \"time_unit\": \"ns\", \"iterations\": 0}", name, time_val, time_val
+            count++
+        }
+        END { printf "\n  ]\n}\n" }
+        ' "$input_file"
+    else
+        # Use jq for clean JSON generation
+        awk '/bench:/ {
+            name = $2
+            for (i = 3; i <= NF; i++) {
+                if ($i == "bench:") { time_val = $(i+1); break }
+            }
+            print name "\t" time_val
+        }' "$input_file" | jq -Rs --arg date "$(date -Iseconds)" '
+            split("\n") | map(select(length > 0) | split("\t") |
+                {name: .[0], cpu_time: (.[1] | tonumber), real_time: (.[1] | tonumber),
+                 time_unit: "ns", iterations: 0}) |
+            {context: {date: $date, library_version: "criterion"}, benchmarks: .}
+        '
+    fi
+}
+
 build_and_run_gbench() {
     local src="$1"
     local name="$2"
@@ -290,9 +328,13 @@ run_benchmarks() {
 
     if should_run "compiler"; then
         echo "[1/6] Compiler benchmarks"
+        local compiler_txt="$BUILD_DIR/compiler_bench_raw.txt"
         if cargo bench --manifest-path "$PROJECT_ROOT/compiler/Cargo.toml" \
             --bench compiler_bench -- --output-format bencher \
-            >"$BENCH_OUTPUT_DIR/compiler_bench.txt" 2>&1; then
+            >"$compiler_txt" 2>&1; then
+            # Convert bencher text → Google Benchmark JSON for unified reporting
+            bencher_to_gbench_json "$compiler_txt" \
+                >"$BENCH_OUTPUT_DIR/compiler_bench.json"
             run_section "compiler" "pass"
         else
             run_section "compiler" "fail"
