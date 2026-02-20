@@ -1172,24 +1172,37 @@ fn overrun_policy_slip() {
 }
 
 #[test]
-fn shared_buffer_io_uses_pointer_offsets_in_repetition_loops() {
+fn shared_buffer_io_uses_block_transfers() {
     let cpp = generate_inline_cpp(
         concat!(
             "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
             "clock 1MHz w { constant(0.0) | fft(256) | c2r() | fir(coeff) -> sig }\n",
             "clock 1MHz r { @sig | decimate(256) | stdout() }\n",
         ),
-        "shared_io_offsets",
+        "shared_io_block",
     );
 
+    // Block transfer: ring buffer write uses base buffer pointer (no &buf[_r * N] offset)
     assert!(
-        cpp.contains("_ringbuf_sig.write(&_"),
-        "writer should advance pointer with per-firing offset, got:\n{}",
+        cpp.contains("_ringbuf_sig.write(_e"),
+        "writer should use base buffer pointer for block transfer, got:\n{}",
+        cpp
+    );
+    // Block transfer: ring buffer read uses base buffer pointer
+    assert!(
+        cpp.contains("_ringbuf_sig.read(0, _e"),
+        "reader should use base buffer pointer for block transfer, got:\n{}",
+        cpp
+    );
+    // Verify no per-firing pointer offsets on ring buffer ops
+    assert!(
+        !cpp.contains("_ringbuf_sig.write(&_"),
+        "writer should NOT use per-firing pointer offset, got:\n{}",
         cpp
     );
     assert!(
-        cpp.contains("_ringbuf_sig.read(0, &_"),
-        "reader should advance pointer with per-firing offset, got:\n{}",
+        !cpp.contains("_ringbuf_sig.read(0, &_"),
+        "reader should NOT use per-firing pointer offset, got:\n{}",
         cpp
     );
 }
@@ -1199,6 +1212,47 @@ fn overrun_policy_backlog() {
     assert_inline_compiles(
         "set overrun = backlog\nclock 1kHz t { constant(0.0) | stdout() }",
         "overrun_backlog",
+    );
+}
+
+// ── v0.3.1 regression smoke tests ─────────────────────────────────────────
+
+#[test]
+fn fir_span_inference_compiles() {
+    assert_inline_compiles(
+        "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\nclock 1kHz t { constant(0.0) | fir(coeff) | stdout() }",
+        "fir_span_inference",
+    );
+}
+
+#[test]
+fn fir_span_after_fft_compiles() {
+    assert_inline_compiles(
+        concat!(
+            "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
+            "clock 1kHz t { constant(0.0) | fft(256) | c2r() | fir(coeff) | stdout() }",
+        ),
+        "fir_span_after_fft",
+    );
+}
+
+#[test]
+fn shared_buffer_block_transfer_compiles() {
+    assert_inline_compiles(
+        concat!(
+            "set mem = 64MB\n",
+            "clock 1kHz a { constant(0.0) | fft(256) | c2r() -> sig }\n",
+            "clock 1kHz b { @sig | decimate(256) | stdout() }\n",
+        ),
+        "shared_buffer_block_transfer",
+    );
+}
+
+#[test]
+fn actor_hoisting_compiles() {
+    assert_inline_compiles(
+        "clock 1kHz t { constant(0.0) | fft(256) | c2r() | stdout() }",
+        "actor_hoisting",
     );
 }
 

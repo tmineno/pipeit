@@ -650,6 +650,16 @@ impl<'a> CodegenCtx<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Check if an actor's constructor params are all loop-invariant.
+    /// If true, the actor can be constructed once before the repetition loop.
+    fn is_actor_hoistable(&self, args: &[Arg]) -> bool {
+        args.iter().all(|arg| match arg {
+            Arg::Value(_) | Arg::ConstRef(_) | Arg::ParamRef(_) => true,
+            Arg::TapRef(_) => false,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn emit_firing(
         &mut self,
         task_name: &str,
@@ -661,13 +671,81 @@ impl<'a> CodegenCtx<'a> {
         indent: &str,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
     ) {
-        // Fork/Probe are zero-copy passthrough nodes — no loop needed
+        // Fork/Probe are zero-copy passthrough nodes — no loop needed.
+        // BufferRead/BufferWrite perform block ring-buffer transfers outside the
+        // repetition loop for better throughput.
         let is_passthrough = matches!(node.kind, NodeKind::Fork { .. } | NodeKind::Probe { .. });
+        let is_buffer_io = matches!(
+            node.kind,
+            NodeKind::BufferRead { .. } | NodeKind::BufferWrite { .. }
+        );
 
         let rep = entry.repetition_count;
-        let use_loop = rep > 1 && !is_passthrough;
+        let use_loop = rep > 1 && !is_passthrough && !is_buffer_io;
         let inner_indent;
         let ind;
+
+        // Actor construction hoisting: for hoistable actors with rep > 1,
+        // declare the actor once before the loop to avoid repeated construction.
+        let hoisted_actor_var: Option<String> = if use_loop {
+            if let NodeKind::Actor {
+                name,
+                call_span,
+                args,
+                shape_constraint,
+            } = &node.kind
+            {
+                if self.is_actor_hoistable(args) {
+                    if let Some(meta) =
+                        lookup_actor_in(self.lowered, self.registry, name, *call_span)
+                    {
+                        let effective_sc = shape_constraint
+                            .as_ref()
+                            .or_else(|| self.analysis.inferred_shapes.get(&node.id));
+                        let schedule_dim_overrides = self.build_schedule_dim_overrides(
+                            meta,
+                            args,
+                            effective_sc,
+                            sched,
+                            node.id,
+                            sub,
+                        );
+                        let params = self.format_actor_params(
+                            task_name,
+                            meta,
+                            args,
+                            effective_sc,
+                            &schedule_dim_overrides,
+                            node.id,
+                        );
+                        let cpp_name = self.actor_cpp_name(name, *call_span);
+                        let var_name = format!("_actor_{}", node.id.0);
+                        if params.is_empty() {
+                            let _ = writeln!(
+                                self.out,
+                                "{}auto {} = {}{{}};",
+                                indent, var_name, cpp_name
+                            );
+                        } else {
+                            let _ = writeln!(
+                                self.out,
+                                "{}auto {} = {}{{{}}};",
+                                indent, var_name, cpp_name, params
+                            );
+                        }
+                        Some(var_name)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         if use_loop {
             let _ = writeln!(
@@ -703,6 +781,7 @@ impl<'a> CodegenCtx<'a> {
                     effective_sc,
                     ind,
                     edge_bufs,
+                    hoisted_actor_var.as_deref(),
                 );
             }
             NodeKind::Fork { .. } => {
@@ -747,6 +826,7 @@ impl<'a> CodegenCtx<'a> {
         shape_constraint: Option<&ShapeConstraint>,
         indent: &str,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
+        hoisted_var: Option<&str>,
     ) {
         let meta = match lookup_actor_in(self.lowered, self.registry, actor_name, call_span) {
             Some(m) => m,
@@ -862,21 +942,27 @@ impl<'a> CodegenCtx<'a> {
             self.build_schedule_dim_overrides(meta, args, shape_constraint, sched, node.id, sub);
 
         // Construct actor and fire, check return value
-        let params = self.format_actor_params(
-            task_name,
-            meta,
-            args,
-            shape_constraint,
-            &schedule_dim_overrides,
-        );
-        let cpp_name = self.actor_cpp_name(actor_name, call_span);
-        let call = if params.is_empty() {
-            format!("{}{{}}({}, {})", cpp_name, in_ptr, out_ptr)
+        let call = if let Some(var_name) = hoisted_var {
+            // Actor was hoisted before the loop — just call operator()
+            format!("{}.operator()({}, {})", var_name, in_ptr, out_ptr)
         } else {
-            format!(
-                "{}{{{}}}.operator()({}, {})",
-                cpp_name, params, in_ptr, out_ptr
-            )
+            let params = self.format_actor_params(
+                task_name,
+                meta,
+                args,
+                shape_constraint,
+                &schedule_dim_overrides,
+                node.id,
+            );
+            let cpp_name = self.actor_cpp_name(actor_name, call_span);
+            if params.is_empty() {
+                format!("{}{{}}({}, {})", cpp_name, in_ptr, out_ptr)
+            } else {
+                format!(
+                    "{}{{{}}}.operator()({}, {})",
+                    cpp_name, params, in_ptr, out_ptr
+                )
+            }
         };
         let _ = writeln!(self.out, "{}if ({} != ACTOR_OK) {{", indent, call);
         let _ = writeln!(
@@ -967,19 +1053,13 @@ impl<'a> CodegenCtx<'a> {
         indent: &str,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
     ) {
-        // Read from inter-task ring buffer into outgoing edge buffer
+        // Read from inter-task ring buffer into outgoing edge buffer.
+        // Uses block transfer (total_tokens at once) for throughput.
         let outgoing: Vec<&Edge> = sub.edges.iter().filter(|e| e.source == node.id).collect();
 
         if let Some(out_edge) = outgoing.first() {
             if let Some(dst_buf) = edge_bufs.get(&(out_edge.source, out_edge.target)) {
-                let rep = self.firing_repetition(sched, node.id).max(1);
                 let total_tokens = self.edge_buffer_tokens(sched, out_edge.source, out_edge.target);
-                let per_firing_tokens = (total_tokens / rep).max(1);
-                let dst_expr = if rep > 1 {
-                    format!("&{}[_r * {}]", dst_buf, per_firing_tokens)
-                } else {
-                    dst_buf.clone()
-                };
                 let reader_idx = self
                     .reader_index_for_task(buffer_name, task_name)
                     .unwrap_or(0);
@@ -992,7 +1072,7 @@ impl<'a> CodegenCtx<'a> {
                 let _ = writeln!(
                     self.out,
                     "{}    if (!_ringbuf_{}.read({}, {}, {})) {{",
-                    indent, buffer_name, reader_idx, dst_expr, per_firing_tokens
+                    indent, buffer_name, reader_idx, dst_buf, total_tokens
                 );
                 let _ = writeln!(
                     self.out,
@@ -1012,7 +1092,7 @@ impl<'a> CodegenCtx<'a> {
                 let _ = writeln!(
                     self.out,
                     "{}        std::fprintf(stderr, \"runtime error: task '{}' failed to read {} token(s) from shared buffer '{}'\\n\");",
-                    indent, task_name, per_firing_tokens, buffer_name
+                    indent, task_name, total_tokens, buffer_name
                 );
                 let _ = writeln!(
                     self.out,
@@ -1038,19 +1118,13 @@ impl<'a> CodegenCtx<'a> {
         indent: &str,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
     ) {
-        // Write from incoming edge buffer to inter-task ring buffer
+        // Write from incoming edge buffer to inter-task ring buffer.
+        // Uses block transfer (total_tokens at once) for throughput.
         let incoming: Vec<&Edge> = sub.edges.iter().filter(|e| e.target == node.id).collect();
 
         if let Some(in_edge) = incoming.first() {
             if let Some(src_buf) = edge_bufs.get(&(in_edge.source, in_edge.target)) {
-                let rep = self.firing_repetition(sched, node.id).max(1);
                 let total_tokens = self.edge_buffer_tokens(sched, in_edge.source, in_edge.target);
-                let per_firing_tokens = (total_tokens / rep).max(1);
-                let src_expr = if rep > 1 {
-                    format!("&{}[_r * {}]", src_buf, per_firing_tokens)
-                } else {
-                    src_buf.clone()
-                };
                 let _ = writeln!(
                     self.out,
                     "{}int _rb_retry_{}_{} = 0;",
@@ -1060,7 +1134,7 @@ impl<'a> CodegenCtx<'a> {
                 let _ = writeln!(
                     self.out,
                     "{}    if (!_ringbuf_{}.write({}, {})) {{",
-                    indent, buffer_name, src_expr, per_firing_tokens
+                    indent, buffer_name, src_buf, total_tokens
                 );
                 let _ = writeln!(
                     self.out,
@@ -1080,7 +1154,7 @@ impl<'a> CodegenCtx<'a> {
                 let _ = writeln!(
                     self.out,
                     "{}        std::fprintf(stderr, \"runtime error: task '{}' failed to write {} token(s) to shared buffer '{}'\\n\");",
-                    indent, task_name, per_firing_tokens, buffer_name
+                    indent, task_name, total_tokens, buffer_name
                 );
                 let _ = writeln!(
                     self.out,
@@ -1830,6 +1904,7 @@ impl<'a> CodegenCtx<'a> {
         args: &[Arg],
         shape_constraint: Option<&ShapeConstraint>,
         schedule_dim_overrides: &HashMap<String, u32>,
+        node_id: NodeId,
     ) -> String {
         let mut parts = Vec::new();
         // Track const array args used for count params so they can auto-fill span params.
@@ -1858,10 +1933,17 @@ impl<'a> CodegenCtx<'a> {
                 }
             } else if param.kind == ParamKind::Param {
                 // No arg at this index — try to infer dimension param from shape constraint,
-                // then from span args, then from schedule-resolved edge buffer sizes
+                // then from span args, then from analysis-recorded span-derived dims,
+                // then from schedule-resolved edge buffer sizes
                 if let Some(val) = self
                     .resolve_dim_param_from_shape(&param.name, meta, shape_constraint)
                     .or_else(|| self.infer_dim_param_from_span_args(&param.name, meta, args))
+                    .or_else(|| {
+                        self.analysis
+                            .span_derived_dims
+                            .get(&(node_id, param.name.clone()))
+                            .copied()
+                    })
                     .or_else(|| schedule_dim_overrides.get(&param.name).copied())
                 {
                     parts.push(val.to_string());
@@ -2235,6 +2317,14 @@ impl<'a> CodegenCtx<'a> {
                 {
                     continue;
                 }
+                // Skip if authoritatively recorded in analysis
+                if self
+                    .analysis
+                    .span_derived_dims
+                    .contains_key(&(node_id, sym.clone()))
+                {
+                    continue;
+                }
                 // Also skip if there's an explicit arg for this param
                 if let Some(idx) = meta.params.iter().position(|p| p.name == *sym) {
                     if args.get(idx).is_some() {
@@ -2261,6 +2351,14 @@ impl<'a> CodegenCtx<'a> {
                     .resolve_dim_param_from_shape(sym, meta, shape_constraint)
                     .or_else(|| self.infer_dim_param_from_span_args(sym, meta, args))
                     .is_some()
+                {
+                    continue;
+                }
+                // Skip if authoritatively recorded in analysis
+                if self
+                    .analysis
+                    .span_derived_dims
+                    .contains_key(&(node_id, sym.clone()))
                 {
                     continue;
                 }
@@ -3137,6 +3235,93 @@ mod tests {
         assert!(
             !cpp.contains("Actor_constant<"),
             "non-polymorphic actor should not have template syntax"
+        );
+    }
+
+    // ── v0.3.1 regression tests ─────────────────────────────────────────
+
+    #[test]
+    fn fir_span_derived_param_in_codegen() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\nclock 1kHz t { constant(0.0) | fir(coeff) | stdout() }",
+            &reg,
+        );
+        // fir actor constructor should have N=5 from span-derived dim
+        assert!(
+            cpp.contains(", 5}"),
+            "fir actor should have N=5 from span-derived dim, got:\n{}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn fir_span_derived_not_overridden_by_edge_inference() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            concat!(
+                "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
+                "clock 1kHz t { constant(0.0) | fft(256) | c2r() | fir(coeff) | stdout() }",
+            ),
+            &reg,
+        );
+        // Even with fft(256) upstream producing 256 tokens, fir N should be 5
+        assert!(
+            cpp.contains("Actor_fir") && cpp.contains(", 5}"),
+            "fir should have N=5 even after fft(256)|c2r(), not 256, got:\n{}",
+            cpp
+        );
+        // fir's constructor should NOT contain 256 as its N param
+        assert!(
+            !cpp.contains("Actor_fir")
+                || !cpp.contains("Actor_fir<float>{std::span<const float>(_const_coeff, 5), 256}"),
+            "fir should NOT have N=256 from edge inference, got:\n{}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn shared_buffer_block_transfer() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            concat!(
+                "set mem = 64MB\n",
+                "clock 1kHz a { constant(0.0) -> sig }\n",
+                "clock 1kHz b { @sig | stdout() }\n",
+            ),
+            &reg,
+        );
+        // Ring buffer read/write should use base buffer pointer (no &buf[_r*N] offset)
+        assert!(
+            !cpp.contains("_ringbuf_sig.write(&_"),
+            "ring buffer write should NOT use per-firing pointer offset (block transfer), got:\n{}",
+            cpp
+        );
+        assert!(
+            !cpp.contains("_ringbuf_sig.read(0, &_"),
+            "ring buffer read should NOT use per-firing pointer offset (block transfer), got:\n{}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn actor_construction_hoisted_for_repetition() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            "clock 1kHz t { constant(0.0) | fft(256) | c2r() | stdout() }",
+            &reg,
+        );
+        // c2r has rep=256. Its actor should be hoisted before the _r loop.
+        assert!(
+            cpp.contains("auto _actor_"),
+            "hoistable actor with rep>1 should have pre-loop declaration, got:\n{}",
+            cpp
+        );
+        // The hoisted actor should be called via .operator() inside the loop
+        assert!(
+            cpp.contains("_actor_") && cpp.contains(".operator()("),
+            "hoisted actor should be called via .operator() inside the loop, got:\n{}",
+            cpp
         );
     }
 }
