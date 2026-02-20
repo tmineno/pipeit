@@ -145,36 +145,50 @@
 
 **Goal**: Improve end-to-end compile latency using profiler-guided optimization after v0.3.3 refactor.
 
-- [ ] **Phase 1: Measurement hardening**
-  - [x] Adopt `benches/compiler_bench_stable.sh` as the default local performance workflow
-  - [x] Add profiling notes doc for reproducible method + hotspot evidence (`doc/PROFILING_NOTES_v0.3.3.md`)
-  - [ ] Add CI job for pinned, sequential A/B compiler KPI runs (`--save-baseline/--baseline`)
-  - [ ] Store baseline artifact/report for `kpi/full_compile_latency/*` and `kpi/phase_latency/*`
-
-- [ ] **Phase 2: Type inference allocation/clone reduction (profile-priority)**
-  - [ ] Remove or minimize `ActorMeta` cloning in `type_infer` hot paths
-  - [ ] Add cache for `get_effective_meta` / monomorphized meta lookup
-  - [ ] Reduce String/HashMap churn in monomorphization keys (prefer reused keys/interned forms)
-
-- [ ] **Phase 3: Registry + header loading costs**
-  - [ ] Cache parsed header metadata across repeated invocations (hash-keyed)
-  - [ ] Avoid redundant overlay work when include-set + header hashes are unchanged
-  - [ ] Re-benchmark repeated single-file compiles (`simple`, `multitask`, `modal`) after cache changes
-
-- [ ] **Phase 4: Remaining compiler hotspots**
+- [ ] **Priority 1 / Phase 4: Remaining compiler hotspots** (high benefit, low-medium complexity)
   - [x] Reduce complexity/duplication in:
     - [x] `compiler/src/analyze.rs`: `check_dim_source_conflicts`
     - [x] `compiler/src/codegen.rs`: `format_actor_params`
     - [x] `compiler/src/codegen.rs`: `build_schedule_dim_overrides`
-  - [ ] `compiler/src/analyze.rs`: optimize `record_span_derived_dims` (dedup/indexing/allocation reduction)
   - [ ] `compiler/src/codegen.rs`: optimize `param_cpp_type` and literal/type conversion helpers
+  - [ ] `compiler/src/analyze.rs`: optimize `record_span_derived_dims` (dedup/indexing/allocation reduction)
   - [ ] Re-profile to confirm hotspot migration after each optimization phase
 
-- [ ] **Exit Criteria**
+- [ ] **Priority 2 / Phase 2: Type inference allocation/clone reduction (profile-priority)** (high criticality, medium complexity)
+  - [ ] Remove or minimize remaining `ActorMeta` cloning in `type_infer` hot paths (monomorphization/result materialization path)
+  - [x] Add cache for `get_effective_meta` / monomorphized meta lookup
+  - [ ] Reduce String/HashMap churn in monomorphization keys (prefer reused keys/interned forms)
+
+- [ ] **Priority 3 / Phase 3: Registry + header loading costs** (high benefit for repeated compile workflows, medium-high complexity)
+  - [ ] Cache parsed header metadata across repeated invocations (hash-keyed)
+  - [ ] Avoid redundant overlay work when include-set + header hashes are unchanged
+  - [ ] Re-benchmark repeated single-file compiles (`simple`, `multitask`, `modal`) after cache changes
+
+- [ ] **Priority 4 / Exit Criteria validation**
   - [ ] `kpi/full_compile_latency/complex` median improved by >= 5% vs v0.3.3 baseline
   - [ ] `kpi/full_compile_latency/modal` median improved by >= 5% vs v0.3.3 baseline
-  - [ ] No statistically significant regressions in analyze/codegen phase KPIs
+  - [ ] No statistically significant regressions in analyze/codegen phase KPIs (using CI `compiler-perf-ab` trend)
   - [ ] No correctness regressions (all unit/integration/runtime tests pass)
+
+- [ ] **Priority 5 / Phase 6: Deferred - task-internal branch parallelization study** (intentionally after single-thread wins)
+  - [ ] Define safety gate for parallel branches (side-effect-free + thread-safe actors only)
+  - [ ] Add actor metadata/annotation strategy for effect/thread-safety classification
+  - [ ] Specify deterministic behavior policy for sinks/probes/shared-buffer boundaries
+  - [ ] Prototype runtime-context propagation (`iteration_index`, `task_rate_hz`) for branch workers
+  - [ ] Only enable after benchmarked speedup and regression-free correctness validation
+
+- [x] **Completed in v0.3.4**
+  - [x] **Phase 1: Measurement hardening**
+  - [x] Adopt `benches/compiler_bench_stable.sh` as the default local performance workflow
+  - [x] Add profiling notes doc for reproducible method + hotspot evidence (`doc/PROFILING_NOTES_v0.3.3.md`)
+  - [x] Add CI job for pinned, sequential A/B compiler KPI runs (`--save-baseline/--baseline`)
+  - [x] Store baseline artifact/report for compiler KPI A/B run in CI (`compiler-perf-ab`)
+  - [x] **Phase 5: Intra-task branch optimization (safe-first)**
+  - [x] Extend loop fusion to treat `Fork/Probe` as transparent for same-`_r` actor chains
+  - [x] Fuse patterns like `fft -> fork -> c2r` / `fft -> fork -> mag` in a single `_r`-granularity schedule
+  - [x] Keep task-internal execution single-threaded in this phase (no branch threading yet)
+  - [x] Add codegen tests to lock correctness (FIFO/order/error behavior unchanged)
+  - [x] Confirmed `static` edge-buffer declarations inside `_k` loop are not a runtime allocation bottleneck; declaration-hoist is readability-first and de-prioritized
 
 ---
 

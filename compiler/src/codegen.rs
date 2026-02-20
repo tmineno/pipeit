@@ -106,6 +106,14 @@ struct ActorCallPlan {
     call_expr: String,
 }
 
+#[derive(Debug, Clone)]
+struct FusionCandidate {
+    start_idx: usize,
+    end_idx: usize,
+    rep: u32,
+    node_ids: Vec<NodeId>,
+}
+
 impl<'a> CodegenCtx<'a> {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -159,6 +167,18 @@ impl<'a> CodegenCtx<'a> {
         self.subgraph_index(sub)
             .and_then(|idx| idx.first_incoming_edge(sub, id))
             .or_else(|| sub.edges.iter().find(|e| e.target == id))
+    }
+
+    fn incoming_edge_count_in_subgraph(&self, sub: &Subgraph, id: NodeId) -> usize {
+        self.subgraph_index(sub)
+            .map(|idx| idx.incoming_count(id))
+            .unwrap_or_else(|| sub.edges.iter().filter(|e| e.target == id).count())
+    }
+
+    fn outgoing_edge_count_in_subgraph(&self, sub: &Subgraph, id: NodeId) -> usize {
+        self.subgraph_index(sub)
+            .map(|idx| idx.outgoing_count(id))
+            .unwrap_or_else(|| sub.edges.iter().filter(|e| e.source == id).count())
     }
 
     /// Format the C++ actor struct name, including template parameters for
@@ -414,8 +434,20 @@ impl<'a> CodegenCtx<'a> {
         self.out.push_str("        _timer.wait();\n");
 
         let policy = self.emit_task_overrun_policy(task_name);
+        let tick_hoisted_actors = self.emit_tick_hoisted_actor_declarations(
+            task_name,
+            task_graph,
+            &meta.schedule,
+            "        ",
+        );
         let indent = self.emit_task_iteration_setup(task_name, task_graph, meta.k_factor);
-        self.emit_task_schedule_dispatch(task_name, task_graph, &meta.schedule, indent);
+        self.emit_task_schedule_dispatch(
+            task_name,
+            task_graph,
+            &meta.schedule,
+            indent,
+            &tick_hoisted_actors,
+        );
 
         if meta.k_factor > 1 {
             self.out.push_str("        }\n");
@@ -425,6 +457,74 @@ impl<'a> CodegenCtx<'a> {
         }
         self.out.push_str("    }\n");
         self.out.push_str("}\n\n");
+    }
+
+    fn emit_tick_hoisted_actor_declarations(
+        &mut self,
+        task_name: &str,
+        task_graph: &TaskGraph,
+        schedule: &TaskSchedule,
+        indent: &str,
+    ) -> HashMap<NodeId, String> {
+        let mut hoisted = HashMap::new();
+        match (task_graph, schedule) {
+            (TaskGraph::Pipeline(sub), TaskSchedule::Pipeline(sched)) => {
+                self.emit_tick_hoisted_for_subgraph(task_name, sub, sched, indent, &mut hoisted);
+            }
+            (
+                TaskGraph::Modal { control, modes },
+                TaskSchedule::Modal {
+                    control: ctrl_sched,
+                    modes: mode_scheds,
+                },
+            ) => {
+                self.emit_tick_hoisted_for_subgraph(
+                    task_name,
+                    control,
+                    ctrl_sched,
+                    indent,
+                    &mut hoisted,
+                );
+                for (mode_name, mode_sched) in mode_scheds {
+                    let mode_sub = modes.iter().find(|(name, _)| name == mode_name);
+                    if let Some((_, sub)) = mode_sub {
+                        self.emit_tick_hoisted_for_subgraph(
+                            task_name,
+                            sub,
+                            mode_sched,
+                            indent,
+                            &mut hoisted,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+        hoisted
+    }
+
+    fn emit_tick_hoisted_for_subgraph(
+        &mut self,
+        task_name: &str,
+        sub: &Subgraph,
+        sched: &SubgraphSchedule,
+        indent: &str,
+        hoisted: &mut HashMap<NodeId, String>,
+    ) {
+        for entry in &sched.firings {
+            if hoisted.contains_key(&entry.node_id) {
+                continue;
+            }
+            let Some(node) = self.node_in_subgraph(sub, entry.node_id) else {
+                continue;
+            };
+            let Some(var_name) = self
+                .maybe_emit_hoisted_actor_declaration(task_name, sub, sched, node, indent, false)
+            else {
+                continue;
+            };
+            hoisted.insert(node.id, var_name);
+        }
     }
 
     fn emit_task_prologue(&mut self, task_name: &str, meta: &TaskMeta, task_graph: &TaskGraph) {
@@ -521,13 +621,21 @@ impl<'a> CodegenCtx<'a> {
         task_graph: &TaskGraph,
         schedule: &TaskSchedule,
         indent: &str,
+        tick_hoisted_actors: &HashMap<NodeId, String>,
     ) {
         match schedule {
             TaskSchedule::Pipeline(sched) => {
                 let TaskGraph::Pipeline(sub) = task_graph else {
                     return;
                 };
-                self.emit_subgraph_firings(task_name, "pipeline", sub, sched, indent);
+                self.emit_subgraph_firings(
+                    task_name,
+                    "pipeline",
+                    sub,
+                    sched,
+                    indent,
+                    tick_hoisted_actors,
+                );
             }
             TaskSchedule::Modal { control, modes } => {
                 let TaskGraph::Modal {
@@ -539,7 +647,14 @@ impl<'a> CodegenCtx<'a> {
                 };
 
                 let _ = writeln!(self.out, "{}// Control subgraph", indent);
-                self.emit_subgraph_firings(task_name, "control", ctrl_sub, control, indent);
+                self.emit_subgraph_firings(
+                    task_name,
+                    "control",
+                    ctrl_sub,
+                    control,
+                    indent,
+                    tick_hoisted_actors,
+                );
 
                 self.emit_ctrl_source_read(task_name, ctrl_sub, indent);
                 let _ = writeln!(
@@ -567,6 +682,7 @@ impl<'a> CodegenCtx<'a> {
                             sub,
                             mode_sched,
                             &format!("{}    ", indent),
+                            tick_hoisted_actors,
                         );
                     }
                     let _ = writeln!(self.out, "{}    break;", indent);
@@ -587,20 +703,259 @@ impl<'a> CodegenCtx<'a> {
         sub: &Subgraph,
         sched: &SubgraphSchedule,
         indent: &str,
+        tick_hoisted_actors: &HashMap<NodeId, String>,
     ) {
         // Declare intra-task edge buffers
         let edge_bufs = self.declare_edge_buffers(task_name, label, sub, sched, indent);
 
-        // Emit each firing in topological order
-        for entry in &sched.firings {
+        let fusion_by_start = self.plan_fusion_candidates(task_name, sub, sched);
+        let mut idx = 0usize;
+        while idx < sched.firings.len() {
+            if let Some(candidate) = fusion_by_start.get(&idx) {
+                if self.emit_fused_actor_chain(
+                    task_name,
+                    sub,
+                    sched,
+                    candidate,
+                    indent,
+                    &edge_bufs,
+                    tick_hoisted_actors,
+                ) {
+                    idx = candidate.end_idx + 1;
+                    continue;
+                }
+            }
+
+            let entry = &sched.firings[idx];
             let node = match self.node_in_subgraph(sub, entry.node_id) {
                 Some(n) => n,
-                None => continue,
+                None => {
+                    idx += 1;
+                    continue;
+                }
             };
             self.emit_firing(
-                task_name, label, sub, sched, node, entry, indent, &edge_bufs,
+                task_name,
+                label,
+                sub,
+                sched,
+                node,
+                entry,
+                indent,
+                &edge_bufs,
+                tick_hoisted_actors,
             );
+            idx += 1;
         }
+    }
+
+    fn plan_fusion_candidates(
+        &self,
+        task_name: &str,
+        sub: &Subgraph,
+        sched: &SubgraphSchedule,
+    ) -> HashMap<usize, FusionCandidate> {
+        let mut fused = HashMap::new();
+        if sched.firings.len() < 2 {
+            return fused;
+        }
+        let back_edges = self.identify_back_edges(task_name, sub);
+
+        let mut i = 0usize;
+        while i + 1 < sched.firings.len() {
+            let start = i;
+            let start_entry = &sched.firings[start];
+            let rep = start_entry.repetition_count;
+            if rep <= 1 || !self.is_fusion_entry_eligible(sub, start_entry, &back_edges) {
+                i += 1;
+                continue;
+            }
+
+            let mut end = i;
+            let mut node_ids = vec![start_entry.node_id];
+            let mut chain_node_ids: HashSet<NodeId> = HashSet::from([start_entry.node_id]);
+
+            while end + 1 < sched.firings.len() {
+                let next = &sched.firings[end + 1];
+                if !self.can_append_to_fusion_chain(sub, rep, next, &chain_node_ids, &back_edges) {
+                    break;
+                }
+                end += 1;
+                node_ids.push(next.node_id);
+                chain_node_ids.insert(next.node_id);
+            }
+
+            if node_ids.len() > 1 {
+                fused.insert(
+                    start,
+                    FusionCandidate {
+                        start_idx: start,
+                        end_idx: end,
+                        rep,
+                        node_ids,
+                    },
+                );
+                i = end + 1;
+            } else {
+                i += 1;
+            }
+        }
+
+        fused
+    }
+
+    fn is_fusion_entry_eligible(
+        &self,
+        sub: &Subgraph,
+        entry: &FiringEntry,
+        back_edges: &HashSet<(NodeId, NodeId)>,
+    ) -> bool {
+        let Some(node) = self.node_in_subgraph(sub, entry.node_id) else {
+            return false;
+        };
+
+        if back_edges
+            .iter()
+            .any(|(src, tgt)| *src == entry.node_id || *tgt == entry.node_id)
+        {
+            return false;
+        }
+
+        match &node.kind {
+            NodeKind::Actor { args, .. } => {
+                if args.iter().any(|arg| matches!(arg, Arg::TapRef(_))) {
+                    return false;
+                }
+                let in_deg = self.incoming_edge_count_in_subgraph(sub, entry.node_id);
+                let out_deg = self.outgoing_edge_count_in_subgraph(sub, entry.node_id);
+                in_deg <= 1 && out_deg == 1
+            }
+            NodeKind::Fork { .. } | NodeKind::Probe { .. } => true,
+            _ => false,
+        }
+    }
+
+    fn can_append_to_fusion_chain(
+        &self,
+        sub: &Subgraph,
+        rep: u32,
+        next: &FiringEntry,
+        chain_node_ids: &HashSet<NodeId>,
+        back_edges: &HashSet<(NodeId, NodeId)>,
+    ) -> bool {
+        if chain_node_ids.contains(&next.node_id) {
+            return false;
+        }
+        let Some(next_node) = self.node_in_subgraph(sub, next.node_id) else {
+            return false;
+        };
+        let rep_compatible = match &next_node.kind {
+            NodeKind::Actor { .. } => next.repetition_count == rep,
+            NodeKind::Fork { .. } | NodeKind::Probe { .. } => true,
+            _ => false,
+        };
+        if !rep_compatible {
+            return false;
+        }
+        if !self.is_fusion_entry_eligible(sub, next, back_edges) {
+            return false;
+        }
+
+        sub.edges
+            .iter()
+            .any(|e| e.target == next.node_id && chain_node_ids.contains(&e.source))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_fused_actor_chain(
+        &mut self,
+        task_name: &str,
+        sub: &Subgraph,
+        sched: &SubgraphSchedule,
+        candidate: &FusionCandidate,
+        indent: &str,
+        edge_bufs: &HashMap<(NodeId, NodeId), String>,
+        tick_hoisted_actors: &HashMap<NodeId, String>,
+    ) -> bool {
+        if candidate.start_idx >= sched.firings.len()
+            || candidate.end_idx >= sched.firings.len()
+            || candidate.start_idx >= candidate.end_idx
+        {
+            return false;
+        }
+
+        if !candidate.node_ids.iter().all(|&nid| {
+            matches!(
+                self.node_in_subgraph(sub, nid).map(|n| &n.kind),
+                Some(NodeKind::Actor { .. } | NodeKind::Fork { .. } | NodeKind::Probe { .. })
+            )
+        }) {
+            return false;
+        }
+
+        let mut hoisted_vars: HashMap<NodeId, String> = HashMap::new();
+        for &node_id in &candidate.node_ids {
+            let Some(node) = self.node_in_subgraph(sub, node_id) else {
+                return false;
+            };
+            if !matches!(node.kind, NodeKind::Actor { .. }) {
+                continue;
+            }
+            if let Some(var_name) = tick_hoisted_actors.get(&node_id) {
+                hoisted_vars.insert(node_id, var_name.clone());
+                continue;
+            }
+            if let Some(var_name) =
+                self.maybe_emit_hoisted_actor_declaration(task_name, sub, sched, node, indent, true)
+            {
+                hoisted_vars.insert(node_id, var_name);
+            }
+        }
+
+        for &node_id in &candidate.node_ids {
+            let Some(node) = self.node_in_subgraph(sub, node_id) else {
+                return false;
+            };
+            if matches!(node.kind, NodeKind::Fork { .. }) {
+                self.emit_fork(sub, sched, node, indent, edge_bufs);
+            }
+        }
+
+        let _ = writeln!(
+            self.out,
+            "{}for (int _r = 0; _r < {}; ++_r) {{",
+            indent, candidate.rep
+        );
+        let body_indent = format!("{}    ", indent);
+        for &node_id in &candidate.node_ids {
+            let Some(node) = self.node_in_subgraph(sub, node_id) else {
+                return false;
+            };
+            match &node.kind {
+                NodeKind::Actor { .. } => self.emit_actor_body_in_existing_r_loop(
+                    task_name,
+                    sub,
+                    sched,
+                    node,
+                    body_indent.as_str(),
+                    edge_bufs,
+                    hoisted_vars.get(&node_id).map(String::as_str),
+                ),
+                NodeKind::Fork { .. } => {}
+                NodeKind::Probe { probe_name } => self.emit_probe_in_existing_r_loop(
+                    sub,
+                    sched,
+                    node,
+                    candidate.rep,
+                    probe_name,
+                    body_indent.as_str(),
+                    edge_bufs,
+                ),
+                _ => return false,
+            }
+        }
+        let _ = writeln!(self.out, "{}}}", indent);
+        true
     }
 
     fn declare_edge_buffers(
@@ -703,9 +1058,10 @@ impl<'a> CodegenCtx<'a> {
     #[allow(clippy::too_many_arguments)]
     /// Check if an actor's constructor params are all loop-invariant.
     /// If true, the actor can be constructed once before the repetition loop.
-    fn is_actor_hoistable(&self, args: &[Arg]) -> bool {
+    fn is_actor_hoistable(&self, args: &[Arg], allow_param_ref: bool) -> bool {
         args.iter().all(|arg| match arg {
-            Arg::Value(_) | Arg::ConstRef(_) | Arg::ParamRef(_) => true,
+            Arg::Value(_) | Arg::ConstRef(_) => true,
+            Arg::ParamRef(_) => allow_param_ref,
             Arg::TapRef(_) => false,
         })
     }
@@ -721,35 +1077,29 @@ impl<'a> CodegenCtx<'a> {
         entry: &FiringEntry,
         indent: &str,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
+        tick_hoisted_actors: &HashMap<NodeId, String>,
     ) {
-        let plan = self.plan_firing(task_name, sub, sched, node, entry, indent);
+        let plan = self.plan_firing(
+            task_name,
+            sub,
+            sched,
+            node,
+            entry,
+            indent,
+            tick_hoisted_actors,
+        );
         let ind = plan.body_indent.as_str();
 
         match &node.kind {
-            NodeKind::Actor {
-                name,
-                call_span,
-                args,
-                shape_constraint,
-            } => {
-                // Use explicit shape constraint, or inferred from analysis
-                let effective_sc = shape_constraint
-                    .as_ref()
-                    .or_else(|| self.analysis.inferred_shapes.get(&node.id));
-                self.emit_actor_firing(
-                    task_name,
-                    sub,
-                    sched,
-                    node,
-                    name,
-                    *call_span,
-                    args,
-                    effective_sc,
-                    ind,
-                    edge_bufs,
-                    plan.hoisted_actor_var.as_deref(),
-                );
-            }
+            NodeKind::Actor { .. } => self.emit_actor_body_in_existing_r_loop(
+                task_name,
+                sub,
+                sched,
+                node,
+                ind,
+                edge_bufs,
+                plan.hoisted_actor_var.as_deref(),
+            ),
             NodeKind::Fork { .. } => {
                 self.emit_fork(sub, sched, node, ind, edge_bufs);
             }
@@ -779,6 +1129,45 @@ impl<'a> CodegenCtx<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn emit_actor_body_in_existing_r_loop(
+        &mut self,
+        task_name: &str,
+        sub: &Subgraph,
+        sched: &SubgraphSchedule,
+        node: &Node,
+        indent: &str,
+        edge_bufs: &HashMap<(NodeId, NodeId), String>,
+        hoisted_var: Option<&str>,
+    ) {
+        let NodeKind::Actor {
+            name,
+            call_span,
+            args,
+            shape_constraint,
+        } = &node.kind
+        else {
+            return;
+        };
+
+        let effective_sc = shape_constraint
+            .as_ref()
+            .or_else(|| self.analysis.inferred_shapes.get(&node.id));
+        self.emit_actor_firing(
+            task_name,
+            sub,
+            sched,
+            node,
+            name,
+            *call_span,
+            args,
+            effective_sc,
+            indent,
+            edge_bufs,
+            hoisted_var,
+        );
+    }
+
     fn should_use_firing_loop(&self, node: &Node, rep: u32) -> bool {
         // Fork/Probe are zero-copy passthrough nodes; buffer I/O already performs
         // block transfers, so these nodes do not benefit from per-firing loops.
@@ -798,10 +1187,13 @@ impl<'a> CodegenCtx<'a> {
         node: &Node,
         entry: &FiringEntry,
         indent: &str,
+        tick_hoisted_actors: &HashMap<NodeId, String>,
     ) -> FiringPlan {
         let use_loop = self.should_use_firing_loop(node, entry.repetition_count);
-        let hoisted_actor_var = if use_loop {
-            self.maybe_emit_hoisted_actor_declaration(task_name, sub, sched, node, indent)
+        let hoisted_actor_var = if let Some(var_name) = tick_hoisted_actors.get(&node.id) {
+            Some(var_name.clone())
+        } else if use_loop {
+            self.maybe_emit_hoisted_actor_declaration(task_name, sub, sched, node, indent, true)
         } else {
             None
         };
@@ -831,6 +1223,7 @@ impl<'a> CodegenCtx<'a> {
         sched: &SubgraphSchedule,
         node: &Node,
         indent: &str,
+        allow_param_ref: bool,
     ) -> Option<String> {
         let NodeKind::Actor {
             name,
@@ -841,7 +1234,7 @@ impl<'a> CodegenCtx<'a> {
         else {
             return None;
         };
-        if !self.is_actor_hoistable(args) {
+        if !self.is_actor_hoistable(args, allow_param_ref) {
             return None;
         }
 
@@ -1025,37 +1418,106 @@ impl<'a> CodegenCtx<'a> {
             return "nullptr".to_string();
         }
 
-        // Multi-input actor: concatenate into a local buffer.
-        let total_tokens: u32 = incoming_edges
-            .iter()
-            .map(|e| self.edge_buffer_tokens(sched, e.source, e.target))
-            .sum();
+        // Multi-input actor: concatenate each edge slice into a local buffer.
+        let rep = self.firing_repetition(sched, node.id);
+        let mut segments: Vec<(String, u32)> = Vec::with_capacity(incoming_edges.len());
+        for edge in incoming_edges {
+            let Some(buf_name) = edge_bufs.get(&(edge.source, edge.target)) else {
+                continue;
+            };
+            let total_tokens = self.edge_buffer_tokens(sched, edge.source, edge.target);
+            let tokens_per_firing = if rep > 1 {
+                total_tokens / rep
+            } else {
+                total_tokens
+            };
+            let src_expr = if rep > 1 {
+                format!("&{}[_r * {}]", buf_name, tokens_per_firing)
+            } else {
+                buf_name.clone()
+            };
+            segments.push((src_expr, tokens_per_firing));
+        }
+        if segments.is_empty() {
+            return "nullptr".to_string();
+        }
+
+        let total_tokens: u32 = segments.iter().map(|(_, n)| *n).sum();
         let effective_in = in_count.unwrap_or(total_tokens);
         let local_in = format!("_in_{}", node.id.0);
-        let _ = writeln!(
-            self.out,
-            "{}{} {}[{}];",
-            indent, in_cpp, local_in, effective_in
-        );
+        if total_tokens == effective_in {
+            let _ = writeln!(
+                self.out,
+                "{}{} {}[{}];",
+                indent, in_cpp, local_in, effective_in
+            );
+        } else {
+            // Keep deterministic behavior when inferred IN size diverges from edge slices.
+            let _ = writeln!(
+                self.out,
+                "{}{} {}[{}] = {{}};",
+                indent, in_cpp, local_in, effective_in
+            );
+        }
+
         let mut offset = 0u32;
-        let per_edge = effective_in / incoming_edges.len() as u32;
-        for edge in incoming_edges {
-            if let Some(buf_name) = edge_bufs.get(&(edge.source, edge.target)) {
-                let rep = self.firing_repetition(sched, node.id);
-                let src_expr = if rep > 1 {
-                    format!("&{}[_r * {}]", buf_name, per_edge)
-                } else {
-                    buf_name.clone()
-                };
+        for (src_expr, tokens) in segments {
+            if offset >= effective_in {
+                break;
+            }
+            let copy_tokens = tokens.min(effective_in - offset);
+            self.emit_compact_input_copy(
+                indent,
+                &local_in,
+                offset,
+                src_expr.as_str(),
+                copy_tokens,
+                in_cpp,
+            );
+            offset += copy_tokens;
+        }
+        local_in
+    }
+
+    fn emit_compact_input_copy(
+        &mut self,
+        indent: &str,
+        dst_buf: &str,
+        dst_offset: u32,
+        src_expr: &str,
+        tokens: u32,
+        cpp_type: &str,
+    ) {
+        match tokens {
+            0 => {}
+            1 => {
+                let _ = writeln!(
+                    self.out,
+                    "{}{}[{}] = ({})[0];",
+                    indent, dst_buf, dst_offset, src_expr
+                );
+            }
+            2..=4 => {
+                for i in 0..tokens {
+                    let _ = writeln!(
+                        self.out,
+                        "{}{}[{}] = ({})[{}];",
+                        indent,
+                        dst_buf,
+                        dst_offset + i,
+                        src_expr,
+                        i
+                    );
+                }
+            }
+            _ => {
                 let _ = writeln!(
                     self.out,
                     "{}std::memcpy(&{}[{}], {}, {} * sizeof({}));",
-                    indent, local_in, offset, src_expr, per_edge, in_cpp
+                    indent, dst_buf, dst_offset, src_expr, tokens, cpp_type
                 );
             }
-            offset += per_edge;
         }
-        local_in
     }
 
     fn build_actor_output_ptr(
@@ -1130,36 +1592,86 @@ impl<'a> CodegenCtx<'a> {
     ) {
         // Probe is a no-op for data flow: downstream shares the upstream buffer.
         // Observation hook emits actual data when probe is enabled (stripped in release).
-        if !self.options.release {
-            let incoming: Vec<&Edge> = sub.edges.iter().filter(|e| e.target == node.id).collect();
-            if let Some(in_edge) = incoming.first() {
-                if let Some(src_buf) = edge_bufs.get(&(in_edge.source, in_edge.target)) {
-                    let wire_type = self.infer_edge_wire_type(sub, in_edge.source);
-                    let cpp_type = pipit_type_to_cpp(wire_type);
-                    let count = self.edge_buffer_tokens(sched, in_edge.source, in_edge.target);
-                    let fmt_spec = match cpp_type {
-                        "float" | "double" => "%f",
-                        "int32_t" | "int16_t" | "int8_t" => "%d",
-                        _ => "%f", // cfloat/cdouble: print real part
-                    };
-                    let _ = writeln!(self.out, "{}#ifndef NDEBUG", indent);
-                    let _ = writeln!(self.out, "{}if (_probe_{}_enabled) {{", indent, probe_name);
-                    let _ = writeln!(
-                        self.out,
-                        "{}    for (int _pi = 0; _pi < {}; ++_pi)",
-                        indent, count
-                    );
-                    let _ = writeln!(
-                        self.out,
-                        "{}        fprintf(_probe_output_file, \"[probe:{}] {}\\n\", {}[_pi]);",
-                        indent, probe_name, fmt_spec, src_buf
-                    );
-                    let _ = writeln!(self.out, "{}    fflush(_probe_output_file);", indent);
-                    let _ = writeln!(self.out, "{}}}", indent);
-                    let _ = writeln!(self.out, "{}#endif", indent);
-                }
+        if self.options.release {
+            return;
+        }
+        let incoming: Vec<&Edge> = sub.edges.iter().filter(|e| e.target == node.id).collect();
+        if let Some(in_edge) = incoming.first() {
+            if let Some(src_buf) = edge_bufs.get(&(in_edge.source, in_edge.target)) {
+                let wire_type = self.infer_edge_wire_type(sub, in_edge.source);
+                let cpp_type = pipit_type_to_cpp(wire_type);
+                let count = self.edge_buffer_tokens(sched, in_edge.source, in_edge.target);
+                self.emit_probe_observation(probe_name, indent, src_buf.as_str(), count, cpp_type);
             }
         }
+    }
+
+    fn emit_probe_in_existing_r_loop(
+        &mut self,
+        sub: &Subgraph,
+        sched: &SubgraphSchedule,
+        node: &Node,
+        fused_rep: u32,
+        probe_name: &str,
+        indent: &str,
+        edge_bufs: &HashMap<(NodeId, NodeId), String>,
+    ) {
+        if self.options.release {
+            return;
+        }
+        let incoming: Vec<&Edge> = sub.edges.iter().filter(|e| e.target == node.id).collect();
+        if let Some(in_edge) = incoming.first() {
+            if let Some(src_buf) = edge_bufs.get(&(in_edge.source, in_edge.target)) {
+                let wire_type = self.infer_edge_wire_type(sub, in_edge.source);
+                let cpp_type = pipit_type_to_cpp(wire_type);
+                let total_tokens = self.edge_buffer_tokens(sched, in_edge.source, in_edge.target);
+                let rep = fused_rep.max(1);
+                let count = if rep > 1 {
+                    total_tokens / rep
+                } else {
+                    total_tokens
+                };
+                if count == 0 {
+                    return;
+                }
+                let src_expr = if rep > 1 {
+                    format!("&{}[_r * {}]", src_buf, count)
+                } else {
+                    src_buf.clone()
+                };
+                self.emit_probe_observation(probe_name, indent, &src_expr, count, cpp_type);
+            }
+        }
+    }
+
+    fn emit_probe_observation(
+        &mut self,
+        probe_name: &str,
+        indent: &str,
+        src_expr: &str,
+        count: u32,
+        cpp_type: &str,
+    ) {
+        let fmt_spec = match cpp_type {
+            "float" | "double" => "%f",
+            "int32_t" | "int16_t" | "int8_t" => "%d",
+            _ => "%f", // cfloat/cdouble: print real part
+        };
+        let _ = writeln!(self.out, "{}#ifndef NDEBUG", indent);
+        let _ = writeln!(self.out, "{}if (_probe_{}_enabled) {{", indent, probe_name);
+        let _ = writeln!(
+            self.out,
+            "{}    for (int _pi = 0; _pi < {}; ++_pi)",
+            indent, count
+        );
+        let _ = writeln!(
+            self.out,
+            "{}        fprintf(_probe_output_file, \"[probe:{}] {}\\n\", ({})[_pi]);",
+            indent, probe_name, fmt_spec, src_expr
+        );
+        let _ = writeln!(self.out, "{}    fflush(_probe_output_file);", indent);
+        let _ = writeln!(self.out, "{}}}", indent);
+        let _ = writeln!(self.out, "{}#endif", indent);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2676,6 +3188,10 @@ mod tests {
         result.generated.cpp_source
     }
 
+    fn count_occurrences(haystack: &str, needle: &str) -> usize {
+        haystack.match_indices(needle).count()
+    }
+
     // ── Const emission tests ────────────────────────────────────────────
 
     #[test]
@@ -2782,6 +3298,138 @@ mod tests {
         assert!(
             cpp.contains("_r *"),
             "repetition loop should use _r offset expressions: {}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn same_rep_chain_fused_into_single_r_loop() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            concat!(
+                "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
+                "clock 1kHz t { constant(0.0) | fft(256) | c2r() | fir(coeff) | stdout() }",
+            ),
+            &reg,
+        );
+        assert_eq!(
+            count_occurrences(&cpp, "for (int _r = 0; _r < 5; ++_r)"),
+            1,
+            "rep=5 chain should be fused into a single loop, got:\n{}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn rep_mismatch_not_fused() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            concat!(
+                "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
+                "clock 1kHz t { constant(0.0) | fft(256) | c2r() | fir(coeff) | stdout() }",
+            ),
+            &reg,
+        );
+        assert_eq!(
+            count_occurrences(&cpp, "for (int _r = 0; _r < 5; ++_r)"),
+            1,
+            "rep=5 actors should be fused once, got:\n{}",
+            cpp
+        );
+        let pos_c2r_call = cpp
+            .find("_actor_2.operator()(&_e1_2[_r * 256], &_e2_3[_r * 256])")
+            .expect("expected c2r call in rep=5 loop");
+        let pos_fir_loop = cpp
+            .find("for (int _r = 0; _r < 256; ++_r)")
+            .expect("expected separate rep=256 loop for fir");
+        assert!(
+            pos_c2r_call < pos_fir_loop,
+            "rep mismatch boundary (c2r->fir) should remain separated, got:\n{}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn feedback_edge_not_fused() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            concat!(
+                "clock 1kHz iir {\n",
+                "    constant(0.0)[4] | add(:fb) | mul(2.0) | :out | stdout()\n",
+                "    :out | delay(1, 0.0) | :fb\n",
+                "}\n"
+            ),
+            &reg,
+        );
+        assert!(
+            cpp.contains("_fb_"),
+            "feedback buffer should be present for cycle graph, got:\n{}",
+            cpp
+        );
+        assert!(
+            count_occurrences(&cpp, "for (int _r = 0; _r < ") >= 3,
+            "feedback-related nodes should not be coalesced into a single fused loop, got:\n{}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn fork_passthrough_chain_fused_into_single_r_loop() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            concat!(
+                "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
+                "clock 1kHz t {\n",
+                "    constant(0.0)[256] | fft(256) | :raw | c2r() | fir(coeff) | stdout()\n",
+                "    :raw | mag() | stdout()\n",
+                "}\n"
+            ),
+            &reg,
+        );
+        assert_eq!(
+            count_occurrences(&cpp, "for (int _r = 0; _r < 5; ++_r)"),
+            1,
+            "fork-branch same-rep region should be fused into one loop, got:\n{}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn probe_passthrough_fusion_uses_per_firing_slice() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            concat!(
+                "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
+                "clock 1kHz t {\n",
+                "    constant(0.0)[256] | fft(256) | ?spec | c2r() | fir(coeff) | stdout()\n",
+                "}\n"
+            ),
+            &reg,
+        );
+        assert_eq!(
+            count_occurrences(&cpp, "for (int _r = 0; _r < 5; ++_r)"),
+            1,
+            "probe passthrough chain should be fused into one loop, got:\n{}",
+            cpp
+        );
+        assert!(
+            cpp.contains("[probe:spec]"),
+            "probe output formatting should be emitted in debug mode, got:\n{}",
+            cpp
+        );
+        assert!(
+            cpp.contains("for (int _pi = 0; _pi < 256; ++_pi)"),
+            "fused probe should observe per-firing slice (256), got:\n{}",
+            cpp
+        );
+        assert!(
+            !cpp.contains("for (int _pi = 0; _pi < 1280; ++_pi)"),
+            "fused probe should not replay full buffer per _r, got:\n{}",
+            cpp
+        );
+        assert!(
+            cpp.contains("_r * 256"),
+            "fused probe should index by _r slice offset, got:\n{}",
             cpp
         );
     }
@@ -3427,6 +4075,48 @@ mod tests {
         assert!(
             cpp.contains("_actor_") && cpp.contains(".operator()("),
             "hoisted actor should be called via .operator() inside the loop, got:\n{}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn actor_construction_hoisted_before_k_loop() {
+        let reg = test_registry();
+        let cpp = codegen_ok("clock 10MHz t { constant(0.0) | stdout() }", &reg);
+        let task_start = cpp.find("void task_t()").expect("missing task_t");
+        let task_tail = &cpp[task_start..];
+        let task_end = task_tail.find("int main(").unwrap_or(task_tail.len());
+        let task = &task_tail[..task_end];
+
+        let decl_pos = task
+            .find("auto _actor_")
+            .expect("expected hoisted actor declaration in task_t");
+        let k_pos = task
+            .find("for (int _k = 0; _k < ")
+            .expect("expected k-loop in task_t");
+        assert!(
+            decl_pos < k_pos,
+            "actor should be hoisted before _k loop in task_t, got:\n{}",
+            task
+        );
+    }
+
+    #[test]
+    fn multi_input_single_token_edges_avoid_memcpy() {
+        let reg = test_registry();
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root = manifest_dir.parent().expect("missing workspace root");
+        let path = root.join("examples/feedback.pdl");
+        let source = std::fs::read_to_string(path).expect("failed to read feedback.pdl");
+        let cpp = codegen_ok(&source, &reg);
+        assert!(
+            !cpp.contains("std::memcpy(&_in_"),
+            "single-token multi-input copies should use direct assignments, got:\n{}",
+            cpp
+        );
+        assert!(
+            cpp.contains("_in_") && cpp.contains("[0] = (") && cpp.contains("[1] = ("),
+            "feedback add input packing should still populate local input slots, got:\n{}",
             cpp
         );
     }

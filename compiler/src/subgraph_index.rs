@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::graph::{Edge, Node, NodeId, ProgramGraph, Subgraph, TaskGraph};
 
@@ -7,6 +7,9 @@ pub struct SubgraphIndex {
     node_pos: HashMap<NodeId, usize>,
     first_incoming_edge_pos: HashMap<NodeId, usize>,
     first_outgoing_edge_pos: HashMap<NodeId, usize>,
+    incoming_edge_count: HashMap<NodeId, usize>,
+    outgoing_edge_count: HashMap<NodeId, usize>,
+    edge_exists: HashSet<(NodeId, NodeId)>,
 }
 
 const INDEX_MIN_GRAPH_SIZE: usize = 32;
@@ -26,6 +29,9 @@ impl SubgraphIndex {
                 .first_outgoing_edge_pos
                 .entry(edge.source)
                 .or_insert(i);
+            *index.incoming_edge_count.entry(edge.target).or_insert(0) += 1;
+            *index.outgoing_edge_count.entry(edge.source).or_insert(0) += 1;
+            index.edge_exists.insert((edge.source, edge.target));
         }
         index
     }
@@ -44,6 +50,18 @@ impl SubgraphIndex {
         self.first_outgoing_edge_pos
             .get(&id)
             .and_then(|&i| sub.edges.get(i))
+    }
+
+    pub fn incoming_count(&self, id: NodeId) -> usize {
+        self.incoming_edge_count.get(&id).copied().unwrap_or(0)
+    }
+
+    pub fn outgoing_count(&self, id: NodeId) -> usize {
+        self.outgoing_edge_count.get(&id).copied().unwrap_or(0)
+    }
+
+    pub fn has_edge(&self, src: NodeId, tgt: NodeId) -> bool {
+        self.edge_exists.contains(&(src, tgt))
     }
 }
 
