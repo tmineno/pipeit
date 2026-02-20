@@ -2182,101 +2182,17 @@ impl<'a> CodegenCtx<'a> {
         actor_meta: &ActorMeta,
         actor_args: &[Arg],
     ) -> Option<u32> {
-        // Only applies to compile-time integer dimension params.
-        let dim_param = actor_meta.params.iter().find(|p| p.name == dim_name)?;
-        if dim_param.kind != ParamKind::Param || dim_param.param_type != ParamType::Int {
-            return None;
-        }
-        let span_len = actor_meta
-            .params
-            .iter()
-            .enumerate()
-            .find_map(|(idx, param)| {
-                if param.kind != ParamKind::Param {
-                    return None;
-                }
-                if !matches!(
-                    param.param_type,
-                    ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
-                ) {
-                    return None;
-                }
-                actor_args
-                    .get(idx)
-                    .and_then(|arg| self.resolve_arg_to_u32(arg))
-            })?;
-
-        let mut dim_names: HashSet<&str> = HashSet::new();
-        for dim in actor_meta
-            .in_shape
-            .dims
-            .iter()
-            .chain(actor_meta.out_shape.dims.iter())
-        {
-            if let TokenCount::Symbolic(sym) = dim {
-                dim_names.insert(sym.as_str());
-            }
-        }
-        let first_unresolved_dim = actor_meta.params.iter().enumerate().find_map(|(idx, p)| {
-            if p.kind != ParamKind::Param || p.param_type != ParamType::Int {
-                return None;
-            }
-            if !dim_names.contains(p.name.as_str()) {
-                return None;
-            }
-            let explicit = actor_args
-                .get(idx)
-                .and_then(|arg| self.resolve_arg_to_u32(arg));
-            if explicit.is_some() {
-                return None;
-            }
-            Some(p.name.as_str())
-        })?;
-
-        if first_unresolved_dim == dim_name {
-            Some(span_len)
-        } else {
-            None
-        }
+        crate::dim_resolve::infer_dim_param_from_span_args(
+            dim_name,
+            actor_meta,
+            actor_args,
+            self.resolved,
+            self.program,
+        )
     }
 
     fn resolve_shape_dim(&self, dim: &ShapeDim) -> Option<u32> {
-        match dim {
-            ShapeDim::Literal(n, _) => Some(*n),
-            ShapeDim::ConstRef(ident) => {
-                let entry = self.resolved.consts.get(&ident.name)?;
-                let stmt = &self.program.statements[entry.stmt_index];
-                if let StatementKind::Const(c) = &stmt.kind {
-                    match &c.value {
-                        Value::Scalar(Scalar::Number(n, _, _)) => Some(*n as u32),
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-    fn resolve_arg_to_u32(&self, arg: &Arg) -> Option<u32> {
-        match arg {
-            Arg::Value(Value::Scalar(Scalar::Number(n, _, _))) => Some(*n as u32),
-            Arg::Value(Value::Array(elems, _)) => Some(elems.len() as u32),
-            Arg::ConstRef(ident) => {
-                let entry = self.resolved.consts.get(&ident.name)?;
-                let stmt = &self.program.statements[entry.stmt_index];
-                if let StatementKind::Const(c) = &stmt.kind {
-                    match &c.value {
-                        Value::Scalar(Scalar::Number(n, _, _)) => Some(*n as u32),
-                        Value::Array(elems, _) => Some(elems.len() as u32),
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
+        crate::dim_resolve::resolve_shape_dim(dim, self.resolved, self.program)
     }
 
     fn firing_repetition(&self, sched: &SubgraphSchedule, node_id: NodeId) -> u32 {

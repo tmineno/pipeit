@@ -154,10 +154,10 @@
 
 **Goal**: Fix implementation-side regressions in shape/dimension resolution and shared-buffer codegen, then lock behavior with targeted tests.
 
-- [ ] **Fix dimension inference precedence for symbolic actor params (e.g., `fir(coeff)`)**
+- [x] **Fix dimension inference precedence for symbolic actor params (e.g., `fir(coeff)`)**
   - [x] Treat span-derived dimension inference as a first-class resolved source when deciding whether shape is unresolved
   - [x] Prevent reverse shape propagation from overriding already-resolved symbolic dimensions
-  - [ ] Add explicit mismatch diagnostics when inferred dimension value conflicts with explicit arg/shape constraint
+  - [x] Add explicit mismatch diagnostics when inferred dimension value conflicts with explicit arg/shape constraint
   - [x] Verify generated actor params preserve stdlib semantics (`fir(coeff)` uses `N = len(coeff)` unless explicitly constrained)
 
 - [x] **Fix shared-buffer I/O granularity in codegen**
@@ -185,10 +185,10 @@
 - [x] **Runtime performance verification (2026-02-20)**
   - [x] Compare `b06071d` vs `5842279` on `BM_E2E_PipelineOnly` (5 reps, median) with no clear regression (within measurement noise)
   - [x] Compare generated-PDL runtime stats (`--filter pdl`) with no systematic throughput degradation
-  - [ ] Re-run socket-loopback benchmark after local port-bind issue (`localhost:19876`) is resolved
+  - [ ] ~~Re-run socket-loopback benchmark after local port-bind issue (`localhost:19876`) is resolved~~ (deferred — port-bind infra issue)
 
-- [ ] **Follow-up simplification**
-  - [ ] Collapse remaining dimension-parameter fallback duplication (`analyze`/`codegen`) into a single analysis-owned artifact
+- [x] **Follow-up simplification**
+  - [x] Collapse remaining dimension-parameter fallback duplication (`analyze`/`codegen`) into a single analysis-owned artifact (`dim_resolve.rs`)
 
 ---
 

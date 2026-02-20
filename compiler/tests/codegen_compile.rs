@@ -410,6 +410,26 @@ fn fir_legacy_argument_order_rejected() {
     );
 }
 
+// ── Dimension conflict diagnostics ────────────────────────────────────
+
+#[test]
+fn dim_conflict_explicit_arg_vs_span_rejected() {
+    // fir(coeff, 5) where coeff has 3 elements — N=5 vs span N=3
+    assert_inline_fails(
+        "const coeff = [0.1, 0.2, 0.1]\nclock 1kHz t { constant(0.0) | fir(coeff, 5) | stdout() }",
+        "dim_conflict_explicit_vs_span",
+    );
+}
+
+#[test]
+fn dim_conflict_shape_constraint_vs_span_rejected() {
+    // fir(coeff)[5] where coeff has 3 elements — SC N=5 vs span N=3
+    assert_inline_fails(
+        "const coeff = [0.1, 0.2, 0.1]\nclock 1kHz t { constant(0.0) | fir(coeff)[5] | stdout() }",
+        "dim_conflict_sc_vs_span",
+    );
+}
+
 // ── Runtime param ($param) ─────────────────────────────────────────────
 
 #[test]
