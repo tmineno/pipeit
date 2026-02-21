@@ -77,9 +77,9 @@ pub struct TypeInferResult {
 
 /// Concrete type assignments for all actor calls and widening points.
 pub struct TypedProgram {
-    /// For each actor call (keyed by its AST span), the resolved concrete type
+    /// For each actor call (keyed by CallId), the resolved concrete type
     /// assignments for its type parameters. Empty map for non-polymorphic actors.
-    pub type_assignments: HashMap<Span, Vec<PipitType>>,
+    pub type_assignments: HashMap<CallId, Vec<PipitType>>,
 
     /// Widening insertions needed: (source_span, from_type, to_type).
     /// Each entry indicates a pipe edge where implicit widening should be applied.
@@ -87,13 +87,7 @@ pub struct TypedProgram {
 
     /// Monomorphized actor metadata: for each polymorphic call, the concrete
     /// ActorMeta with type parameters substituted.
-    pub mono_actors: HashMap<Span, ActorMeta>,
-
-    // ── Stable ID dual-key maps (ADR-021) ─────────────────────────────────
-    /// CallId-keyed type assignments (mirrors `type_assignments`).
-    pub type_assignments_by_id: HashMap<CallId, Vec<PipitType>>,
-    /// CallId-keyed mono actors (mirrors `mono_actors`).
-    pub mono_actors_by_id: HashMap<CallId, ActorMeta>,
+    pub mono_actors: HashMap<CallId, ActorMeta>,
 }
 
 /// A point in the pipeline where implicit widening should be inserted.
@@ -125,8 +119,6 @@ pub fn type_infer(
             type_assignments: HashMap::new(),
             widenings: Vec::new(),
             mono_actors: HashMap::new(),
-            type_assignments_by_id: HashMap::new(),
-            mono_actors_by_id: HashMap::new(),
         },
         diagnostics: Vec::new(),
         buffer_types: HashMap::new(),
@@ -136,21 +128,6 @@ pub fn type_infer(
     };
 
     engine.infer_program(program);
-
-    // Populate CallId-keyed dual maps from span-keyed maps (ADR-021).
-    for (span, types) in &engine.typed.type_assignments {
-        if let Some(&call_id) = resolved.call_ids.get(span) {
-            engine
-                .typed
-                .type_assignments_by_id
-                .insert(call_id, types.clone());
-        }
-    }
-    for (span, meta) in &engine.typed.mono_actors {
-        if let Some(&call_id) = resolved.call_ids.get(span) {
-            engine.typed.mono_actors_by_id.insert(call_id, meta.clone());
-        }
-    }
 
     TypeInferResult {
         typed: engine.typed,
@@ -182,11 +159,12 @@ impl<'a> TypeInferEngine<'a> {
         concrete_types: Vec<PipitType>,
         mono: ActorMeta,
     ) {
-        self.typed.type_assignments.insert(span, concrete_types);
+        let call_id = self.resolved.call_id_for_span(span);
+        self.typed.type_assignments.insert(call_id, concrete_types);
         self.effective_registry_meta_cache
             .borrow_mut()
             .remove(&span);
-        self.typed.mono_actors.insert(span, mono);
+        self.typed.mono_actors.insert(call_id, mono);
     }
 
     fn infer_program(&mut self, program: &Program) {
@@ -311,7 +289,7 @@ impl<'a> TypeInferEngine<'a> {
             return;
         }
 
-        let resolution = self.resolved.call_resolutions.get(&call.span);
+        let resolution = self.resolved.call_resolution_for(call.span);
         if !matches!(resolution, Some(CallResolution::Actor)) {
             return;
         }
@@ -367,7 +345,7 @@ impl<'a> TypeInferEngine<'a> {
         let mut current_output_type: Option<PipitType> = initial_type;
 
         for call in calls {
-            let resolution = self.resolved.call_resolutions.get(&call.span);
+            let resolution = self.resolved.call_resolution_for(call.span);
             if !matches!(resolution, Some(CallResolution::Actor)) {
                 // Define call — try to propagate type through the define body
                 current_output_type = self.define_output_type(call, current_output_type);
@@ -520,8 +498,10 @@ impl<'a> TypeInferEngine<'a> {
         }
 
         let last_call = last_call?;
-        if let Some(mono) = self.typed.mono_actors.get(&last_call.span) {
-            return mono.out_type.as_concrete();
+        if let Some(&call_id) = self.resolved.call_ids.get(&last_call.span) {
+            if let Some(mono) = self.typed.mono_actors.get(&call_id) {
+                return mono.out_type.as_concrete();
+            }
         }
         let meta = self.registry.lookup(&last_call.name.name)?;
         meta.out_type.as_concrete()
@@ -546,19 +526,22 @@ impl<'a> TypeInferEngine<'a> {
             if let PipeSource::BufferRead(ident) = &pipe.source {
                 if let Some(&buf_type) = self.buffer_types.get(&ident.name) {
                     // Check if any actor in this pipe is still unresolved
-                    let has_unresolved = pipe.elements.iter().any(|elem| {
-                        if let PipeElem::ActorCall(call) = elem {
-                            let meta = self.registry.lookup(&call.name.name);
-                            if let Some(m) = meta {
-                                m.is_polymorphic()
-                                    && !self.typed.mono_actors.contains_key(&call.span)
+                    let has_unresolved =
+                        pipe.elements.iter().any(|elem| {
+                            if let PipeElem::ActorCall(call) = elem {
+                                let meta = self.registry.lookup(&call.name.name);
+                                if let Some(m) = meta {
+                                    m.is_polymorphic()
+                                        && !self.resolved.call_ids.get(&call.span).is_some_and(
+                                            |id| self.typed.mono_actors.contains_key(id),
+                                        )
+                                } else {
+                                    false
+                                }
                             } else {
                                 false
                             }
-                        } else {
-                            false
-                        }
-                    });
+                        });
 
                     if has_unresolved {
                         // Clear previous errors for these calls before re-inferring
@@ -644,8 +627,10 @@ impl<'a> TypeInferEngine<'a> {
     /// Get the output type of a call (actor or define).
     fn call_output_type(&self, call: &ActorCall) -> Option<PipitType> {
         // Check if it's a monomorphized actor
-        if let Some(mono) = self.typed.mono_actors.get(&call.span) {
-            return mono.out_type.as_concrete();
+        if let Some(&call_id) = self.resolved.call_ids.get(&call.span) {
+            if let Some(mono) = self.typed.mono_actors.get(&call_id) {
+                return mono.out_type.as_concrete();
+            }
         }
         // Check actor registry
         if let Some(meta) = self.registry.lookup(&call.name.name) {
@@ -737,8 +722,10 @@ impl<'a> TypeInferEngine<'a> {
 
     /// Get the effective ActorMeta for a call — monomorphized if available, else registry.
     fn get_effective_meta(&self, call: &ActorCall) -> Option<&ActorMeta> {
-        if let Some(mono) = self.typed.mono_actors.get(&call.span) {
-            return Some(mono);
+        if let Some(&call_id) = self.resolved.call_ids.get(&call.span) {
+            if let Some(mono) = self.typed.mono_actors.get(&call_id) {
+                return Some(mono);
+            }
         }
 
         if let Some(cached) = self

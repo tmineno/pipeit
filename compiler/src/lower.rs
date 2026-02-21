@@ -35,24 +35,14 @@ impl LowerResult {
 
 /// The lowered program: all actors concrete, all widening explicit.
 pub struct LoweredProgram {
-    /// Concrete ActorMeta for each actor call span. Includes both originally
-    /// concrete actors and monomorphized polymorphic actors.
-    pub concrete_actors: HashMap<Span, ActorMeta>,
+    /// Concrete ActorMeta for each actor call (keyed by CallId).
+    pub concrete_actors: HashMap<CallId, ActorMeta>,
 
     /// Synthetic widening nodes inserted between pipe stages.
-    /// Keyed by the target actor call span.
     pub widening_nodes: Vec<WideningNode>,
 
-    /// Type instantiations for polymorphic actor calls.
-    /// Maps call span → concrete types for each type parameter.
-    /// Empty for non-polymorphic calls.
-    pub type_instantiations: HashMap<Span, Vec<PipitType>>,
-
-    // ── Stable ID dual-key maps (ADR-021) ─────────────────────────────────
-    /// CallId-keyed concrete actors (mirrors `concrete_actors`).
-    pub concrete_actors_by_id: HashMap<CallId, ActorMeta>,
-    /// CallId-keyed type instantiations (mirrors `type_instantiations`).
-    pub type_instantiations_by_id: HashMap<CallId, Vec<PipitType>>,
+    /// Type instantiations for polymorphic actor calls (keyed by CallId).
+    pub type_instantiations: HashMap<CallId, Vec<PipitType>>,
 }
 
 /// A synthetic widening node inserted between two pipe stages.
@@ -120,30 +110,11 @@ pub fn lower_and_verify(
     // Phase 2: Verify L1-L5 obligations
     let cert = engine.verify_obligations(program);
 
-    // Copy type instantiations from the typed program
-    let type_instantiations = typed.type_assignments.clone();
-
-    // Populate CallId-keyed dual maps from span-keyed maps (ADR-021).
-    let mut concrete_actors_by_id = HashMap::new();
-    for (span, meta) in &engine.concrete_actors {
-        if let Some(&call_id) = resolved.call_ids.get(span) {
-            concrete_actors_by_id.insert(call_id, meta.clone());
-        }
-    }
-    let mut type_instantiations_by_id = HashMap::new();
-    for (span, types) in &type_instantiations {
-        if let Some(&call_id) = resolved.call_ids.get(span) {
-            type_instantiations_by_id.insert(call_id, types.clone());
-        }
-    }
-
     LowerResult {
         lowered: LoweredProgram {
             concrete_actors: engine.concrete_actors,
             widening_nodes: engine.widening_nodes,
-            type_instantiations,
-            concrete_actors_by_id,
-            type_instantiations_by_id,
+            type_instantiations: typed.type_assignments.clone(),
         },
         cert,
         diagnostics: engine.diagnostics,
@@ -156,7 +127,7 @@ struct LowerEngine<'a> {
     resolved: &'a ResolvedProgram,
     typed: &'a TypedProgram,
     registry: &'a Registry,
-    concrete_actors: HashMap<Span, ActorMeta>,
+    concrete_actors: HashMap<CallId, ActorMeta>,
     widening_nodes: Vec<WideningNode>,
     diagnostics: Vec<Diagnostic>,
 }
@@ -224,20 +195,22 @@ impl<'a> LowerEngine<'a> {
     }
 
     fn lower_actor_call(&mut self, call: &ActorCall) {
-        let resolution = self.resolved.call_resolutions.get(&call.span);
+        let resolution = self.resolved.call_resolution_for(call.span);
         if !matches!(resolution, Some(CallResolution::Actor)) {
             return; // define call — skip
         }
 
+        let call_id = self.resolved.call_id_for_span(call.span);
+
         // Check if type_infer provided a monomorphized meta
-        if let Some(mono) = self.typed.mono_actors.get(&call.span) {
-            self.concrete_actors.insert(call.span, mono.clone());
+        if let Some(mono) = self.typed.mono_actors.get(&call_id) {
+            self.concrete_actors.insert(call_id, mono.clone());
             return;
         }
 
         // Use registry meta directly (already concrete for non-polymorphic actors)
         if let Some(meta) = self.registry.lookup(&call.name.name) {
-            self.concrete_actors.insert(call.span, meta.clone());
+            self.concrete_actors.insert(call_id, meta.clone());
         }
     }
 
@@ -403,7 +376,8 @@ impl<'a> LowerEngine<'a> {
 
         for wn in &self.widening_nodes {
             // Get the downstream actor's metadata to check shape
-            if let Some(tgt_meta) = self.concrete_actors.get(&wn.target_span) {
+            let tgt_call_id = self.resolved.call_ids.get(&wn.target_span);
+            if let Some(tgt_meta) = tgt_call_id.and_then(|id| self.concrete_actors.get(id)) {
                 // The widening node is 1:1 by construction.
                 // Verify the downstream actor's in_count is compatible.
                 // Widening nodes must not change rate — they are scalar 1:1.
@@ -473,7 +447,7 @@ impl<'a> LowerEngine<'a> {
     }
 
     fn verify_l4_call(&mut self, call: &ActorCall, ok: &mut bool) {
-        let resolution = self.resolved.call_resolutions.get(&call.span);
+        let resolution = self.resolved.call_resolution_for(call.span);
         if !matches!(resolution, Some(CallResolution::Actor)) {
             return;
         }
@@ -482,7 +456,8 @@ impl<'a> LowerEngine<'a> {
         if let Some(reg_meta) = self.registry.lookup(&call.name.name) {
             if reg_meta.is_polymorphic() {
                 // Must have been monomorphized
-                if let Some(concrete) = self.concrete_actors.get(&call.span) {
+                let call_id = self.resolved.call_id_for_span(call.span);
+                if let Some(concrete) = self.concrete_actors.get(&call_id) {
                     if concrete.is_polymorphic() {
                         self.diagnostics.push(Diagnostic {
                             level: DiagLevel::Error,
@@ -517,11 +492,20 @@ impl<'a> LowerEngine<'a> {
     fn verify_l5_no_fallback_typing(&mut self) -> bool {
         let mut ok = true;
 
-        for (span, meta) in &self.concrete_actors {
+        for (call_id, meta) in &self.concrete_actors {
+            let span = self
+                .resolved
+                .call_spans
+                .get(call_id)
+                .copied()
+                .unwrap_or_else(|| {
+                    use chumsky::span::Span as _;
+                    Span::new((), 0..0)
+                });
             if !meta.in_type.is_concrete() {
                 self.diagnostics.push(Diagnostic {
                     level: DiagLevel::Error,
-                    span: *span,
+                    span,
                     message: format!(
                         "lowering verification failed (L5 no fallback typing): \
                          actor '{}' has unresolved input type '{}'",
@@ -534,7 +518,7 @@ impl<'a> LowerEngine<'a> {
             if !meta.out_type.is_concrete() {
                 self.diagnostics.push(Diagnostic {
                     level: DiagLevel::Error,
-                    span: *span,
+                    span,
                     message: format!(
                         "lowering verification failed (L5 no fallback typing): \
                          actor '{}' has unresolved output type '{}'",
@@ -552,14 +536,16 @@ impl<'a> LowerEngine<'a> {
     // ── Helpers ──────────────────────────────────────────────────────────
 
     fn get_output_type(&self, call: &ActorCall) -> Option<PipitType> {
+        let call_id = self.resolved.call_id_for_span(call.span);
         self.concrete_actors
-            .get(&call.span)
+            .get(&call_id)
             .and_then(|m| m.out_type.as_concrete())
     }
 
     fn get_input_type(&self, call: &ActorCall) -> Option<PipitType> {
+        let call_id = self.resolved.call_id_for_span(call.span);
         self.concrete_actors
-            .get(&call.span)
+            .get(&call_id)
             .and_then(|m| m.in_type.as_concrete())
     }
 }
@@ -574,6 +560,17 @@ mod tests {
 
     fn dummy_span() -> Span {
         Span::new((), 0..0)
+    }
+
+    /// Build call_ids / call_spans maps for a slice of (span, call_id) pairs.
+    fn make_call_maps(pairs: &[(Span, CallId)]) -> (HashMap<Span, CallId>, HashMap<CallId, Span>) {
+        let mut call_ids = HashMap::new();
+        let mut call_spans = HashMap::new();
+        for &(s, id) in pairs {
+            call_ids.insert(s, id);
+            call_spans.insert(id, s);
+        }
+        (call_ids, call_spans)
     }
 
     fn span(start: usize, end: usize) -> Span {
@@ -614,14 +611,16 @@ mod tests {
     fn l1_matching_types_pass() {
         let s1 = span(0, 10);
         let s2 = span(10, 20);
+        let c1 = CallId(0);
+        let c2 = CallId(1);
 
         let mut concrete_actors = HashMap::new();
         concrete_actors.insert(
-            s1,
+            c1,
             make_concrete_meta("src", PipitType::Void, PipitType::Float),
         );
         concrete_actors.insert(
-            s2,
+            c2,
             make_concrete_meta("sink", PipitType::Float, PipitType::Void),
         );
 
@@ -629,10 +628,9 @@ mod tests {
             type_assignments: HashMap::new(),
             widenings: Vec::new(),
             mono_actors: HashMap::new(),
-            type_assignments_by_id: HashMap::new(),
-            mono_actors_by_id: HashMap::new(),
         };
 
+        let (call_ids, call_spans) = make_call_maps(&[(s1, c1), (s2, c2)]);
         let resolved = ResolvedProgram {
             consts: HashMap::new(),
             params: HashMap::new(),
@@ -641,14 +639,14 @@ mod tests {
             buffers: HashMap::new(),
             call_resolutions: {
                 let mut m = HashMap::new();
-                m.insert(s1, CallResolution::Actor);
-                m.insert(s2, CallResolution::Actor);
+                m.insert(c1, CallResolution::Actor);
+                m.insert(c2, CallResolution::Actor);
                 m
             },
             task_resolutions: HashMap::new(),
             probes: Vec::new(),
-            call_ids: HashMap::new(),
-            call_spans: HashMap::new(),
+            call_ids,
+            call_spans,
             def_ids: HashMap::new(),
             task_ids: HashMap::new(),
         };
@@ -718,14 +716,16 @@ mod tests {
     fn l1_mismatched_types_fail() {
         let s1 = span(0, 10);
         let s2 = span(10, 20);
+        let c1 = CallId(0);
+        let c2 = CallId(1);
 
         let mut concrete_actors = HashMap::new();
         concrete_actors.insert(
-            s1,
+            c1,
             make_concrete_meta("src", PipitType::Void, PipitType::Float),
         );
         concrete_actors.insert(
-            s2,
+            c2,
             make_concrete_meta("sink", PipitType::Double, PipitType::Void),
         );
 
@@ -733,10 +733,9 @@ mod tests {
             type_assignments: HashMap::new(),
             widenings: Vec::new(),
             mono_actors: HashMap::new(),
-            type_assignments_by_id: HashMap::new(),
-            mono_actors_by_id: HashMap::new(),
         };
 
+        let (call_ids, call_spans) = make_call_maps(&[(s1, c1), (s2, c2)]);
         let resolved = ResolvedProgram {
             consts: HashMap::new(),
             params: HashMap::new(),
@@ -745,14 +744,14 @@ mod tests {
             buffers: HashMap::new(),
             call_resolutions: {
                 let mut m = HashMap::new();
-                m.insert(s1, CallResolution::Actor);
-                m.insert(s2, CallResolution::Actor);
+                m.insert(c1, CallResolution::Actor);
+                m.insert(c2, CallResolution::Actor);
                 m
             },
             task_resolutions: HashMap::new(),
             probes: Vec::new(),
-            call_ids: HashMap::new(),
-            call_spans: HashMap::new(),
+            call_ids,
+            call_spans,
             def_ids: HashMap::new(),
             task_ids: HashMap::new(),
         };
@@ -822,14 +821,16 @@ mod tests {
     fn l1_widening_edge_passes() {
         let s1 = span(0, 10);
         let s2 = span(10, 20);
+        let c1 = CallId(0);
+        let c2 = CallId(1);
 
         let mut concrete_actors = HashMap::new();
         concrete_actors.insert(
-            s1,
+            c1,
             make_concrete_meta("src", PipitType::Void, PipitType::Int32),
         );
         concrete_actors.insert(
-            s2,
+            c2,
             make_concrete_meta("sink", PipitType::Float, PipitType::Void),
         );
 
@@ -837,10 +838,9 @@ mod tests {
             type_assignments: HashMap::new(),
             widenings: Vec::new(),
             mono_actors: HashMap::new(),
-            type_assignments_by_id: HashMap::new(),
-            mono_actors_by_id: HashMap::new(),
         };
 
+        let (call_ids, call_spans) = make_call_maps(&[(s1, c1), (s2, c2)]);
         let resolved = ResolvedProgram {
             consts: HashMap::new(),
             params: HashMap::new(),
@@ -849,14 +849,14 @@ mod tests {
             buffers: HashMap::new(),
             call_resolutions: {
                 let mut m = HashMap::new();
-                m.insert(s1, CallResolution::Actor);
-                m.insert(s2, CallResolution::Actor);
+                m.insert(c1, CallResolution::Actor);
+                m.insert(c2, CallResolution::Actor);
                 m
             },
             task_resolutions: HashMap::new(),
             probes: Vec::new(),
-            call_ids: HashMap::new(),
-            call_spans: HashMap::new(),
+            call_ids,
+            call_spans,
             def_ids: HashMap::new(),
             task_ids: HashMap::new(),
         };
@@ -939,8 +939,6 @@ mod tests {
             type_assignments: HashMap::new(),
             widenings: Vec::new(),
             mono_actors: HashMap::new(),
-            type_assignments_by_id: HashMap::new(),
-            mono_actors_by_id: HashMap::new(),
         };
         let resolved = ResolvedProgram {
             consts: HashMap::new(),
@@ -991,8 +989,6 @@ mod tests {
             type_assignments: HashMap::new(),
             widenings: Vec::new(),
             mono_actors: HashMap::new(),
-            type_assignments_by_id: HashMap::new(),
-            mono_actors_by_id: HashMap::new(),
         };
         let resolved = ResolvedProgram {
             consts: HashMap::new(),
@@ -1041,10 +1037,11 @@ mod tests {
     #[test]
     fn l4_monomorphized_passes() {
         let s1 = span(0, 10);
+        let c1 = CallId(0);
 
         let mut concrete_actors = HashMap::new();
         concrete_actors.insert(
-            s1,
+            c1,
             make_concrete_meta("scale", PipitType::Float, PipitType::Float),
         );
 
@@ -1052,10 +1049,9 @@ mod tests {
             type_assignments: HashMap::new(),
             widenings: Vec::new(),
             mono_actors: HashMap::new(),
-            type_assignments_by_id: HashMap::new(),
-            mono_actors_by_id: HashMap::new(),
         };
 
+        let (call_ids, call_spans) = make_call_maps(&[(s1, c1)]);
         let resolved = ResolvedProgram {
             consts: HashMap::new(),
             params: HashMap::new(),
@@ -1064,13 +1060,13 @@ mod tests {
             buffers: HashMap::new(),
             call_resolutions: {
                 let mut m = HashMap::new();
-                m.insert(s1, CallResolution::Actor);
+                m.insert(c1, CallResolution::Actor);
                 m
             },
             task_resolutions: HashMap::new(),
             probes: Vec::new(),
-            call_ids: HashMap::new(),
-            call_spans: HashMap::new(),
+            call_ids,
+            call_spans,
             def_ids: HashMap::new(),
             task_ids: HashMap::new(),
         };
@@ -1127,19 +1123,19 @@ mod tests {
     #[test]
     fn l4_unmonomorphized_fails() {
         let s1 = span(0, 10);
+        let c1 = CallId(0);
 
         // Concrete actors map has the polymorphic meta (not monomorphized)
         let mut concrete_actors = HashMap::new();
-        concrete_actors.insert(s1, make_polymorphic_meta("scale"));
+        concrete_actors.insert(c1, make_polymorphic_meta("scale"));
 
         let typed = TypedProgram {
             type_assignments: HashMap::new(),
             widenings: Vec::new(),
             mono_actors: HashMap::new(),
-            type_assignments_by_id: HashMap::new(),
-            mono_actors_by_id: HashMap::new(),
         };
 
+        let (call_ids, call_spans) = make_call_maps(&[(s1, c1)]);
         let resolved = ResolvedProgram {
             consts: HashMap::new(),
             params: HashMap::new(),
@@ -1148,13 +1144,13 @@ mod tests {
             buffers: HashMap::new(),
             call_resolutions: {
                 let mut m = HashMap::new();
-                m.insert(s1, CallResolution::Actor);
+                m.insert(c1, CallResolution::Actor);
                 m
             },
             task_resolutions: HashMap::new(),
             probes: Vec::new(),
-            call_ids: HashMap::new(),
-            call_spans: HashMap::new(),
+            call_ids,
+            call_spans,
             def_ids: HashMap::new(),
             task_ids: HashMap::new(),
         };
@@ -1214,10 +1210,11 @@ mod tests {
     #[test]
     fn l5_all_concrete_passes() {
         let s1 = span(0, 10);
+        let c1 = CallId(0);
 
         let mut concrete_actors = HashMap::new();
         concrete_actors.insert(
-            s1,
+            c1,
             make_concrete_meta("scale", PipitType::Float, PipitType::Float),
         );
 
@@ -1225,10 +1222,9 @@ mod tests {
             type_assignments: HashMap::new(),
             widenings: Vec::new(),
             mono_actors: HashMap::new(),
-            type_assignments_by_id: HashMap::new(),
-            mono_actors_by_id: HashMap::new(),
         };
 
+        let (call_ids, call_spans) = make_call_maps(&[(s1, c1)]);
         let resolved = ResolvedProgram {
             consts: HashMap::new(),
             params: HashMap::new(),
@@ -1238,8 +1234,8 @@ mod tests {
             call_resolutions: HashMap::new(),
             task_resolutions: HashMap::new(),
             probes: Vec::new(),
-            call_ids: HashMap::new(),
-            call_spans: HashMap::new(),
+            call_ids,
+            call_spans,
             def_ids: HashMap::new(),
             task_ids: HashMap::new(),
         };
@@ -1266,18 +1262,18 @@ mod tests {
     #[test]
     fn l5_unresolved_type_fails() {
         let s1 = span(0, 10);
+        let c1 = CallId(0);
 
         let mut concrete_actors = HashMap::new();
-        concrete_actors.insert(s1, make_polymorphic_meta("scale")); // TypeParam, not concrete
+        concrete_actors.insert(c1, make_polymorphic_meta("scale")); // TypeParam, not concrete
 
         let typed = TypedProgram {
             type_assignments: HashMap::new(),
             widenings: Vec::new(),
             mono_actors: HashMap::new(),
-            type_assignments_by_id: HashMap::new(),
-            mono_actors_by_id: HashMap::new(),
         };
 
+        let (call_ids, call_spans) = make_call_maps(&[(s1, c1)]);
         let resolved = ResolvedProgram {
             consts: HashMap::new(),
             params: HashMap::new(),
@@ -1287,8 +1283,8 @@ mod tests {
             call_resolutions: HashMap::new(),
             task_resolutions: HashMap::new(),
             probes: Vec::new(),
-            call_ids: HashMap::new(),
-            call_spans: HashMap::new(),
+            call_ids,
+            call_spans,
             def_ids: HashMap::new(),
             task_ids: HashMap::new(),
         };

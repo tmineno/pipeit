@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use crate::analyze::AnalyzedProgram;
 use crate::ast::*;
 use crate::graph::*;
+use crate::id::CallId;
 use crate::lower::LoweredProgram;
 use crate::program_query;
 use crate::registry::{ActorMeta, ParamKind, ParamType, PipitType, Registry, TokenCount};
@@ -148,8 +149,8 @@ impl<'a> CodegenCtx<'a> {
     /// Look up the concrete actor metadata for a call, preferring the lowered
     /// program (which has monomorphized metadata for polymorphic actors) over
     /// the raw registry.
-    fn lookup_actor(&self, actor_name: &str, call_span: Span) -> Option<&ActorMeta> {
-        lookup_actor_in(self.lowered, self.registry, actor_name, call_span)
+    fn lookup_actor(&self, actor_name: &str, call_id: CallId) -> Option<&ActorMeta> {
+        lookup_actor_in(self.lowered, self.registry, actor_name, call_id)
     }
 
     fn gqctx(&self) -> GraphQueryCtx<'_> {
@@ -178,9 +179,9 @@ impl<'a> CodegenCtx<'a> {
 
     /// Format the C++ actor struct name, including template parameters for
     /// polymorphic actors (e.g., `Actor_scale<float>`).
-    fn actor_cpp_name(&self, actor_name: &str, call_span: Span) -> String {
+    fn actor_cpp_name(&self, actor_name: &str, call_id: CallId) -> String {
         if let Some(lowered) = self.lowered {
-            if let Some(types) = lowered.type_instantiations.get(&call_span) {
+            if let Some(types) = lowered.type_instantiations.get(&call_id) {
                 if !types.is_empty() {
                     let type_args: Vec<&str> =
                         types.iter().map(|t| pipit_type_to_cpp(*t)).collect();
@@ -295,8 +296,8 @@ impl<'a> CodegenCtx<'a> {
                 for node in &sub.nodes {
                     if let NodeKind::Actor {
                         name,
-                        call_span,
                         args,
+                        call_id,
                         ..
                     } = &node.kind
                     {
@@ -304,7 +305,7 @@ impl<'a> CodegenCtx<'a> {
                             if let Arg::ParamRef(ident) = arg {
                                 if ident.name == param_name {
                                     // Found the actor+position; look up type
-                                    if let Some(meta) = self.lookup_actor(name, *call_span) {
+                                    if let Some(meta) = self.lookup_actor(name, *call_id) {
                                         if let Some(p) = meta.params.get(i) {
                                             return match p.param_type {
                                                 ParamType::Int => "int",
@@ -1146,9 +1147,9 @@ impl<'a> CodegenCtx<'a> {
     ) {
         let NodeKind::Actor {
             name,
-            call_span,
             args,
             shape_constraint,
+            call_id,
             ..
         } = &node.kind
         else {
@@ -1164,7 +1165,7 @@ impl<'a> CodegenCtx<'a> {
             sched,
             node,
             name,
-            *call_span,
+            *call_id,
             args,
             effective_sc,
             indent,
@@ -1233,9 +1234,9 @@ impl<'a> CodegenCtx<'a> {
     ) -> Option<String> {
         let NodeKind::Actor {
             name,
-            call_span,
             args,
             shape_constraint,
+            call_id,
             ..
         } = &node.kind
         else {
@@ -1245,7 +1246,7 @@ impl<'a> CodegenCtx<'a> {
             return None;
         }
 
-        let meta = lookup_actor_in(self.lowered, self.registry, name, *call_span)?;
+        let meta = lookup_actor_in(self.lowered, self.registry, name, *call_id)?;
         let effective_sc = shape_constraint
             .as_ref()
             .or_else(|| self.analysis.inferred_shapes.get(&node.id));
@@ -1259,7 +1260,7 @@ impl<'a> CodegenCtx<'a> {
             &schedule_dim_overrides,
             node.id,
         );
-        let cpp_name = self.actor_cpp_name(name, *call_span);
+        let cpp_name = self.actor_cpp_name(name, *call_id);
         let var_name = format!("_actor_{}", node.id.0);
         if params.is_empty() {
             let _ = writeln!(self.out, "{}auto {} = {}{{}};", indent, var_name, cpp_name);
@@ -1281,14 +1282,14 @@ impl<'a> CodegenCtx<'a> {
         sched: &SubgraphSchedule,
         node: &Node,
         actor_name: &str,
-        call_span: Span,
+        call_id: CallId,
         args: &[Arg],
         shape_constraint: Option<&ShapeConstraint>,
         indent: &str,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
         hoisted_var: Option<&str>,
     ) {
-        let meta = match lookup_actor_in(self.lowered, self.registry, actor_name, call_span) {
+        let meta = match lookup_actor_in(self.lowered, self.registry, actor_name, call_id) {
             Some(m) => m,
             None => return,
         };
@@ -1298,7 +1299,7 @@ impl<'a> CodegenCtx<'a> {
             sched,
             node,
             actor_name,
-            call_span,
+            call_id,
             args,
             shape_constraint,
             indent,
@@ -1336,7 +1337,7 @@ impl<'a> CodegenCtx<'a> {
         sched: &SubgraphSchedule,
         node: &Node,
         actor_name: &str,
-        call_span: Span,
+        call_id: CallId,
         args: &[Arg],
         shape_constraint: Option<&ShapeConstraint>,
         indent: &str,
@@ -1377,7 +1378,7 @@ impl<'a> CodegenCtx<'a> {
                 &schedule_dim_overrides,
                 node.id,
             );
-            let cpp_name = self.actor_cpp_name(actor_name, call_span);
+            let cpp_name = self.actor_cpp_name(actor_name, call_id);
             if params.is_empty() {
                 format!("{}{{}}({}, {})", cpp_name, in_ptr, out_ptr)
             } else {
@@ -2710,10 +2711,8 @@ impl<'a> CodegenCtx<'a> {
             }
             if let Some(node) = self.node_in_subgraph(sub, current) {
                 match &node.kind {
-                    NodeKind::Actor {
-                        name, call_span, ..
-                    } => {
-                        if let Some(meta) = self.lookup_actor(name, *call_span) {
+                    NodeKind::Actor { name, call_id, .. } => {
+                        if let Some(meta) = self.lookup_actor(name, *call_id) {
                             return meta.out_type.as_concrete().unwrap_or(PipitType::Float);
                         }
                         return PipitType::Float;
@@ -2980,10 +2979,10 @@ fn lookup_actor_in<'a>(
     lowered: Option<&'a LoweredProgram>,
     registry: &'a Registry,
     actor_name: &str,
-    call_span: Span,
+    call_id: CallId,
 ) -> Option<&'a ActorMeta> {
     if let Some(l) = lowered {
-        if let Some(meta) = l.concrete_actors.get(&call_span) {
+        if let Some(meta) = l.concrete_actors.get(&call_id) {
             return Some(meta);
         }
     }

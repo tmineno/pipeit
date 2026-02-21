@@ -39,8 +39,8 @@ pub enum NodeKind {
         args: Vec<Arg>,
         /// Optional shape constraint from `actor(...)[d0, d1, ...]` (v0.2.0).
         shape_constraint: Option<ShapeConstraint>,
-        /// Stable call-site identifier (ADR-021). Populated from resolve.
-        call_id: Option<CallId>,
+        /// Stable call-site identifier (ADR-021).
+        call_id: CallId,
     },
     /// A fork node created by a tap declaration (`:name`).
     Fork { tap_name: String },
@@ -453,12 +453,12 @@ impl<'a> GraphBuilder<'a> {
         inline_depth: u32,
     ) -> InlineResult {
         // Check if this call resolves to a define
-        if let Some(CallResolution::Define) = self.resolved.call_resolutions.get(&call.span) {
+        if let Some(CallResolution::Define) = self.resolved.call_resolution_for(call.span) {
             return self.inline_define(call, ctx, pipe_span, inline_depth);
         }
 
         // Regular actor node
-        let call_id = self.resolved.call_ids.get(&call.span).copied();
+        let call_id = self.resolved.call_id_for_span(call.span);
         let id = ctx.add_node(
             NodeKind::Actor {
                 name: call.name.name.clone(),
@@ -1324,7 +1324,7 @@ mod tests {
                         call_span: sp(0, 1),
                         args: vec![],
                         shape_constraint: None,
-                        call_id: None,
+                        call_id: CallId(0),
                     },
                     span: sp(0, 1),
                 },
@@ -1335,7 +1335,7 @@ mod tests {
                         call_span: sp(2, 3),
                         args: vec![],
                         shape_constraint: None,
-                        call_id: None,
+                        call_id: CallId(0),
                     },
                     span: sp(2, 3),
                 },
@@ -1346,7 +1346,7 @@ mod tests {
                         call_span: sp(4, 5),
                         args: vec![],
                         shape_constraint: None,
-                        call_id: None,
+                        call_id: CallId(0),
                     },
                     span: sp(4, 5),
                 },

@@ -36,7 +36,7 @@ pub struct ResolvedProgram {
     pub defines: HashMap<String, DefineEntry>,
     pub tasks: HashMap<String, TaskEntry>,
     pub buffers: HashMap<String, BufferInfo>,
-    pub call_resolutions: HashMap<Span, CallResolution>,
+    pub call_resolutions: HashMap<CallId, CallResolution>,
     pub task_resolutions: HashMap<String, TaskResolution>,
     pub probes: Vec<ProbeEntry>,
 
@@ -58,6 +58,12 @@ impl ResolvedProgram {
             .call_ids
             .get(&span)
             .expect("internal: no CallId for span")
+    }
+
+    /// Look up a call's resolution by its source span (convenience wrapper).
+    pub fn call_resolution_for(&self, span: Span) -> Option<&CallResolution> {
+        let call_id = self.call_ids.get(&span)?;
+        self.call_resolutions.get(call_id)
     }
 }
 
@@ -595,7 +601,7 @@ impl<'a> ResolveCtx<'a> {
             self.resolved.call_spans.insert(call_id, call.span);
             self.resolved
                 .call_resolutions
-                .insert(call.span, CallResolution::Define);
+                .insert(call_id, CallResolution::Define);
             if actor_meta.is_some() {
                 self.warning(
                     call.name.span,
@@ -611,7 +617,7 @@ impl<'a> ResolveCtx<'a> {
             self.resolved.call_spans.insert(call_id, call.span);
             self.resolved
                 .call_resolutions
-                .insert(call.span, CallResolution::Actor);
+                .insert(call_id, CallResolution::Actor);
             self.validate_actor_type_args(call, name, meta.type_params.len());
             return;
         }
