@@ -89,3 +89,25 @@ Examples:
 
 `--baseline-ref` mode uses a shared cargo target dir plus Criterion
 `--save-baseline/--baseline`, so the reported `change:` numbers are true A/B.
+
+## Commit Characterization
+
+Use `./commit_characterize.sh` when you want a commit-by-commit
+runtime/e2e + bounded-compile snapshot and Markdown report.
+
+What it does:
+
+- runs runtime/e2e benchmarks (`ringbuf`, `timer`, `thread`, `e2e`)
+- runs compile benchmark (`kpi/full_compile_latency/*`) with a hard timeout
+- writes `doc/performance/<id>-characterize.md`
+- embeds machine-readable metrics and auto-computes delta vs previous report
+
+Examples:
+
+```bash
+# HEAD-based ID
+./commit_characterize.sh
+
+# Stable ID for pre-commit retry flows
+./commit_characterize.sh --id-source staged-diff --skip-if-exists
+```
