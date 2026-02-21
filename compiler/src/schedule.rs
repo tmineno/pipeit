@@ -4,9 +4,9 @@
 // Per-task topological sort of actors in dependency order, with each actor
 // firing repetition_vector[node] times per PASS cycle.
 //
-// Preconditions: `program` is a parsed AST; `resolved` passed name resolution;
+// Preconditions: `thir` is a ThirContext wrapping HIR + resolved/typed/lowered;
 //                `graph` is a valid ProgramGraph with detected cycles;
-//                `analysis` has computed repetition vectors; `registry` has actor metadata.
+//                `analysis` has computed repetition vectors.
 // Postconditions: returns `ScheduleResult` with per-task schedules, K factors,
 //                 and intra-task buffer sizes.
 // Failure modes: unsortable subgraphs produce `Diagnostic` entries.
@@ -20,9 +20,8 @@ use chumsky::span::Span as _;
 use crate::analyze::AnalyzedProgram;
 use crate::ast::*;
 use crate::graph::*;
-use crate::program_query;
-use crate::registry::Registry;
-use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
+use crate::resolve::{DiagLevel, Diagnostic};
+use crate::thir::ThirContext;
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -80,13 +79,11 @@ pub struct ScheduledProgram {
 
 /// Generate PASS schedules for all tasks in a program.
 pub fn schedule(
-    program: &Program,
-    resolved: &ResolvedProgram,
+    thir: &ThirContext,
     graph: &ProgramGraph,
     analysis: &AnalyzedProgram,
-    registry: &Registry,
 ) -> ScheduleResult {
-    let mut ctx = ScheduleCtx::new(program, resolved, graph, analysis, registry);
+    let mut ctx = ScheduleCtx::new(thir, graph, analysis);
     ctx.schedule_all_tasks();
     ctx.build_result()
 }
@@ -94,7 +91,7 @@ pub fn schedule(
 // ── Internal context ────────────────────────────────────────────────────────
 
 struct ScheduleCtx<'a> {
-    program: &'a Program,
+    thir: &'a ThirContext<'a>,
     graph: &'a ProgramGraph,
     analysis: &'a AnalyzedProgram,
     diagnostics: Vec<Diagnostic>,
@@ -103,14 +100,12 @@ struct ScheduleCtx<'a> {
 
 impl<'a> ScheduleCtx<'a> {
     fn new(
-        program: &'a Program,
-        _resolved: &'a ResolvedProgram,
+        thir: &'a ThirContext<'a>,
         graph: &'a ProgramGraph,
         analysis: &'a AnalyzedProgram,
-        _registry: &'a Registry,
     ) -> Self {
         ScheduleCtx {
-            program,
+            thir,
             graph,
             analysis,
             diagnostics: Vec::new(),
@@ -148,17 +143,12 @@ impl<'a> ScheduleCtx<'a> {
     // ── Task scheduling ─────────────────────────────────────────────────
 
     fn schedule_all_tasks(&mut self) {
-        for stmt in &self.program.statements {
-            if let StatementKind::Task(task) = &stmt.kind {
-                self.schedule_task(task);
-            }
+        for hir_task in &self.thir.hir.tasks {
+            self.schedule_task(&hir_task.name, hir_task.freq_hz, hir_task.freq_span);
         }
     }
 
-    fn schedule_task(&mut self, task: &TaskStmt) {
-        let task_name = &task.name.name;
-        let freq_hz = task.freq;
-
+    fn schedule_task(&mut self, task_name: &str, freq_hz: f64, freq_span: Span) {
         let task_graph = match self.graph.tasks.get(task_name) {
             Some(g) => g,
             None => return,
@@ -205,8 +195,7 @@ impl<'a> ScheduleCtx<'a> {
             }
         };
 
-        let tick_rate_hz =
-            program_query::get_set_freq(self.program, "tick_rate").unwrap_or(10_000.0);
+        let tick_rate_hz = self.thir.tick_rate_hz;
         let k = compute_k_factor(freq_hz, tick_rate_hz);
 
         // Rate guardrails (ADR-014): warn when effective timer rate is unsustainable
@@ -214,7 +203,7 @@ impl<'a> ScheduleCtx<'a> {
         let period_ns = 1_000_000_000.0 / timer_hz;
         if period_ns < 10_000.0 {
             self.warning(
-                task.freq_span,
+                freq_span,
                 format!(
                     "effective tick period is {:.0}ns ({:.0}Hz); \
                      most OS schedulers cannot sustain rates above ~100kHz reliably",
@@ -521,12 +510,23 @@ mod tests {
             "graph errors: {:#?}",
             graph_result.diagnostics
         );
-        let analysis_result = crate::analyze::analyze(
+        let type_result =
+            crate::type_infer::type_infer(&program, &resolve_result.resolved, registry);
+        let lower_result = crate::lower::lower_and_verify(
             &program,
             &resolve_result.resolved,
-            &graph_result.graph,
+            &type_result.typed,
             registry,
         );
+        let thir = crate::thir::build_thir_context(
+            &hir_program,
+            &resolve_result.resolved,
+            &type_result.typed,
+            &lower_result.lowered,
+            registry,
+            &graph_result.graph,
+        );
+        let analysis_result = crate::analyze::analyze(&thir, &graph_result.graph);
         assert!(
             analysis_result
                 .diagnostics
@@ -535,13 +535,7 @@ mod tests {
             "analysis errors: {:#?}",
             analysis_result.diagnostics
         );
-        schedule(
-            &program,
-            &resolve_result.resolved,
-            &graph_result.graph,
-            &analysis_result.analysis,
-            registry,
-        )
+        schedule(&thir, &graph_result.graph, &analysis_result.analysis)
     }
 
     fn schedule_ok(source: &str, registry: &Registry) -> ScheduleResult {
@@ -736,20 +730,25 @@ mod tests {
             "graph errors: {:#?}",
             graph_result.diagnostics
         );
-        let analysis_result = crate::analyze::analyze(
+        let type_result =
+            crate::type_infer::type_infer(&program, &resolve_result.resolved, registry);
+        let lower_result = crate::lower::lower_and_verify(
             &program,
             &resolve_result.resolved,
-            &graph_result.graph,
+            &type_result.typed,
             registry,
         );
-        // Skip analysis error assertion — allow cycle-without-delay errors through
-        schedule(
-            &program,
+        let thir = crate::thir::build_thir_context(
+            &hir_program,
             &resolve_result.resolved,
-            &graph_result.graph,
-            &analysis_result.analysis,
+            &type_result.typed,
+            &lower_result.lowered,
             registry,
-        )
+            &graph_result.graph,
+        );
+        let analysis_result = crate::analyze::analyze(&thir, &graph_result.graph);
+        // Skip analysis error assertion — allow cycle-without-delay errors through
+        schedule(&thir, &graph_result.graph, &analysis_result.analysis)
     }
 
     #[test]

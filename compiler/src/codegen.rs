@@ -3086,12 +3086,23 @@ mod tests {
             "graph errors: {:#?}",
             graph_result.diagnostics
         );
-        let analysis_result = crate::analyze::analyze(
+        let type_result =
+            crate::type_infer::type_infer(&program, &resolve_result.resolved, registry);
+        let lower_result = crate::lower::lower_and_verify(
             &program,
             &resolve_result.resolved,
-            &graph_result.graph,
+            &type_result.typed,
             registry,
         );
+        let thir = crate::thir::build_thir_context(
+            &hir_program,
+            &resolve_result.resolved,
+            &type_result.typed,
+            &lower_result.lowered,
+            registry,
+            &graph_result.graph,
+        );
+        let analysis_result = crate::analyze::analyze(&thir, &graph_result.graph);
         assert!(
             analysis_result
                 .diagnostics
@@ -3100,13 +3111,8 @@ mod tests {
             "analysis errors: {:#?}",
             analysis_result.diagnostics
         );
-        let schedule_result = crate::schedule::schedule(
-            &program,
-            &resolve_result.resolved,
-            &graph_result.graph,
-            &analysis_result.analysis,
-            registry,
-        );
+        let schedule_result =
+            crate::schedule::schedule(&thir, &graph_result.graph, &analysis_result.analysis);
         assert!(
             schedule_result
                 .diagnostics
@@ -3865,12 +3871,15 @@ mod tests {
             "graph errors: {:#?}",
             graph_result.diagnostics
         );
-        let analysis_result = crate::analyze::analyze(
-            &program,
+        let thir = crate::thir::build_thir_context(
+            &hir_program,
             &resolve_result.resolved,
-            &graph_result.graph,
+            &type_infer_result.typed,
+            &lower_result.lowered,
             registry,
+            &graph_result.graph,
         );
+        let analysis_result = crate::analyze::analyze(&thir, &graph_result.graph);
         assert!(
             analysis_result
                 .diagnostics
@@ -3879,13 +3888,8 @@ mod tests {
             "analysis errors: {:#?}",
             analysis_result.diagnostics
         );
-        let schedule_result = crate::schedule::schedule(
-            &program,
-            &resolve_result.resolved,
-            &graph_result.graph,
-            &analysis_result.analysis,
-            registry,
-        );
+        let schedule_result =
+            crate::schedule::schedule(&thir, &graph_result.graph, &analysis_result.analysis);
         assert!(
             schedule_result
                 .diagnostics

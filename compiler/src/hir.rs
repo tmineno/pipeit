@@ -32,6 +32,8 @@ pub struct HirProgram {
     /// CallId maps for define-expanded calls (supplements resolve-phase maps).
     pub expanded_call_ids: HashMap<Span, CallId>,
     pub expanded_call_spans: HashMap<CallId, Span>,
+    /// Span of the original program (for fallback diagnostics).
+    pub program_span: Span,
 }
 
 // ── Task ────────────────────────────────────────────────────────────────────
@@ -66,11 +68,11 @@ pub struct HirModal {
     pub span: Span,
 }
 
-/// Normalized switch source (names only, no AST Ident wrapper).
+/// Normalized switch source with span for diagnostics.
 #[derive(Debug, Clone)]
 pub enum HirSwitchSource {
-    Buffer(String),
-    Param(String),
+    Buffer(String, Span),
+    Param(String, Span),
 }
 
 // ── Pipe expression ─────────────────────────────────────────────────────────
@@ -151,6 +153,8 @@ pub struct HirSetDirective {
     pub name: String,
     /// Reuses AST `SetValue`.
     pub value: SetValue,
+    /// Span of the entire `set` statement (for diagnostics).
+    pub span: Span,
 }
 
 // ── Builder ─────────────────────────────────────────────────────────────────
@@ -228,6 +232,7 @@ impl<'a> HirBuilder<'a> {
                     set_directives.push(HirSetDirective {
                         name: s.name.name.clone(),
                         value: s.value.clone(),
+                        span: stmt.span,
                     });
                 }
                 StatementKind::Define(_) => {
@@ -243,6 +248,7 @@ impl<'a> HirBuilder<'a> {
             set_directives,
             expanded_call_ids: std::mem::take(&mut self.expanded_call_ids),
             expanded_call_spans: std::mem::take(&mut self.expanded_call_spans),
+            program_span: self.program.span,
         }
     }
 
@@ -291,8 +297,12 @@ impl<'a> HirBuilder<'a> {
                     })
                     .collect();
                 let switch = match &modal.switch.source {
-                    SwitchSource::Buffer(ident) => HirSwitchSource::Buffer(ident.name.clone()),
-                    SwitchSource::Param(ident) => HirSwitchSource::Param(ident.name.clone()),
+                    SwitchSource::Buffer(ident) => {
+                        HirSwitchSource::Buffer(ident.name.clone(), ident.span)
+                    }
+                    SwitchSource::Param(ident) => {
+                        HirSwitchSource::Param(ident.name.clone(), ident.span)
+                    }
                 };
                 HirTaskBody::Modal(HirModal {
                     control,

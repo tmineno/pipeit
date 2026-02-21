@@ -157,17 +157,21 @@ fn compile_full(source: &str, registry: &registry::Registry, opts: &codegen::Cod
     let graph_result = graph::build_graph(&hir_program, &resolve_result.resolved, registry);
     assert_no_errors("graph", &graph_result.diagnostics);
 
-    let analysis_result =
-        analyze::analyze(ast, &resolve_result.resolved, &graph_result.graph, registry);
+    let type_result = type_infer::type_infer(ast, &resolve_result.resolved, registry);
+    let lower_result =
+        lower::lower_and_verify(ast, &resolve_result.resolved, &type_result.typed, registry);
+    let thir = thir::build_thir_context(
+        &hir_program,
+        &resolve_result.resolved,
+        &type_result.typed,
+        &lower_result.lowered,
+        registry,
+        &graph_result.graph,
+    );
+    let analysis_result = analyze::analyze(&thir, &graph_result.graph);
     assert_no_errors("analyze", &analysis_result.diagnostics);
 
-    let schedule_result = schedule::schedule(
-        ast,
-        &resolve_result.resolved,
-        &graph_result.graph,
-        &analysis_result.analysis,
-        registry,
-    );
+    let schedule_result = schedule::schedule(&thir, &graph_result.graph, &analysis_result.analysis);
     assert_no_errors("schedule", &schedule_result.diagnostics);
 
     let generated = codegen::codegen(
@@ -240,17 +244,22 @@ fn bench_analyze_phase(c: &mut Criterion, source: &str, registry: &registry::Reg
             let mut rr = resolve::resolve(&ast, registry);
             let hir = hir::build_hir(&ast, &rr.resolved, &mut rr.id_alloc);
             let gr = graph::build_graph(&hir, &rr.resolved, registry);
-            (ast, rr, gr)
+            let tr = type_infer::type_infer(&ast, &rr.resolved, registry);
+            let lr = lower::lower_and_verify(&ast, &rr.resolved, &tr.typed, registry);
+            (rr, hir, gr, tr, lr)
         },
-        |(ast, rr, gr)| {
+        |(rr, hir, gr, tr, lr)| {
             assert_no_errors("resolve", &rr.diagnostics);
             assert_no_errors("graph", &gr.diagnostics);
-            let r = analyze::analyze(
-                black_box(&ast),
-                black_box(&rr.resolved),
-                black_box(&gr.graph),
+            let thir = thir::build_thir_context(
+                &hir,
+                &rr.resolved,
+                &tr.typed,
+                &lr.lowered,
                 registry,
+                &gr.graph,
             );
+            let r = analyze::analyze(black_box(&thir), black_box(&gr.graph));
             black_box(&r.analysis);
         },
     );
@@ -265,19 +274,36 @@ fn bench_schedule_phase(c: &mut Criterion, source: &str, registry: &registry::Re
             let mut rr = resolve::resolve(&ast, registry);
             let hir = hir::build_hir(&ast, &rr.resolved, &mut rr.id_alloc);
             let gr = graph::build_graph(&hir, &rr.resolved, registry);
-            let ar = analyze::analyze(&ast, &rr.resolved, &gr.graph, registry);
-            (ast, rr, gr, ar)
+            let tr = type_infer::type_infer(&ast, &rr.resolved, registry);
+            let lr = lower::lower_and_verify(&ast, &rr.resolved, &tr.typed, registry);
+            // Build ThirContext + analyze in setup (ThirContext rebuilt in run closure)
+            let thir_setup = thir::build_thir_context(
+                &hir,
+                &rr.resolved,
+                &tr.typed,
+                &lr.lowered,
+                registry,
+                &gr.graph,
+            );
+            let ar = analyze::analyze(&thir_setup, &gr.graph);
+            (rr, hir, gr, tr, lr, ar)
         },
-        |(ast, rr, gr, ar)| {
+        |(rr, hir, gr, tr, lr, ar)| {
             assert_no_errors("resolve", &rr.diagnostics);
             assert_no_errors("graph", &gr.diagnostics);
             assert_no_errors("analyze", &ar.diagnostics);
+            let thir = thir::build_thir_context(
+                &hir,
+                &rr.resolved,
+                &tr.typed,
+                &lr.lowered,
+                registry,
+                &gr.graph,
+            );
             let r = schedule::schedule(
-                black_box(&ast),
-                black_box(&rr.resolved),
+                black_box(&thir),
                 black_box(&gr.graph),
                 black_box(&ar.analysis),
-                registry,
             );
             black_box(&r.schedule);
         },
@@ -298,8 +324,18 @@ fn bench_codegen_phase(
             let mut rr = resolve::resolve(&ast, registry);
             let hir = hir::build_hir(&ast, &rr.resolved, &mut rr.id_alloc);
             let gr = graph::build_graph(&hir, &rr.resolved, registry);
-            let ar = analyze::analyze(&ast, &rr.resolved, &gr.graph, registry);
-            let sr = schedule::schedule(&ast, &rr.resolved, &gr.graph, &ar.analysis, registry);
+            let tr = type_infer::type_infer(&ast, &rr.resolved, registry);
+            let lr = lower::lower_and_verify(&ast, &rr.resolved, &tr.typed, registry);
+            let thir_setup = thir::build_thir_context(
+                &hir,
+                &rr.resolved,
+                &tr.typed,
+                &lr.lowered,
+                registry,
+                &gr.graph,
+            );
+            let ar = analyze::analyze(&thir_setup, &gr.graph);
+            let sr = schedule::schedule(&thir_setup, &gr.graph, &ar.analysis);
             (ast, rr, gr, ar, sr)
         },
         |(ast, rr, gr, ar, sr)| {

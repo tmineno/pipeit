@@ -222,13 +222,18 @@ fn main() {
         std::process::exit(EXIT_OK);
     }
 
-    // ── Static analysis ──
-    let analysis_result = pcc::analyze::analyze(
-        &program,
+    // ── ThirContext construction ──
+    let thir = pcc::thir::build_thir_context(
+        &hir,
         &resolve_result.resolved,
-        &graph_result.graph,
+        &type_infer_result.typed,
+        &lower_result.lowered,
         &registry,
+        &graph_result.graph,
     );
+
+    // ── Static analysis ──
+    let analysis_result = pcc::analyze::analyze(&thir, &graph_result.graph);
     let analysis_has_errors =
         print_pipeline_diags(&cli.source, &source, &analysis_result.diagnostics);
     if analysis_has_errors {
@@ -243,13 +248,8 @@ fn main() {
     }
 
     // ── Schedule generation ──
-    let schedule_result = pcc::schedule::schedule(
-        &program,
-        &resolve_result.resolved,
-        &graph_result.graph,
-        &analysis_result.analysis,
-        &registry,
-    );
+    let schedule_result =
+        pcc::schedule::schedule(&thir, &graph_result.graph, &analysis_result.analysis);
     let schedule_has_errors =
         print_pipeline_diags(&cli.source, &source, &schedule_result.diagnostics);
     if schedule_has_errors {

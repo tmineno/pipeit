@@ -100,12 +100,15 @@ fn full_pipeline_cpp(source: &str, registry: &pcc::registry::Registry) -> String
         graph_result.diagnostics
     );
 
-    let analysis_result = pcc::analyze::analyze(
-        &program,
+    let thir = pcc::thir::build_thir_context(
+        &hir_program,
         &resolve_result.resolved,
-        &graph_result.graph,
+        &type_result.typed,
+        &lower_result.lowered,
         registry,
+        &graph_result.graph,
     );
+    let analysis_result = pcc::analyze::analyze(&thir, &graph_result.graph);
     assert!(
         analysis_result
             .diagnostics
@@ -115,13 +118,8 @@ fn full_pipeline_cpp(source: &str, registry: &pcc::registry::Registry) -> String
         analysis_result.diagnostics
     );
 
-    let schedule_result = pcc::schedule::schedule(
-        &program,
-        &resolve_result.resolved,
-        &graph_result.graph,
-        &analysis_result.analysis,
-        registry,
-    );
+    let schedule_result =
+        pcc::schedule::schedule(&thir, &graph_result.graph, &analysis_result.analysis);
     assert!(
         schedule_result
             .diagnostics

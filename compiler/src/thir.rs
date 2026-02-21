@@ -12,14 +12,14 @@
 //
 // See ADR-024 for design rationale.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::ast::{Arg, Scalar, SetValue, ShapeDim, Value};
+use crate::ast::{Arg, Scalar, SetValue, ShapeDim, Span, Value};
 use crate::graph::{NodeKind, ProgramGraph};
 use crate::hir::{HirConst, HirParam, HirProgram, HirSetDirective, HirTask};
 use crate::id::CallId;
 use crate::lower::LoweredProgram;
-use crate::registry::{ActorMeta, ParamType, Registry};
+use crate::registry::{ActorMeta, ParamKind, ParamType, PortShape, Registry, TokenCount};
 use crate::resolve::ResolvedProgram;
 use crate::subgraph_index::subgraphs_of;
 use crate::type_infer::TypedProgram;
@@ -46,9 +46,13 @@ pub struct ThirContext<'a> {
 
     // ── Precomputed set-directive values ──
     pub mem_bytes: u64,
+    /// Span of the `set mem` directive (None if using default 64MB).
+    pub mem_span: Option<Span>,
     pub tick_rate_hz: f64,
     pub timer_spin: Option<f64>,
     pub overrun_policy: String,
+    /// Span of the original program (fallback for diagnostics).
+    pub program_span: Span,
 
     // ── Precomputed param C++ types ──
     pub param_cpp_types: HashMap<String, &'static str>,
@@ -95,10 +99,11 @@ pub fn build_thir_context<'a>(
         .collect();
 
     // Extract common set-directive values
-    let mem_bytes =
-        find_set_size(&hir.set_directives, &set_index, "mem").unwrap_or(64 * 1024 * 1024);
+    let (mem_bytes, mem_span) = find_set_size_with_span(&hir.set_directives, &set_index, "mem")
+        .map(|(v, s)| (v, Some(s)))
+        .unwrap_or((64 * 1024 * 1024, None));
     let tick_rate_hz =
-        find_set_freq(&hir.set_directives, &set_index, "tick_rate").unwrap_or(1_000_000.0);
+        find_set_freq(&hir.set_directives, &set_index, "tick_rate").unwrap_or(10_000.0);
     let timer_spin = find_set_number(&hir.set_directives, &set_index, "timer_spin");
     let overrun_policy = find_set_ident(&hir.set_directives, &set_index, "overrun")
         .unwrap_or("stop")
@@ -118,9 +123,11 @@ pub fn build_thir_context<'a>(
         param_index,
         set_index,
         mem_bytes,
+        mem_span,
         tick_rate_hz,
         timer_spin,
         overrun_policy,
+        program_span: hir.program_span,
         param_cpp_types,
     }
 }
@@ -209,18 +216,189 @@ impl<'a> ThirContext<'a> {
             _ => None,
         }
     }
+
+    // ── Port rate resolution (replaces dim_resolve::resolve_port_rate) ───
+
+    /// Resolve a PortShape to a concrete rate (product of all dimensions).
+    ///
+    /// Resolution precedence per dimension:
+    /// 1. Literal values in shape definition
+    /// 2. Explicit actor arguments
+    /// 3. Call-site shape constraint
+    /// 4. Span-derived inference
+    pub fn resolve_port_rate(
+        &self,
+        shape: &PortShape,
+        actor_meta: &ActorMeta,
+        actor_args: &[Arg],
+        shape_constraint: Option<&[ShapeDim]>,
+    ) -> Option<u32> {
+        let mut rate: u32 = 1;
+        for (dim_idx, dim) in shape.dims.iter().enumerate() {
+            let dim_val = match dim {
+                TokenCount::Literal(n) => *n,
+                TokenCount::Symbolic(name) => {
+                    let from_arg = actor_meta
+                        .params
+                        .iter()
+                        .position(|p| p.name == *name)
+                        .and_then(|idx| actor_args.get(idx))
+                        .and_then(|arg| self.resolve_arg_to_u32(arg));
+                    if let Some(v) = from_arg {
+                        v
+                    } else if let Some(v) = shape_constraint
+                        .and_then(|sc| sc.get(dim_idx))
+                        .and_then(|sd| self.resolve_shape_dim(sd))
+                    {
+                        v
+                    } else if let Some(v) =
+                        self.infer_dim_param_from_span_args(name, actor_meta, actor_args)
+                    {
+                        v
+                    } else {
+                        return None;
+                    }
+                }
+            };
+            rate = rate.checked_mul(dim_val)?;
+        }
+        Some(rate)
+    }
+
+    /// Infer a symbolic dimension parameter value from span-typed arguments.
+    pub fn infer_dim_param_from_span_args(
+        &self,
+        dim_name: &str,
+        actor_meta: &ActorMeta,
+        actor_args: &[Arg],
+    ) -> Option<u32> {
+        let dim_param = actor_meta.params.iter().find(|p| p.name == dim_name)?;
+        if dim_param.kind != ParamKind::Param || dim_param.param_type != ParamType::Int {
+            return None;
+        }
+        let span_len = actor_meta
+            .params
+            .iter()
+            .enumerate()
+            .find_map(|(idx, param)| {
+                if param.kind != ParamKind::Param {
+                    return None;
+                }
+                if !matches!(
+                    param.param_type,
+                    ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
+                ) {
+                    return None;
+                }
+                actor_args
+                    .get(idx)
+                    .and_then(|arg| self.resolve_arg_to_u32(arg))
+            })?;
+
+        let mut dim_names: HashSet<&str> = HashSet::new();
+        for dim in actor_meta
+            .in_shape
+            .dims
+            .iter()
+            .chain(actor_meta.out_shape.dims.iter())
+        {
+            if let TokenCount::Symbolic(sym) = dim {
+                dim_names.insert(sym.as_str());
+            }
+        }
+        let first_unresolved_dim = actor_meta.params.iter().enumerate().find_map(|(idx, p)| {
+            if p.kind != ParamKind::Param || p.param_type != ParamType::Int {
+                return None;
+            }
+            if !dim_names.contains(p.name.as_str()) {
+                return None;
+            }
+            let explicit = actor_args
+                .get(idx)
+                .and_then(|arg| self.resolve_arg_to_u32(arg));
+            if explicit.is_some() {
+                return None;
+            }
+            Some(p.name.as_str())
+        })?;
+
+        if first_unresolved_dim == dim_name {
+            Some(span_len)
+        } else {
+            None
+        }
+    }
+
+    /// Return the span-argument-derived length for a dimension, ignoring whether
+    /// the dimension already has an explicit argument. Used for conflict detection.
+    pub fn span_arg_length_for_dim(
+        &self,
+        dim_name: &str,
+        actor_meta: &ActorMeta,
+        actor_args: &[Arg],
+    ) -> Option<u32> {
+        let dim_param = actor_meta.params.iter().find(|p| p.name == dim_name)?;
+        if dim_param.kind != ParamKind::Param || dim_param.param_type != ParamType::Int {
+            return None;
+        }
+        let span_len = actor_meta
+            .params
+            .iter()
+            .enumerate()
+            .find_map(|(idx, param)| {
+                if param.kind != ParamKind::Param {
+                    return None;
+                }
+                if !matches!(
+                    param.param_type,
+                    ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
+                ) {
+                    return None;
+                }
+                actor_args
+                    .get(idx)
+                    .and_then(|arg| self.resolve_arg_to_u32(arg))
+            })?;
+
+        let mut dim_names: HashSet<&str> = HashSet::new();
+        for dim in actor_meta
+            .in_shape
+            .dims
+            .iter()
+            .chain(actor_meta.out_shape.dims.iter())
+        {
+            if let TokenCount::Symbolic(sym) = dim {
+                dim_names.insert(sym.as_str());
+            }
+        }
+        let first_sym_dim = actor_meta.params.iter().find_map(|p| {
+            if p.kind != ParamKind::Param || p.param_type != ParamType::Int {
+                return None;
+            }
+            if !dim_names.contains(p.name.as_str()) {
+                return None;
+            }
+            Some(p.name.as_str())
+        })?;
+
+        if first_sym_dim == dim_name {
+            Some(span_len)
+        } else {
+            None
+        }
+    }
 }
 
 // ── Internal helpers ────────────────────────────────────────────────────────
 
-fn find_set_size(
+fn find_set_size_with_span(
     directives: &[HirSetDirective],
     index: &HashMap<String, usize>,
     name: &str,
-) -> Option<u64> {
+) -> Option<(u64, Span)> {
     let &i = index.get(name)?;
     match &directives[i].value {
-        SetValue::Size(v, _) => Some(*v),
+        SetValue::Size(v, _) => Some((*v, directives[i].span)),
         _ => None,
     }
 }
@@ -455,14 +633,17 @@ mod tests {
                 HirSetDirective {
                     name: "mem".to_string(),
                     value: SetValue::Size(64 * 1024 * 1024, sp(80, 85)),
+                    span: sp(75, 85),
                 },
                 HirSetDirective {
                     name: "tick_rate".to_string(),
                     value: SetValue::Freq(1000.0, sp(90, 95)),
+                    span: sp(86, 95),
                 },
             ],
             expanded_call_ids: HashMap::new(),
             expanded_call_spans: HashMap::new(),
+            program_span: sp(0, 100),
         }
     }
 

@@ -5,7 +5,7 @@
 // checks cross-clock rate matching, computes buffer sizes, and validates
 // runtime parameter types.
 //
-// Preconditions: `program` is a parsed AST; `resolved` passed name resolution;
+// Preconditions: `thir` is a ThirContext wrapping HIR + resolved/typed/lowered;
 //                `graph` is a valid ProgramGraph; `registry` has actor metadata.
 // Postconditions: returns `AnalysisResult` with computed repetition vectors,
 //                 buffer sizes, and all accumulated diagnostics.
@@ -20,15 +20,14 @@ use chumsky::span::Span as _;
 
 use crate::ast::*;
 use crate::graph::*;
-use crate::program_query;
-use crate::registry::{
-    ActorMeta, ParamKind, ParamType, PipitType, PortShape, Registry, TokenCount,
-};
-use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
+use crate::hir::{HirSwitchSource, HirTaskBody};
+use crate::registry::{ActorMeta, ParamKind, ParamType, PipitType, PortShape, TokenCount};
+use crate::resolve::{DiagLevel, Diagnostic};
 use crate::subgraph_index::{
     build_global_node_index, build_subgraph_indices, find_node, subgraph_key, subgraphs_of,
     GraphQueryCtx, SubgraphIndex,
 };
+use crate::thir::ThirContext;
 
 const SHAPE_WORKLIST_MIN_EDGES: usize = 24;
 
@@ -75,13 +74,8 @@ pub struct NodePortRates {
 // ── Public entry point ──────────────────────────────────────────────────────
 
 /// Run all static analysis checks on a built SDF program graph.
-pub fn analyze(
-    program: &Program,
-    resolved: &ResolvedProgram,
-    graph: &ProgramGraph,
-    registry: &Registry,
-) -> AnalysisResult {
-    let mut ctx = AnalyzeCtx::new(program, resolved, graph, registry);
+pub fn analyze(thir: &ThirContext, graph: &ProgramGraph) -> AnalysisResult {
+    let mut ctx = AnalyzeCtx::new(thir, graph);
     ctx.check_types();
     ctx.record_span_derived_dims();
     ctx.infer_shapes_from_edges();
@@ -100,10 +94,8 @@ pub fn analyze(
 // ── Internal context ────────────────────────────────────────────────────────
 
 struct AnalyzeCtx<'a> {
-    program: &'a Program,
-    resolved: &'a ResolvedProgram,
+    thir: &'a ThirContext<'a>,
     graph: &'a ProgramGraph,
-    registry: &'a Registry,
     diagnostics: Vec<Diagnostic>,
     repetition_vectors: HashMap<(String, String), HashMap<NodeId, u32>>,
     inter_buffers: HashMap<String, u64>,
@@ -176,20 +168,13 @@ impl ShapeWorklist {
 }
 
 impl<'a> AnalyzeCtx<'a> {
-    fn new(
-        program: &'a Program,
-        resolved: &'a ResolvedProgram,
-        graph: &'a ProgramGraph,
-        registry: &'a Registry,
-    ) -> Self {
+    fn new(thir: &'a ThirContext<'a>, graph: &'a ProgramGraph) -> Self {
         let subgraph_indices = build_subgraph_indices(graph);
         let subgraph_refs = build_subgraph_refs(graph);
         let global_node_index = build_global_node_index(graph, &subgraph_indices);
         AnalyzeCtx {
-            program,
-            resolved,
+            thir,
             graph,
-            registry,
             diagnostics: Vec::new(),
             repetition_vectors: HashMap::new(),
             inter_buffers: HashMap::new(),
@@ -267,7 +252,7 @@ impl<'a> AnalyzeCtx<'a> {
 
     /// Look up actor metadata by name.
     fn actor_meta(&self, name: &str) -> Option<&ActorMeta> {
-        self.registry.lookup(name)
+        self.thir.registry.lookup(name)
     }
 
     fn gqctx(&self) -> GraphQueryCtx<'_> {
@@ -353,7 +338,7 @@ impl<'a> AnalyzeCtx<'a> {
 
     /// Infer the wire type of a shared buffer by tracing from the writer side.
     fn infer_buffer_type(&self, buffer_name: &str) -> Option<PipitType> {
-        let buf_info = self.resolved.buffers.get(buffer_name)?;
+        let buf_info = self.thir.resolved.buffers.get(buffer_name)?;
         let task_graph = self.graph.tasks.get(&buf_info.writer_task)?;
         let write_node = find_buffer_write_in_task(task_graph, buffer_name)?;
         // Find the subgraph containing this node and trace backward
@@ -422,7 +407,6 @@ impl<'a> AnalyzeCtx<'a> {
 
     /// Resolve a PortShape to a concrete rate (product of resolved dimensions).
     /// Uses shape constraint from call site to infer symbolic dimensions.
-    /// Falls back to scalar `resolve_token_count` for rank-1 backward compat.
     fn resolve_port_rate(
         &self,
         shape: &PortShape,
@@ -430,36 +414,29 @@ impl<'a> AnalyzeCtx<'a> {
         actor_args: &[Arg],
         shape_constraint: Option<&ShapeConstraint>,
     ) -> Option<u32> {
-        crate::dim_resolve::resolve_port_rate(
+        self.thir.resolve_port_rate(
             shape,
             actor_meta,
             actor_args,
             shape_constraint.map(|sc| sc.dims.as_slice()),
-            self.resolved,
-            self.program,
         )
     }
 
     /// Resolve a single ShapeDim from a call-site shape constraint.
     fn resolve_shape_dim(&self, dim: &ShapeDim) -> Option<u32> {
-        crate::dim_resolve::resolve_shape_dim(dim, self.resolved, self.program)
+        self.thir.resolve_shape_dim(dim)
     }
 
     /// Resolve an Arg to a u32 value (for token count resolution).
     fn resolve_arg_to_u32(&self, arg: &Arg) -> Option<u32> {
-        crate::dim_resolve::resolve_arg_to_u32(arg, self.resolved, self.program)
+        self.thir.resolve_arg_to_u32(arg)
     }
 
-    /// Get the clock frequency for a task from the AST.
+    /// Get the clock frequency for a task from HIR.
     fn get_task_freq(&self, task_name: &str) -> Option<(f64, Span)> {
-        for stmt in &self.program.statements {
-            if let StatementKind::Task(t) = &stmt.kind {
-                if t.name.name == task_name {
-                    return Some((t.freq, t.freq_span));
-                }
-            }
-        }
-        None
+        self.thir
+            .task_info(task_name)
+            .map(|t| (t.freq_hz, t.freq_span))
     }
 
     /// Get memory pool limit in bytes.
@@ -468,12 +445,7 @@ impl<'a> AnalyzeCtx<'a> {
     /// - (`set mem` value, Some(span)) when explicitly configured.
     /// - (64MB, None) when omitted (spec default).
     fn get_mem_limit(&self) -> (u64, Option<Span>) {
-        if let Some((SetValue::Size(bytes, _), span)) =
-            program_query::get_set_value_with_span(self.program, "mem")
-        {
-            return (*bytes, Some(span));
-        }
-        (64 * 1024 * 1024, None)
+        (self.thir.mem_bytes, self.thir.mem_span)
     }
 
     // ── Phase 0: Shape inference from SDF edges (§13.3.3) ────────────────
@@ -953,13 +925,8 @@ impl<'a> AnalyzeCtx<'a> {
         actor_meta: &ActorMeta,
         actor_args: &[Arg],
     ) -> Option<u32> {
-        crate::dim_resolve::infer_dim_param_from_span_args(
-            dim_name,
-            actor_meta,
-            actor_args,
-            self.resolved,
-            self.program,
-        )
+        self.thir
+            .infer_dim_param_from_span_args(dim_name, actor_meta, actor_args)
     }
 
     // ── Phase 0a2: Record span-derived dimension params ─────────────────
@@ -1091,13 +1058,7 @@ impl<'a> AnalyzeCtx<'a> {
 
             // Compute span-inferred value directly (not from span_derived_dims map,
             // since that map skips entries when explicit arg is present).
-            let span_val = crate::dim_resolve::span_arg_length_for_dim(
-                sym_name,
-                meta,
-                args,
-                self.resolved,
-                self.program,
-            );
+            let span_val = self.thir.span_arg_length_for_dim(sym_name, meta, args);
             let span_val = match span_val {
                 Some(v) => v,
                 None => continue,
@@ -1107,9 +1068,7 @@ impl<'a> AnalyzeCtx<'a> {
             let from_arg = param_indices
                 .get(sym_name)
                 .and_then(|idx| args.get(*idx))
-                .and_then(|arg| {
-                    crate::dim_resolve::resolve_arg_to_u32(arg, self.resolved, self.program)
-                });
+                .and_then(|arg| self.thir.resolve_arg_to_u32(arg));
             if let Some(arg_val) = from_arg {
                 if arg_val != span_val {
                     pending.push((
@@ -1129,9 +1088,11 @@ impl<'a> AnalyzeCtx<'a> {
             // Check: shape constraint vs span-derived
             if let Some(sc) = shape_constraint {
                 if let Some(idx) = sc_indices.get(sym_name) {
-                    if let Some(sc_val) = sc.dims.get(*idx).and_then(|sd| {
-                        crate::dim_resolve::resolve_shape_dim(sd, self.resolved, self.program)
-                    }) {
+                    if let Some(sc_val) = sc
+                        .dims
+                        .get(*idx)
+                        .and_then(|sd| self.thir.resolve_shape_dim(sd))
+                    {
                         if sc_val != span_val {
                             pending.push((
                                 sc.span,
@@ -1689,6 +1650,7 @@ impl<'a> AnalyzeCtx<'a> {
                     let ratio = writer_rate / reader_rate;
                     if (ratio - 1.0).abs() > 1e-6 {
                         let span = self
+                            .thir
                             .resolved
                             .buffers
                             .get(&edge.buffer_name)
@@ -1745,7 +1707,7 @@ impl<'a> AnalyzeCtx<'a> {
     fn check_memory_pool(&mut self) {
         let (limit, span_opt) = self.get_mem_limit();
         if self.total_memory > limit {
-            let span = span_opt.unwrap_or(self.program.span);
+            let span = span_opt.unwrap_or(self.thir.program_span);
             let limit_src = if span_opt.is_some() {
                 "set mem"
             } else {
@@ -1808,16 +1770,11 @@ impl<'a> AnalyzeCtx<'a> {
         actor_name: &str,
         span: Span,
     ) {
-        let param_entry = match self.resolved.params.get(&param_ident.name) {
-            Some(e) => e,
+        let param = match self.thir.param_info(&param_ident.name) {
+            Some(p) => p,
             None => return,
         };
-        let stmt = &self.program.statements[param_entry.stmt_index];
-        let inferred = if let StatementKind::Param(p) = &stmt.kind {
-            infer_param_type(&p.value)
-        } else {
-            return;
-        };
+        let inferred = infer_param_type(&param.default_value);
 
         if let Some(inferred_type) = inferred {
             if !param_type_compatible(&inferred_type, &expected_type) {
@@ -1837,33 +1794,26 @@ impl<'a> AnalyzeCtx<'a> {
 
     /// For each modal task, verify the ctrl buffer type is int32.
     fn check_ctrl_types(&mut self) {
-        for stmt in &self.program.statements {
-            let task = match &stmt.kind {
-                StatementKind::Task(t) => t,
+        for hir_task in &self.thir.hir.tasks {
+            let modal = match &hir_task.body {
+                HirTaskBody::Modal(m) => m,
                 _ => continue,
             };
-            let modal = match &task.body {
-                TaskBody::Modal(m) => m,
-                _ => continue,
-            };
-            let ctrl_buffer_name = match &modal.switch.source {
-                SwitchSource::Buffer(ident) => &ident.name,
-                SwitchSource::Param(ident) => {
-                    let Some(param_entry) = self.resolved.params.get(&ident.name) else {
+            let ctrl_buffer_name = match &modal.switch {
+                HirSwitchSource::Buffer(name, _) => name,
+                HirSwitchSource::Param(name, span) => {
+                    let Some(param) = self.thir.param_info(name) else {
                         // Undefined param is already reported by resolve.
                         continue;
                     };
-                    let inferred = match &self.program.statements[param_entry.stmt_index].kind {
-                        StatementKind::Param(p) => infer_param_type(&p.value),
-                        _ => None,
-                    };
+                    let inferred = infer_param_type(&param.default_value);
                     if inferred != Some(ParamType::Int) {
                         self.error_with_hint(
-                            ident.span,
+                            *span,
                             format!(
                                 "switch param '${}' in task '{}' has non-int32 default; \
                                  switch ctrl must be int32",
-                                ident.name, task.name.name
+                                name, hir_task.name
                             ),
                             "use an integer default, e.g. `param sel = 0`".to_string(),
                         );
@@ -1871,7 +1821,7 @@ impl<'a> AnalyzeCtx<'a> {
                     continue;
                 }
             };
-            let control_sub = match self.graph.tasks.get(&task.name.name) {
+            let control_sub = match self.graph.tasks.get(&hir_task.name) {
                 Some(TaskGraph::Modal { control, .. }) => control,
                 _ => continue,
             };
@@ -1886,7 +1836,7 @@ impl<'a> AnalyzeCtx<'a> {
                                     format!(
                                         "ctrl buffer '{}' in task '{}' has type {}, \
                                          but switch ctrl must be int32",
-                                        buffer_name, task.name.name, wire_type
+                                        buffer_name, hir_task.name, wire_type
                                     ),
                                     "use detect() or another actor that outputs int32 for the ctrl signal".to_string(),
                                 );
@@ -2089,7 +2039,7 @@ mod tests {
         reg
     }
 
-    /// Parse, resolve, build graph, and analyze.
+    /// Parse, resolve, build HIR, graph, ThirContext, and analyze.
     fn analyze_source(source: &str, registry: &Registry) -> AnalysisResult {
         let parse_result = crate::parser::parse(source);
         assert!(
@@ -2112,6 +2062,14 @@ mod tests {
             &resolve_result.resolved,
             &mut resolve_result.id_alloc,
         );
+        let type_result =
+            crate::type_infer::type_infer(&program, &resolve_result.resolved, registry);
+        let lower_result = crate::lower::lower_and_verify(
+            &program,
+            &resolve_result.resolved,
+            &type_result.typed,
+            registry,
+        );
         let graph_result =
             crate::graph::build_graph(&hir_program, &resolve_result.resolved, registry);
         assert!(
@@ -2122,12 +2080,15 @@ mod tests {
             "graph errors: {:#?}",
             graph_result.diagnostics
         );
-        analyze(
-            &program,
+        let thir = crate::thir::build_thir_context(
+            &hir_program,
             &resolve_result.resolved,
-            &graph_result.graph,
+            &type_result.typed,
+            &lower_result.lowered,
             registry,
-        )
+            &graph_result.graph,
+        );
+        analyze(&thir, &graph_result.graph)
     }
 
     fn analyze_ok(source: &str, registry: &Registry) -> AnalysisResult {
@@ -2179,6 +2140,14 @@ mod tests {
             &resolve_result.resolved,
             &mut resolve_result.id_alloc,
         );
+        let type_result =
+            crate::type_infer::type_infer(&program, &resolve_result.resolved, registry);
+        let lower_result = crate::lower::lower_and_verify(
+            &program,
+            &resolve_result.resolved,
+            &type_result.typed,
+            registry,
+        );
         let graph_result =
             crate::graph::build_graph(&hir_program, &resolve_result.resolved, registry);
         assert!(
@@ -2189,12 +2158,15 @@ mod tests {
             "graph errors: {:#?}",
             graph_result.diagnostics
         );
-        let result = analyze(
-            &program,
+        let thir = crate::thir::build_thir_context(
+            &hir_program,
             &resolve_result.resolved,
-            &graph_result.graph,
+            &type_result.typed,
+            &lower_result.lowered,
             registry,
+            &graph_result.graph,
         );
+        let result = analyze(&thir, &graph_result.graph);
         (result, graph_result.graph)
     }
 
