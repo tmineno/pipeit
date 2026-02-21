@@ -14,6 +14,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::ast::*;
+use crate::id::CallId;
 use crate::registry::{ActorMeta, PipitType, Registry, TypeExpr};
 use crate::resolve::{CallResolution, DiagLevel, Diagnostic, ResolvedProgram};
 
@@ -87,6 +88,12 @@ pub struct TypedProgram {
     /// Monomorphized actor metadata: for each polymorphic call, the concrete
     /// ActorMeta with type parameters substituted.
     pub mono_actors: HashMap<Span, ActorMeta>,
+
+    // ── Stable ID dual-key maps (ADR-021) ─────────────────────────────────
+    /// CallId-keyed type assignments (mirrors `type_assignments`).
+    pub type_assignments_by_id: HashMap<CallId, Vec<PipitType>>,
+    /// CallId-keyed mono actors (mirrors `mono_actors`).
+    pub mono_actors_by_id: HashMap<CallId, ActorMeta>,
 }
 
 /// A point in the pipeline where implicit widening should be inserted.
@@ -118,6 +125,8 @@ pub fn type_infer(
             type_assignments: HashMap::new(),
             widenings: Vec::new(),
             mono_actors: HashMap::new(),
+            type_assignments_by_id: HashMap::new(),
+            mono_actors_by_id: HashMap::new(),
         },
         diagnostics: Vec::new(),
         buffer_types: HashMap::new(),
@@ -127,6 +136,21 @@ pub fn type_infer(
     };
 
     engine.infer_program(program);
+
+    // Populate CallId-keyed dual maps from span-keyed maps (ADR-021).
+    for (span, types) in &engine.typed.type_assignments {
+        if let Some(&call_id) = resolved.call_ids.get(span) {
+            engine
+                .typed
+                .type_assignments_by_id
+                .insert(call_id, types.clone());
+        }
+    }
+    for (span, meta) in &engine.typed.mono_actors {
+        if let Some(&call_id) = resolved.call_ids.get(span) {
+            engine.typed.mono_actors_by_id.insert(call_id, meta.clone());
+        }
+    }
 
     TypeInferResult {
         typed: engine.typed,

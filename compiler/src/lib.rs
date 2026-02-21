@@ -8,6 +8,7 @@ pub mod codegen;
 pub mod dim_resolve;
 pub mod dot;
 pub mod graph;
+pub mod id;
 pub mod lexer;
 pub mod lower;
 pub mod parser;

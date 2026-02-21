@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::ast::*;
+use crate::id::{CallId, DefId, IdAllocator, TaskId};
 use crate::registry::Registry;
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -38,6 +39,26 @@ pub struct ResolvedProgram {
     pub call_resolutions: HashMap<Span, CallResolution>,
     pub task_resolutions: HashMap<String, TaskResolution>,
     pub probes: Vec<ProbeEntry>,
+
+    // ── Stable IDs (ADR-021) ──────────────────────────────────────────────
+    /// Span → CallId lookup for actor call sites.
+    pub call_ids: HashMap<Span, CallId>,
+    /// CallId → Span reverse lookup.
+    pub call_spans: HashMap<CallId, Span>,
+    /// Name → DefId for consts, params, and defines.
+    pub def_ids: HashMap<String, DefId>,
+    /// Task name → TaskId.
+    pub task_ids: HashMap<String, TaskId>,
+}
+
+impl ResolvedProgram {
+    /// Look up the CallId assigned to a call site span.
+    pub fn call_id_for_span(&self, span: Span) -> CallId {
+        *self
+            .call_ids
+            .get(&span)
+            .expect("internal: no CallId for span")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +186,8 @@ struct ResolveCtx<'a> {
     pending_buffer_reads: Vec<(String, String, Span)>, // (buffer_name, task_name, span)
     /// Pending tap-ref consumptions (from Arg::TapRef) that may be forward references.
     pending_tap_refs: Vec<PendingTapRef>,
+    /// Stable ID allocator (ADR-021).
+    id_alloc: IdAllocator,
 }
 
 impl<'a> ResolveCtx<'a> {
@@ -180,10 +203,15 @@ impl<'a> ResolveCtx<'a> {
                 call_resolutions: HashMap::new(),
                 task_resolutions: HashMap::new(),
                 probes: Vec::new(),
+                call_ids: HashMap::new(),
+                call_spans: HashMap::new(),
+                def_ids: HashMap::new(),
+                task_ids: HashMap::new(),
             },
             diagnostics: Vec::new(),
             pending_buffer_reads: Vec::new(),
             pending_tap_refs: Vec::new(),
+            id_alloc: IdAllocator::new(),
         }
     }
 
@@ -221,6 +249,8 @@ impl<'a> ResolveCtx<'a> {
                             ),
                         );
                     } else {
+                        let def_id = self.id_alloc.alloc_def();
+                        self.resolved.def_ids.insert(name.clone(), def_id);
                         self.resolved.consts.insert(
                             name.clone(),
                             ConstEntry {
@@ -241,6 +271,8 @@ impl<'a> ResolveCtx<'a> {
                             ),
                         );
                     } else {
+                        let def_id = self.id_alloc.alloc_def();
+                        self.resolved.def_ids.insert(name.clone(), def_id);
                         self.resolved.params.insert(
                             name.clone(),
                             ParamEntry {
@@ -261,6 +293,8 @@ impl<'a> ResolveCtx<'a> {
                             ),
                         );
                     } else {
+                        let def_id = self.id_alloc.alloc_def();
+                        self.resolved.def_ids.insert(name.clone(), def_id);
                         self.resolved.defines.insert(
                             name.clone(),
                             DefineEntry {
@@ -282,6 +316,8 @@ impl<'a> ResolveCtx<'a> {
                             ),
                         );
                     } else {
+                        let task_id = self.id_alloc.alloc_task();
+                        self.resolved.task_ids.insert(name.clone(), task_id);
                         self.resolved.tasks.insert(
                             name.clone(),
                             TaskEntry {
@@ -554,6 +590,9 @@ impl<'a> ResolveCtx<'a> {
         let actor_meta = self.registry.lookup(name);
 
         if is_define {
+            let call_id = self.id_alloc.alloc_call();
+            self.resolved.call_ids.insert(call.span, call_id);
+            self.resolved.call_spans.insert(call_id, call.span);
             self.resolved
                 .call_resolutions
                 .insert(call.span, CallResolution::Define);
@@ -567,6 +606,9 @@ impl<'a> ResolveCtx<'a> {
         }
 
         if let Some(meta) = actor_meta {
+            let call_id = self.id_alloc.alloc_call();
+            self.resolved.call_ids.insert(call.span, call_id);
+            self.resolved.call_spans.insert(call_id, call.span);
             self.resolved
                 .call_resolutions
                 .insert(call.span, CallResolution::Actor);

@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::ast::*;
+use crate::id::CallId;
 use crate::registry::Registry;
 use crate::resolve::{CallResolution, DiagLevel, Diagnostic, ResolvedProgram};
 
@@ -38,6 +39,8 @@ pub enum NodeKind {
         args: Vec<Arg>,
         /// Optional shape constraint from `actor(...)[d0, d1, ...]` (v0.2.0).
         shape_constraint: Option<ShapeConstraint>,
+        /// Stable call-site identifier (ADR-021). Populated from resolve.
+        call_id: Option<CallId>,
     },
     /// A fork node created by a tap declaration (`:name`).
     Fork { tap_name: String },
@@ -455,12 +458,14 @@ impl<'a> GraphBuilder<'a> {
         }
 
         // Regular actor node
+        let call_id = self.resolved.call_ids.get(&call.span).copied();
         let id = ctx.add_node(
             NodeKind::Actor {
                 name: call.name.name.clone(),
                 call_span: call.span,
                 args: call.args.clone(),
                 shape_constraint: call.shape_constraint.clone(),
+                call_id,
             },
             call.span,
         );
@@ -1319,6 +1324,7 @@ mod tests {
                         call_span: sp(0, 1),
                         args: vec![],
                         shape_constraint: None,
+                        call_id: None,
                     },
                     span: sp(0, 1),
                 },
@@ -1329,6 +1335,7 @@ mod tests {
                         call_span: sp(2, 3),
                         args: vec![],
                         shape_constraint: None,
+                        call_id: None,
                     },
                     span: sp(2, 3),
                 },
@@ -1339,6 +1346,7 @@ mod tests {
                         call_span: sp(4, 5),
                         args: vec![],
                         shape_constraint: None,
+                        call_id: None,
                     },
                     span: sp(4, 5),
                 },

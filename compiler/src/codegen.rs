@@ -1149,6 +1149,7 @@ impl<'a> CodegenCtx<'a> {
             call_span,
             args,
             shape_constraint,
+            ..
         } = &node.kind
         else {
             return;
@@ -1235,6 +1236,7 @@ impl<'a> CodegenCtx<'a> {
             call_span,
             args,
             shape_constraint,
+            ..
         } = &node.kind
         else {
             return None;

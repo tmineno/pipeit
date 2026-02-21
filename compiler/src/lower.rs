@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 
 use crate::ast::*;
+use crate::id::CallId;
 use crate::registry::{ActorMeta, PipitType, Registry, TokenCount};
 use crate::resolve::{CallResolution, DiagLevel, Diagnostic, ResolvedProgram};
 use crate::type_infer::{can_widen, TypedProgram};
@@ -46,6 +47,12 @@ pub struct LoweredProgram {
     /// Maps call span → concrete types for each type parameter.
     /// Empty for non-polymorphic calls.
     pub type_instantiations: HashMap<Span, Vec<PipitType>>,
+
+    // ── Stable ID dual-key maps (ADR-021) ─────────────────────────────────
+    /// CallId-keyed concrete actors (mirrors `concrete_actors`).
+    pub concrete_actors_by_id: HashMap<CallId, ActorMeta>,
+    /// CallId-keyed type instantiations (mirrors `type_instantiations`).
+    pub type_instantiations_by_id: HashMap<CallId, Vec<PipitType>>,
 }
 
 /// A synthetic widening node inserted between two pipe stages.
@@ -116,11 +123,27 @@ pub fn lower_and_verify(
     // Copy type instantiations from the typed program
     let type_instantiations = typed.type_assignments.clone();
 
+    // Populate CallId-keyed dual maps from span-keyed maps (ADR-021).
+    let mut concrete_actors_by_id = HashMap::new();
+    for (span, meta) in &engine.concrete_actors {
+        if let Some(&call_id) = resolved.call_ids.get(span) {
+            concrete_actors_by_id.insert(call_id, meta.clone());
+        }
+    }
+    let mut type_instantiations_by_id = HashMap::new();
+    for (span, types) in &type_instantiations {
+        if let Some(&call_id) = resolved.call_ids.get(span) {
+            type_instantiations_by_id.insert(call_id, types.clone());
+        }
+    }
+
     LowerResult {
         lowered: LoweredProgram {
             concrete_actors: engine.concrete_actors,
             widening_nodes: engine.widening_nodes,
             type_instantiations,
+            concrete_actors_by_id,
+            type_instantiations_by_id,
         },
         cert,
         diagnostics: engine.diagnostics,
@@ -606,6 +629,8 @@ mod tests {
             type_assignments: HashMap::new(),
             widenings: Vec::new(),
             mono_actors: HashMap::new(),
+            type_assignments_by_id: HashMap::new(),
+            mono_actors_by_id: HashMap::new(),
         };
 
         let resolved = ResolvedProgram {
@@ -622,6 +647,10 @@ mod tests {
             },
             task_resolutions: HashMap::new(),
             probes: Vec::new(),
+            call_ids: HashMap::new(),
+            call_spans: HashMap::new(),
+            def_ids: HashMap::new(),
+            task_ids: HashMap::new(),
         };
 
         let program = Program {
@@ -704,6 +733,8 @@ mod tests {
             type_assignments: HashMap::new(),
             widenings: Vec::new(),
             mono_actors: HashMap::new(),
+            type_assignments_by_id: HashMap::new(),
+            mono_actors_by_id: HashMap::new(),
         };
 
         let resolved = ResolvedProgram {
@@ -720,6 +751,10 @@ mod tests {
             },
             task_resolutions: HashMap::new(),
             probes: Vec::new(),
+            call_ids: HashMap::new(),
+            call_spans: HashMap::new(),
+            def_ids: HashMap::new(),
+            task_ids: HashMap::new(),
         };
 
         let program = Program {
@@ -802,6 +837,8 @@ mod tests {
             type_assignments: HashMap::new(),
             widenings: Vec::new(),
             mono_actors: HashMap::new(),
+            type_assignments_by_id: HashMap::new(),
+            mono_actors_by_id: HashMap::new(),
         };
 
         let resolved = ResolvedProgram {
@@ -818,6 +855,10 @@ mod tests {
             },
             task_resolutions: HashMap::new(),
             probes: Vec::new(),
+            call_ids: HashMap::new(),
+            call_spans: HashMap::new(),
+            def_ids: HashMap::new(),
+            task_ids: HashMap::new(),
         };
 
         let program = Program {
@@ -898,6 +939,8 @@ mod tests {
             type_assignments: HashMap::new(),
             widenings: Vec::new(),
             mono_actors: HashMap::new(),
+            type_assignments_by_id: HashMap::new(),
+            mono_actors_by_id: HashMap::new(),
         };
         let resolved = ResolvedProgram {
             consts: HashMap::new(),
@@ -908,6 +951,10 @@ mod tests {
             call_resolutions: HashMap::new(),
             task_resolutions: HashMap::new(),
             probes: Vec::new(),
+            call_ids: HashMap::new(),
+            call_spans: HashMap::new(),
+            def_ids: HashMap::new(),
+            task_ids: HashMap::new(),
         };
         let registry = Registry::empty();
 
@@ -944,6 +991,8 @@ mod tests {
             type_assignments: HashMap::new(),
             widenings: Vec::new(),
             mono_actors: HashMap::new(),
+            type_assignments_by_id: HashMap::new(),
+            mono_actors_by_id: HashMap::new(),
         };
         let resolved = ResolvedProgram {
             consts: HashMap::new(),
@@ -954,6 +1003,10 @@ mod tests {
             call_resolutions: HashMap::new(),
             task_resolutions: HashMap::new(),
             probes: Vec::new(),
+            call_ids: HashMap::new(),
+            call_spans: HashMap::new(),
+            def_ids: HashMap::new(),
+            task_ids: HashMap::new(),
         };
         let registry = Registry::empty();
 
@@ -999,6 +1052,8 @@ mod tests {
             type_assignments: HashMap::new(),
             widenings: Vec::new(),
             mono_actors: HashMap::new(),
+            type_assignments_by_id: HashMap::new(),
+            mono_actors_by_id: HashMap::new(),
         };
 
         let resolved = ResolvedProgram {
@@ -1014,6 +1069,10 @@ mod tests {
             },
             task_resolutions: HashMap::new(),
             probes: Vec::new(),
+            call_ids: HashMap::new(),
+            call_spans: HashMap::new(),
+            def_ids: HashMap::new(),
+            task_ids: HashMap::new(),
         };
 
         let mut registry = Registry::empty();
@@ -1077,6 +1136,8 @@ mod tests {
             type_assignments: HashMap::new(),
             widenings: Vec::new(),
             mono_actors: HashMap::new(),
+            type_assignments_by_id: HashMap::new(),
+            mono_actors_by_id: HashMap::new(),
         };
 
         let resolved = ResolvedProgram {
@@ -1092,6 +1153,10 @@ mod tests {
             },
             task_resolutions: HashMap::new(),
             probes: Vec::new(),
+            call_ids: HashMap::new(),
+            call_spans: HashMap::new(),
+            def_ids: HashMap::new(),
+            task_ids: HashMap::new(),
         };
 
         let mut registry = Registry::empty();
@@ -1160,6 +1225,8 @@ mod tests {
             type_assignments: HashMap::new(),
             widenings: Vec::new(),
             mono_actors: HashMap::new(),
+            type_assignments_by_id: HashMap::new(),
+            mono_actors_by_id: HashMap::new(),
         };
 
         let resolved = ResolvedProgram {
@@ -1171,6 +1238,10 @@ mod tests {
             call_resolutions: HashMap::new(),
             task_resolutions: HashMap::new(),
             probes: Vec::new(),
+            call_ids: HashMap::new(),
+            call_spans: HashMap::new(),
+            def_ids: HashMap::new(),
+            task_ids: HashMap::new(),
         };
 
         let registry = Registry::empty();
@@ -1203,6 +1274,8 @@ mod tests {
             type_assignments: HashMap::new(),
             widenings: Vec::new(),
             mono_actors: HashMap::new(),
+            type_assignments_by_id: HashMap::new(),
+            mono_actors_by_id: HashMap::new(),
         };
 
         let resolved = ResolvedProgram {
@@ -1214,6 +1287,10 @@ mod tests {
             call_resolutions: HashMap::new(),
             task_resolutions: HashMap::new(),
             probes: Vec::new(),
+            call_ids: HashMap::new(),
+            call_spans: HashMap::new(),
+            def_ids: HashMap::new(),
+            task_ids: HashMap::new(),
         };
 
         let registry = Registry::empty();
