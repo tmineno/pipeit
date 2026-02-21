@@ -106,7 +106,7 @@ pub fn build_thir_context<'a>(
         find_set_freq(&hir.set_directives, &set_index, "tick_rate").unwrap_or(10_000.0);
     let timer_spin = find_set_number(&hir.set_directives, &set_index, "timer_spin");
     let overrun_policy = find_set_ident(&hir.set_directives, &set_index, "overrun")
-        .unwrap_or("stop")
+        .unwrap_or("drop")
         .to_string();
 
     // Resolve param C++ types by scanning graph nodes
@@ -703,7 +703,7 @@ mod tests {
         assert_eq!(thir.mem_bytes, 64 * 1024 * 1024);
         assert_eq!(thir.tick_rate_hz, 1000.0);
         assert!(thir.timer_spin.is_none());
-        assert_eq!(thir.overrun_policy, "stop");
+        assert_eq!(thir.overrun_policy, "drop");
     }
 
     #[test]
