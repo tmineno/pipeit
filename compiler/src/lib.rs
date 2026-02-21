@@ -11,6 +11,7 @@ pub mod graph;
 pub mod hir;
 pub mod id;
 pub mod lexer;
+pub mod lir;
 pub mod lower;
 pub mod parser;
 pub mod program_query;
