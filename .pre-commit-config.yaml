@@ -25,10 +25,11 @@ repos:
 
       - id: commit-characterize
         name: commit characterize benchmark
-        entry: ./benches/commit_characterize.sh --id-source staged-diff --skip-if-exists
+        entry: ./benches/commit_characterize.sh --id-source head --skip-if-exists
         language: system
         pass_filenames: false
-        always_run: true
+        files: ^compiler/
+        stages: [post-commit]
 
   # Documentation
   - repo: local
