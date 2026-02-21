@@ -10,6 +10,7 @@
 //   cross-family widening attempts.
 // Side effects: none.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::ast::*;
@@ -121,6 +122,7 @@ pub fn type_infer(
         diagnostics: Vec::new(),
         buffer_types: HashMap::new(),
         tap_types: HashMap::new(),
+        effective_registry_meta_cache: RefCell::new(HashMap::new()),
         program: Some(program),
     };
 
@@ -142,11 +144,27 @@ struct TypeInferEngine<'a> {
     buffer_types: HashMap<String, PipitType>,
     /// Output types of tap/fork points, keyed by tap label name.
     tap_types: HashMap<String, PipitType>,
+    /// Per-call cached registry metadata for non-monomorphized actor calls.
+    /// Monomorphized calls are served directly from `typed.mono_actors`.
+    effective_registry_meta_cache: RefCell<HashMap<Span, Option<&'a ActorMeta>>>,
     /// Program AST reference for define body lookup.
     program: Option<&'a Program>,
 }
 
 impl<'a> TypeInferEngine<'a> {
+    fn store_monomorphized_actor(
+        &mut self,
+        span: Span,
+        concrete_types: Vec<PipitType>,
+        mono: ActorMeta,
+    ) {
+        self.typed.type_assignments.insert(span, concrete_types);
+        self.effective_registry_meta_cache
+            .borrow_mut()
+            .remove(&span);
+        self.typed.mono_actors.insert(span, mono);
+    }
+
     fn infer_program(&mut self, program: &Program) {
         // Pass 1: Process all tasks (collects buffer/tap output types along the way).
         // Define bodies are processed on-demand via define_output_type when
@@ -311,10 +329,7 @@ impl<'a> TypeInferEngine<'a> {
 
         // Monomorphize: create a concrete ActorMeta with substituted types
         let mono = monomorphize_actor(meta, &concrete_types);
-        self.typed
-            .type_assignments
-            .insert(call.span, concrete_types);
-        self.typed.mono_actors.insert(call.span, mono);
+        self.store_monomorphized_actor(call.span, concrete_types, mono);
     }
 
     /// Infer type arguments from pipe context, with an optional initial upstream type.
@@ -363,12 +378,9 @@ impl<'a> TypeInferEngine<'a> {
                         let all_resolved = concrete_types.iter().all(|t| *t != PipitType::Void);
 
                         if all_resolved {
-                            let mono = monomorphize_actor(&meta, &concrete_types);
-                            self.typed
-                                .type_assignments
-                                .insert(call.span, concrete_types);
+                            let mono = monomorphize_actor(meta, &concrete_types);
                             current_output_type = mono.out_type.as_concrete();
-                            self.typed.mono_actors.insert(call.span, mono);
+                            self.store_monomorphized_actor(call.span, concrete_types, mono);
                             continue;
                         }
                     }
@@ -392,14 +404,11 @@ impl<'a> TypeInferEngine<'a> {
                 current_output_type = None;
             } else {
                 // No upstream type and polymorphic — try to infer from arguments
-                let inferred = self.infer_type_from_args(call, &meta);
+                let inferred = self.infer_type_from_args(call, meta);
                 if let Some(concrete_types) = inferred {
-                    let mono = monomorphize_actor(&meta, &concrete_types);
+                    let mono = monomorphize_actor(meta, &concrete_types);
                     current_output_type = mono.out_type.as_concrete();
-                    self.typed
-                        .type_assignments
-                        .insert(call.span, concrete_types);
-                    self.typed.mono_actors.insert(call.span, mono);
+                    self.store_monomorphized_actor(call.span, concrete_types, mono);
                 } else {
                     self.diagnostics.push(Diagnostic {
                         level: DiagLevel::Error,
@@ -703,11 +712,25 @@ impl<'a> TypeInferEngine<'a> {
     }
 
     /// Get the effective ActorMeta for a call — monomorphized if available, else registry.
-    fn get_effective_meta(&self, call: &ActorCall) -> Option<ActorMeta> {
+    fn get_effective_meta(&self, call: &ActorCall) -> Option<&ActorMeta> {
         if let Some(mono) = self.typed.mono_actors.get(&call.span) {
-            return Some(mono.clone());
+            return Some(mono);
         }
-        self.registry.lookup(&call.name.name).cloned()
+
+        if let Some(cached) = self
+            .effective_registry_meta_cache
+            .borrow()
+            .get(&call.span)
+            .copied()
+        {
+            return cached;
+        }
+
+        let looked_up = self.registry.lookup(&call.name.name);
+        self.effective_registry_meta_cache
+            .borrow_mut()
+            .insert(call.span, looked_up);
+        looked_up
     }
 
     /// Check for widening between adjacent actor calls in a pipe.
@@ -720,20 +743,20 @@ impl<'a> TypeInferEngine<'a> {
             let src_call = calls[i];
             let tgt_call = calls[i + 1];
 
-            let src_meta = self.get_effective_meta(src_call);
-            let tgt_meta = self.get_effective_meta(tgt_call);
-
-            let (src_out, tgt_in) = match (src_meta, tgt_meta) {
-                (Some(ref sm), Some(ref tm)) => {
-                    (sm.out_type.as_concrete(), tm.in_type.as_concrete())
-                }
-                _ => continue,
+            let Some(src_out) = self
+                .get_effective_meta(src_call)
+                .and_then(|sm| sm.out_type.as_concrete())
+            else {
+                continue;
+            };
+            let Some(tgt_in) = self
+                .get_effective_meta(tgt_call)
+                .and_then(|tm| tm.in_type.as_concrete())
+            else {
+                continue;
             };
 
-            let (src_type, tgt_type) = match (src_out, tgt_in) {
-                (Some(s), Some(t)) => (s, t),
-                _ => continue,
-            };
+            let (src_type, tgt_type) = (src_out, tgt_in);
 
             if src_type == tgt_type || src_type == PipitType::Void || tgt_type == PipitType::Void {
                 continue; // Exact match or void passthrough
@@ -768,18 +791,18 @@ fn parse_type_name(name: &str) -> Option<PipitType> {
 
 /// Create a concrete ActorMeta by substituting type parameters with concrete types.
 fn monomorphize_actor(meta: &ActorMeta, concrete_types: &[PipitType]) -> ActorMeta {
-    let subst: HashMap<&str, PipitType> = meta
-        .type_params
-        .iter()
-        .zip(concrete_types.iter())
-        .map(|(name, ty)| (name.as_str(), *ty))
-        .collect();
+    let subst = |name: &str| -> Option<PipitType> {
+        meta.type_params
+            .iter()
+            .position(|p| p == name)
+            .and_then(|idx| concrete_types.get(idx).copied())
+    };
 
     let substitute_type_expr = |te: &TypeExpr| -> TypeExpr {
         match te {
             TypeExpr::Concrete(t) => TypeExpr::Concrete(*t),
             TypeExpr::TypeParam(name) => {
-                TypeExpr::Concrete(*subst.get(name.as_str()).unwrap_or(&PipitType::Void))
+                TypeExpr::Concrete(subst(name.as_str()).unwrap_or(PipitType::Void))
             }
         }
     };
@@ -787,7 +810,7 @@ fn monomorphize_actor(meta: &ActorMeta, concrete_types: &[PipitType]) -> ActorMe
     let substitute_param_type = |pt: &crate::registry::ParamType| -> crate::registry::ParamType {
         match pt {
             crate::registry::ParamType::TypeParam(name) => {
-                if let Some(&concrete) = subst.get(name.as_str()) {
+                if let Some(concrete) = subst(name.as_str()) {
                     match concrete {
                         PipitType::Int32 => crate::registry::ParamType::Int,
                         PipitType::Float => crate::registry::ParamType::Float,
@@ -799,7 +822,7 @@ fn monomorphize_actor(meta: &ActorMeta, concrete_types: &[PipitType]) -> ActorMe
                 }
             }
             crate::registry::ParamType::SpanTypeParam(name) => {
-                if let Some(&concrete) = subst.get(name.as_str()) {
+                if let Some(concrete) = subst(name.as_str()) {
                     match concrete {
                         PipitType::Float => crate::registry::ParamType::SpanFloat,
                         _ => pt.clone(),
