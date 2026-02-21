@@ -21,7 +21,9 @@ use crate::lower::LoweredProgram;
 use crate::registry::{ActorMeta, ParamKind, ParamType, PipitType, Registry, TokenCount};
 use crate::resolve::{Diagnostic, ResolvedProgram};
 use crate::schedule::*;
-use crate::subgraph_index::{build_subgraph_indices, subgraph_key, SubgraphIndex};
+use crate::subgraph_index::{
+    build_subgraph_indices, identify_back_edges, subgraphs_of, GraphQueryCtx, SubgraphIndex,
+};
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -149,14 +151,12 @@ impl<'a> CodegenCtx<'a> {
         lookup_actor_in(self.lowered, self.registry, actor_name, call_span)
     }
 
-    fn subgraph_index(&self, sub: &Subgraph) -> Option<&SubgraphIndex> {
-        self.subgraph_indices.get(&subgraph_key(sub))
+    fn gqctx(&self) -> GraphQueryCtx<'_> {
+        GraphQueryCtx::new(&self.subgraph_indices)
     }
 
     fn node_in_subgraph<'s>(&self, sub: &'s Subgraph, id: NodeId) -> Option<&'s Node> {
-        self.subgraph_index(sub)
-            .and_then(|idx| idx.node(sub, id))
-            .or_else(|| find_node(sub, id))
+        self.gqctx().node_in_subgraph(sub, id)
     }
 
     fn first_incoming_edge_in_subgraph<'s>(
@@ -164,21 +164,15 @@ impl<'a> CodegenCtx<'a> {
         sub: &'s Subgraph,
         id: NodeId,
     ) -> Option<&'s Edge> {
-        self.subgraph_index(sub)
-            .and_then(|idx| idx.first_incoming_edge(sub, id))
-            .or_else(|| sub.edges.iter().find(|e| e.target == id))
+        self.gqctx().first_incoming_edge(sub, id)
     }
 
     fn incoming_edge_count_in_subgraph(&self, sub: &Subgraph, id: NodeId) -> usize {
-        self.subgraph_index(sub)
-            .map(|idx| idx.incoming_count(id))
-            .unwrap_or_else(|| sub.edges.iter().filter(|e| e.target == id).count())
+        self.gqctx().incoming_edge_count(sub, id)
     }
 
     fn outgoing_edge_count_in_subgraph(&self, sub: &Subgraph, id: NodeId) -> usize {
-        self.subgraph_index(sub)
-            .map(|idx| idx.outgoing_count(id))
-            .unwrap_or_else(|| sub.edges.iter().filter(|e| e.source == id).count())
+        self.gqctx().outgoing_edge_count(sub, id)
     }
 
     /// Format the C++ actor struct name, including template parameters for
@@ -1873,30 +1867,7 @@ impl<'a> CodegenCtx<'a> {
     }
 
     fn identify_back_edges(&self, _task_name: &str, sub: &Subgraph) -> HashSet<(NodeId, NodeId)> {
-        let mut back_edges = HashSet::new();
-        let node_ids: HashSet<u32> = sub.nodes.iter().map(|n| n.id.0).collect();
-
-        for cycle in &self.graph.cycles {
-            if !cycle.iter().all(|id| node_ids.contains(&id.0)) {
-                continue;
-            }
-            for (i, &nid) in cycle.iter().enumerate() {
-                if let Some(node) = self.node_in_subgraph(sub, nid) {
-                    if matches!(&node.kind, NodeKind::Actor { name, .. } if name == "delay") {
-                        let next_nid = cycle[(i + 1) % cycle.len()];
-                        if sub
-                            .edges
-                            .iter()
-                            .any(|e| e.source == nid && e.target == next_nid)
-                        {
-                            back_edges.insert((nid, next_nid));
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-        back_edges
+        identify_back_edges(sub, &self.graph.cycles)
     }
 
     fn delay_init_value(&self, sub: &Subgraph, node_id: NodeId) -> String {
@@ -3035,23 +3006,6 @@ impl<'a> CodegenCtx<'a> {
 }
 
 // ── Free helpers ────────────────────────────────────────────────────────────
-
-fn find_node(sub: &Subgraph, id: NodeId) -> Option<&Node> {
-    sub.nodes.iter().find(|n| n.id == id)
-}
-
-fn subgraphs_of(task_graph: &TaskGraph) -> Vec<&Subgraph> {
-    match task_graph {
-        TaskGraph::Pipeline(sub) => vec![sub],
-        TaskGraph::Modal { control, modes } => {
-            let mut subs = vec![control];
-            for (_, sub) in modes {
-                subs.push(sub);
-            }
-            subs
-        }
-    }
-}
 
 /// Free-function actor lookup that borrows only the lowered program and registry,
 /// not the entire CodegenCtx — avoids whole-self borrow conflicts with `self.out`.

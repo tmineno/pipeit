@@ -348,37 +348,8 @@ impl<'a> ScheduleCtx<'a> {
 
     // ── Back-edge identification ────────────────────────────────────────
 
-    /// Identify feedback back-edges to remove for topological sort.
-    /// For each detected cycle, the outgoing edge from the delay actor is a
-    /// back-edge (delay provides initial tokens, breaking the dependency).
     fn identify_back_edges(&self, sub: &Subgraph) -> HashSet<(NodeId, NodeId)> {
-        let mut back_edges = HashSet::new();
-        let node_ids: HashSet<u32> = sub.nodes.iter().map(|n| n.id.0).collect();
-
-        for cycle in &self.graph.cycles {
-            // Only process cycles belonging to this subgraph
-            if !cycle.iter().all(|id| node_ids.contains(&id.0)) {
-                continue;
-            }
-
-            // Find the delay actor; its outgoing cycle edge is the back-edge
-            for (i, &nid) in cycle.iter().enumerate() {
-                if let Some(node) = find_node(sub, nid) {
-                    if matches!(&node.kind, NodeKind::Actor { name, .. } if name == "delay") {
-                        let next_nid = cycle[(i + 1) % cycle.len()];
-                        if sub
-                            .edges
-                            .iter()
-                            .any(|e| e.source == nid && e.target == next_nid)
-                        {
-                            back_edges.insert((nid, next_nid));
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-        back_edges
+        crate::subgraph_index::identify_back_edges(sub, &self.graph.cycles)
     }
 
     // ── Intra-task buffer sizing ────────────────────────────────────────
@@ -431,9 +402,7 @@ impl<'a> ScheduleCtx<'a> {
 
 // ── Free helpers ────────────────────────────────────────────────────────────
 
-fn find_node(sub: &Subgraph, id: NodeId) -> Option<&Node> {
-    sub.nodes.iter().find(|n| n.id == id)
-}
+use crate::subgraph_index::find_node;
 
 /// K factor: iterations per tick (compile-time heuristic).
 /// K = ceil(freq / tick_rate). Default tick_rate = 1 MHz.

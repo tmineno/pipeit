@@ -25,7 +25,8 @@ use crate::registry::{
 };
 use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
 use crate::subgraph_index::{
-    build_global_node_index, build_subgraph_indices, subgraph_key, SubgraphIndex,
+    build_global_node_index, build_subgraph_indices, find_node, subgraph_key, subgraphs_of,
+    GraphQueryCtx, SubgraphIndex,
 };
 
 const SHAPE_WORKLIST_MIN_EDGES: usize = 24;
@@ -268,14 +269,12 @@ impl<'a> AnalyzeCtx<'a> {
         self.registry.lookup(name)
     }
 
-    fn subgraph_index(&self, sub: &Subgraph) -> Option<&SubgraphIndex> {
-        self.subgraph_indices.get(&subgraph_key(sub))
+    fn gqctx(&self) -> GraphQueryCtx<'_> {
+        GraphQueryCtx::new(&self.subgraph_indices)
     }
 
     fn node_in_subgraph<'s>(&self, sub: &'s Subgraph, id: NodeId) -> Option<&'s Node> {
-        self.subgraph_index(sub)
-            .and_then(|idx| idx.node(sub, id))
-            .or_else(|| find_node(sub, id))
+        self.gqctx().node_in_subgraph(sub, id)
     }
 
     fn first_incoming_edge_in_subgraph<'s>(
@@ -283,9 +282,7 @@ impl<'a> AnalyzeCtx<'a> {
         sub: &'s Subgraph,
         id: NodeId,
     ) -> Option<&'s Edge> {
-        self.subgraph_index(sub)
-            .and_then(|idx| idx.first_incoming_edge(sub, id))
-            .or_else(|| sub.edges.iter().find(|e| e.target == id))
+        self.gqctx().first_incoming_edge(sub, id)
     }
 
     fn first_outgoing_edge_in_subgraph<'s>(
@@ -293,9 +290,7 @@ impl<'a> AnalyzeCtx<'a> {
         sub: &'s Subgraph,
         id: NodeId,
     ) -> Option<&'s Edge> {
-        self.subgraph_index(sub)
-            .and_then(|idx| idx.first_outgoing_edge(sub, id))
-            .or_else(|| sub.edges.iter().find(|e| e.source == id))
+        self.gqctx().first_outgoing_edge(sub, id)
     }
 
     /// Get the output type of a node, tracing through passthrough nodes.
@@ -1910,24 +1905,6 @@ impl<'a> AnalyzeCtx<'a> {
 // ── Free helper functions ───────────────────────────────────────────────────
 
 /// Find a node in a subgraph by NodeId.
-fn find_node(sub: &Subgraph, id: NodeId) -> Option<&Node> {
-    sub.nodes.iter().find(|n| n.id == id)
-}
-
-/// Get all subgraphs from a TaskGraph.
-fn subgraphs_of(task_graph: &TaskGraph) -> Vec<&Subgraph> {
-    match task_graph {
-        TaskGraph::Pipeline(sub) => vec![sub],
-        TaskGraph::Modal { control, modes } => {
-            let mut subs = vec![control];
-            for (_, sub) in modes {
-                subs.push(sub);
-            }
-            subs
-        }
-    }
-}
-
 fn build_subgraph_refs(graph: &ProgramGraph) -> HashMap<usize, &Subgraph> {
     let mut refs = HashMap::new();
     for task_graph in graph.tasks.values() {
