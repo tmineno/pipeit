@@ -152,7 +152,7 @@
 - [ ] Remove span-as-primary-key usage from semantic tables (`HashMap<Span, ...>` -> stable-ID keyed maps)
 - [ ] Centralize graph traversal helpers (`subgraphs`, node/edge lookup, back-edge detection) to remove duplicated local implementations
 - [ ] Add shared program query helpers for `set`/task lookups currently duplicated across phases
-- [ ] Lock behavior with snapshot tests to guarantee byte-equivalent output before semantic changes
+- [x] Lock behavior with snapshot tests to guarantee byte-equivalent output before semantic changes (insta snapshots for 7 examples, codegen determinism fix)
 
 ### Phase 2: IR Unification (Behavior Change, Diff Locked)
 
