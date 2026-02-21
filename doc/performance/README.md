@@ -29,6 +29,17 @@ Each report always includes these sections in order:
 9. Artifact paths
 10. Machine-readable metrics block
 
+Path policy:
+
+- Commands and artifact paths in reports are always repository-relative
+  (`benches/...`, `compiler/...`, `tmp/...`).
+- Absolute machine-specific paths must not be emitted.
+
+Numeric display policy:
+
+- Human-facing tables use SI prefixes for large values (`K`, `M`, `G`, `T`, `P`).
+- Raw values are preserved only in the machine-readable metrics block.
+
 ## Comparison Mechanism
 
 - Every stable metric row has:

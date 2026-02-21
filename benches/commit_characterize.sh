@@ -58,6 +58,71 @@ is_number() {
     [[ "$1" =~ ^-?[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$ ]]
 }
 
+format_si() {
+    local value="$1"
+    local show_plus="${2:-false}"
+    if [ "$value" = "NA" ]; then
+        echo "NA"
+        return
+    fi
+    if ! is_number "$value"; then
+        echo "$value"
+        return
+    fi
+    awk -v x="$value" -v plus="$show_plus" '
+        function absv(v) { return (v < 0) ? -v : v }
+        function trim_zeros(s) {
+            sub(/\.?0+$/, "", s)
+            return s
+        }
+        BEGIN {
+            if (x == 0) {
+                if (plus == "true") {
+                    print "+0"
+                } else {
+                    print "0"
+                }
+                exit
+            }
+
+            sign = ""
+            if (x < 0) {
+                sign = "-"
+            } else if (plus == "true") {
+                sign = "+"
+            }
+
+            a = absv(x)
+            exp3 = 0
+            if (a >= 1000) {
+                while (a >= 1000 && exp3 < 15) {
+                    a /= 1000
+                    exp3 += 3
+                }
+            }
+
+            prefix = ""
+            if (exp3 == 3) prefix = "K"
+            else if (exp3 == 6) prefix = "M"
+            else if (exp3 == 9) prefix = "G"
+            else if (exp3 == 12) prefix = "T"
+            else if (exp3 == 15) prefix = "P"
+
+            if (a >= 100) {
+                num = sprintf("%.0f", a)
+            } else if (a >= 10) {
+                num = sprintf("%.1f", a)
+            } else if (a >= 1) {
+                num = sprintf("%.2f", a)
+            } else {
+                num = sprintf("%.4f", a)
+            }
+            num = trim_zeros(num)
+            printf "%s%s%s", sign, num, prefix
+        }
+    '
+}
+
 compute_staged_diff_id() {
     local diff_hash
     diff_hash="$(git -C "$PROJECT_ROOT" diff --cached --binary -- . ':(exclude)doc/performance/*-characterize.md' | sha1sum | awk '{print $1}')"
@@ -103,16 +168,19 @@ metric_delta() {
         echo "-"
         return
     fi
-    awk -v c="$current" -v p="$previous" '
-        BEGIN {
-            d = c - p;
-            if (p == 0) {
-                printf "%+.6g", d;
-            } else {
-                printf "%+.6g (%+.2f%%)", d, (d / p) * 100.0;
-            }
-        }
-    '
+    local delta
+    delta="$(awk -v c="$current" -v p="$previous" 'BEGIN { printf "%.17g", c - p }')"
+    local delta_fmt
+    delta_fmt="$(format_si "$delta" true)"
+    local is_prev_zero
+    is_prev_zero="$(awk -v p="$previous" 'BEGIN { if (p == 0) print 1; else print 0 }')"
+    if [ "$is_prev_zero" -eq 1 ]; then
+        echo "$delta_fmt"
+    else
+        local pct
+        pct="$(awk -v c="$current" -v p="$previous" 'BEGIN { printf "%+.2f%%", ((c - p) / p) * 100.0 }')"
+        echo "$delta_fmt ($pct)"
+    fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -208,6 +276,10 @@ RUNTIME_OUT_DIR="$RUN_DIR/runtime"
 RUNTIME_LOG="$RUN_DIR/runtime.log"
 COMPILE_LOG="$RUN_DIR/compile.log"
 REPORT_TMP="$RUN_DIR/report.md"
+RUN_DIR_REL="tmp/performance/${COMMIT_ID}-${RUN_ID}"
+RUNTIME_OUT_DIR_REL="${RUN_DIR_REL}/runtime"
+RUNTIME_LOG_REL="${RUN_DIR_REL}/runtime.log"
+COMPILE_LOG_REL="${RUN_DIR_REL}/compile.log"
 
 mkdir -p "$RUN_DIR"
 
@@ -230,6 +302,8 @@ compile_cmd=(
     --warm-up-time "$COMPILE_WARMUP_TIME"
     --output-format bencher
 )
+runtime_cmd_display="benches/run_all.sh --filter ringbuf --filter timer --filter thread --filter e2e --output-dir ${RUNTIME_OUT_DIR_REL}"
+compile_cmd_display="cargo bench --manifest-path compiler/Cargo.toml --bench compiler_bench -- kpi/full_compile_latency --sample-size ${COMPILE_SAMPLE_SIZE} --measurement-time ${COMPILE_MEASUREMENT_TIME} --warm-up-time ${COMPILE_WARMUP_TIME} --output-format bencher"
 
 log "report id: $COMMIT_ID (source=$ID_SOURCE)"
 log "running runtime/e2e benchmarks..."
@@ -397,24 +471,24 @@ fi
     echo ""
     echo "## Commands"
     echo ""
-    echo "- Runtime/E2E: \`${runtime_cmd[*]}\`"
-    echo "- Compile (<=${COMPILE_TIMEOUT_SEC}s): \`timeout ${COMPILE_TIMEOUT_SEC}s ${compile_cmd[*]}\`"
+    echo "- Runtime/E2E: \`${runtime_cmd_display}\`"
+    echo "- Compile (<=${COMPILE_TIMEOUT_SEC}s): \`timeout ${COMPILE_TIMEOUT_SEC}s ${compile_cmd_display}\`"
     echo ""
     echo "## Status"
     echo ""
     echo "| Section | Status | Note |"
     echo "|---|---|---|"
     if [ "$runtime_status" -eq 0 ]; then
-        echo "| runtime/e2e | pass | \`$RUNTIME_LOG\` |"
+        echo "| runtime/e2e | pass | \`${RUNTIME_LOG_REL}\` |"
     else
-        echo "| runtime/e2e | fail | exit=$runtime_status, see \`$RUNTIME_LOG\` |"
+        echo "| runtime/e2e | fail | exit=$runtime_status, see \`${RUNTIME_LOG_REL}\` |"
     fi
     if [ "$compile_status" -eq 0 ]; then
-        echo "| compile | pass | wall=${compile_wall_ms}ms, log=\`$COMPILE_LOG\` |"
+        echo "| compile | pass | wall=${compile_wall_ms}ms, log=\`${COMPILE_LOG_REL}\` |"
     elif [ "$compile_timed_out" -eq 1 ]; then
-        echo "| compile | fail | timeout>${COMPILE_TIMEOUT_SEC}s, log=\`$COMPILE_LOG\` |"
+        echo "| compile | fail | timeout>${COMPILE_TIMEOUT_SEC}s, log=\`${COMPILE_LOG_REL}\` |"
     else
-        echo "| compile | fail | exit=$compile_status, log=\`$COMPILE_LOG\` |"
+        echo "| compile | fail | exit=$compile_status, log=\`${COMPILE_LOG_REL}\` |"
     fi
     echo ""
     echo "## Full Compile Latency"
@@ -425,7 +499,7 @@ fi
         key="compile.full.${scenario}_ns_per_iter"
         cur="${metric_values[$key]}"
         prev="${prev_values[$key]:-}"
-        echo "| $scenario | $cur | $(metric_delta "$cur" "$prev") |"
+        echo "| $scenario | $(format_si "$cur") | $(metric_delta "$cur" "$prev") |"
     done
     echo ""
     echo "## Runtime Deadline Miss Rate"
@@ -440,7 +514,7 @@ fi
         key="${item##*|}"
         cur="${metric_values[$key]}"
         prev="${prev_values[$key]:-}"
-        echo "| $label | $cur | $(metric_delta "$cur" "$prev") |"
+        echo "| $label | $(format_si "$cur") | $(metric_delta "$cur" "$prev") |"
     done
     echo ""
     echo "## Ring Buffer Contention"
@@ -456,7 +530,7 @@ fi
         key="${item##*|}"
         cur="${metric_values[$key]}"
         prev="${prev_values[$key]:-}"
-        echo "| $readers | $cur | $(metric_delta "$cur" "$prev") |"
+        echo "| $readers | $(format_si "$cur") | $(metric_delta "$cur" "$prev") |"
     done
     echo ""
     echo "## E2E Throughput"
@@ -474,7 +548,7 @@ fi
         key="${item##*|}"
         cur="${metric_values[$key]}"
         prev="${prev_values[$key]:-}"
-        echo "| $label | $cur | $(metric_delta "$cur" "$prev") |"
+        echo "| $label | $(format_si "$cur") | $(metric_delta "$cur" "$prev") |"
     done
     echo ""
     echo "- Socket benchmark errors: \`$socket_error_count\`"
@@ -490,14 +564,14 @@ fi
         cur="${metric_values[$key]}"
         unit="${metric_units[$key]}"
         prev="${prev_values[$key]:-}"
-        echo "| \`$key\` | $cur | $unit | $(metric_delta "$cur" "$prev") |"
+        echo "| \`$key\` | $(format_si "$cur") | $unit | $(metric_delta "$cur" "$prev") |"
     done
     echo ""
     echo "## Artifacts"
     echo ""
-    echo "- Runtime log: \`$RUNTIME_LOG\`"
-    echo "- Compile log: \`$COMPILE_LOG\`"
-    echo "- Runtime JSON dir: \`$RUNTIME_OUT_DIR\`"
+    echo "- Runtime log: \`${RUNTIME_LOG_REL}\`"
+    echo "- Compile log: \`${COMPILE_LOG_REL}\`"
+    echo "- Runtime JSON dir: \`${RUNTIME_OUT_DIR_REL}\`"
     echo ""
     echo "## Machine Readable Metrics"
     echo ""
