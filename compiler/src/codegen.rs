@@ -1733,6 +1733,11 @@ impl<'a> CodegenCtx<'a> {
                 );
                 let _ = writeln!(
                     self.out,
+                    "{}        _exit_code.store(1, std::memory_order_release);",
+                    indent
+                );
+                let _ = writeln!(
+                    self.out,
                     "{}        _stop.store(true, std::memory_order_release);",
                     indent
                 );
@@ -1792,6 +1797,11 @@ impl<'a> CodegenCtx<'a> {
                     self.out,
                     "{}        std::fprintf(stderr, \"runtime error: task '{}' failed to write {} token(s) to shared buffer '{}'\\n\");",
                     indent, task_name, total_tokens, buffer_name
+                );
+                let _ = writeln!(
+                    self.out,
+                    "{}        _exit_code.store(1, std::memory_order_release);",
+                    indent
                 );
                 let _ = writeln!(
                     self.out,
@@ -2355,6 +2365,11 @@ impl<'a> CodegenCtx<'a> {
                         self.out,
                         "{}    std::fprintf(stderr, \"runtime error: task '{}' failed to read 1 token(s) from shared buffer '{}' for switch ctrl\\n\");",
                         indent, task_name, ident.name
+                    );
+                    let _ = writeln!(
+                        self.out,
+                        "{}    _exit_code.store(1, std::memory_order_release);",
+                        indent
                     );
                     let _ = writeln!(
                         self.out,
