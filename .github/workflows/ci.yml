@@ -57,3 +57,49 @@ jobs:
       - uses: DavidAnson/markdownlint-cli2-action@v19
         with:
           globs: "**/*.md"
+
+  compiler-perf:
+    name: Compiler Perf (A/B)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Resolve baseline ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git fetch origin main --depth=1
+            baseline_ref="$(git merge-base HEAD origin/main)"
+          else
+            baseline_ref="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
+          fi
+          echo "BASELINE_REF=$baseline_ref" >> "$GITHUB_ENV"
+          echo "Using baseline ref: $baseline_ref"
+
+      - name: Run stable compiler KPI A/B
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p benches/results/ci_perf
+          ./benches/compiler_bench_stable.sh \
+            --baseline-ref "$BASELINE_REF" \
+            --filter 'kpi/(full_compile_latency/complex|phase_latency/analyze/complex|phase_latency/codegen/complex)' \
+            --sample-size 10 \
+            --measurement-time 0.2 \
+            --warm-up-time 0.1 \
+            | tee benches/results/ci_perf/compiler_perf_ab.txt
+
+      - name: Upload perf report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiler-perf-ab
+          path: benches/results/ci_perf/compiler_perf_ab.txt
+          if-no-files-found: error
