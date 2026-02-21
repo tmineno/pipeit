@@ -282,14 +282,6 @@ if [ -f "$e2e_json" ]; then
     fi
 fi
 
-host_name="unknown"
-num_cpus="unknown"
-mhz_per_cpu="unknown"
-if [ -f "$timer_json" ]; then
-    host_name="$(jq -r '.context.host_name // "unknown"' "$timer_json")"
-    num_cpus="$(jq -r '.context.num_cpus // "unknown"' "$timer_json")"
-    mhz_per_cpu="$(jq -r '.context.mhz_per_cpu // "unknown"' "$timer_json")"
-fi
 branch_name="$(git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD)"
 head_commit="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD)"
 
@@ -397,7 +389,6 @@ fi
     echo "- HEAD: \`$head_commit\`"
     echo "- Branch: \`$branch_name\`"
     echo "- Generated: $(date -Iseconds)"
-    echo "- Host: \`$host_name\`, CPUs: \`$num_cpus\`, MHz/core: \`$mhz_per_cpu\`"
     if [ -n "$previous_report" ]; then
         echo "- Previous report: \`$(basename "$previous_report")\`"
     else

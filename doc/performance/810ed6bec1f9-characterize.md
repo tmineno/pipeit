@@ -4,7 +4,6 @@
 - HEAD: `45e1f2a`
 - Branch: `main`
 - Generated: 2026-02-21T21:03:54+09:00
-- Host: `DESKTOP-99KE0RV`, CPUs: `32`, MHz/core: `4292`
 - Previous report: none
 
 ## Commands
