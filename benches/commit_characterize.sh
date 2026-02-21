@@ -267,6 +267,7 @@ mkdir -p "$REPORT_ROOT"
 REPORT_FILE="$REPORT_ROOT/${COMMIT_ID}-characterize.md"
 if [ -f "$REPORT_FILE" ] && [ "$SKIP_IF_EXISTS" = true ] && [ "$FORCE" = false ]; then
     log "report already exists, skipping: $REPORT_FILE"
+    git -C "$PROJECT_ROOT" add "$REPORT_FILE"
     exit 0
 fi
 
@@ -583,7 +584,8 @@ fi
 } >"$REPORT_TMP"
 
 cp "$REPORT_TMP" "$REPORT_FILE"
-log "report generated: $REPORT_FILE"
+git -C "$PROJECT_ROOT" add "$REPORT_FILE"
+log "report generated and staged: $REPORT_FILE"
 
 failed=false
 if [ "$runtime_status" -ne 0 ]; then
