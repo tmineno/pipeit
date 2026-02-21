@@ -396,6 +396,7 @@ run_benchmarks() {
 
         PCC="$PROJECT_ROOT/target/release/pcc"
         STD_ACTORS_HEADER="$RUNTIME_INCLUDE/std_actors.h"
+        STD_MATH_HEADER="$RUNTIME_INCLUDE/std_math.h"
         EXAMPLE_ACTORS_HEADER="$EXAMPLES_DIR/example_actors.h"
 
         echo "  Building pcc..."
@@ -416,7 +417,7 @@ run_benchmarks() {
                     exe="$BUILD_DIR/${name}_bench"
 
                     echo "Compiling $name.pdl..."
-                    if ! "$PCC" "$pdl" -I "$STD_ACTORS_HEADER" -I "$EXAMPLE_ACTORS_HEADER" --emit cpp -o "$cpp_file" 2>/dev/null; then
+                    if ! "$PCC" "$pdl" -I "$STD_ACTORS_HEADER" -I "$STD_MATH_HEADER" -I "$EXAMPLE_ACTORS_HEADER" --emit cpp -o "$cpp_file" 2>/dev/null; then
                         echo "  SKIP: $name (pcc compilation failed)"
                         pdl_fail=$((pdl_fail + 1))
                         continue
