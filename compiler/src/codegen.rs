@@ -338,7 +338,12 @@ impl<'a> CodegenCtx<'a> {
                 let init = self.scalar_literal(&p.value);
                 let _ = writeln!(
                     self.out,
-                    "static std::atomic<{}> _param_{}({});",
+                    "static std::atomic<{}> _param_{}_write({});",
+                    cpp_type, p.name.name, init
+                );
+                let _ = writeln!(
+                    self.out,
+                    "static std::atomic<{}> _param_{}_read({});",
                     cpp_type, p.name.name, init
                 );
             }
@@ -1905,7 +1910,12 @@ impl<'a> CodegenCtx<'a> {
                     let cpp_type = self.param_cpp_type(param_name, &p.value);
                     let _ = writeln!(
                         self.out,
-                        "{}{} _param_{}_val = _param_{}.load(std::memory_order_acquire);",
+                        "{}_param_{}_read.store(_param_{}_write.load(std::memory_order_acquire), std::memory_order_release);",
+                        indent, param_name, param_name
+                    );
+                    let _ = writeln!(
+                        self.out,
+                        "{}{} _param_{}_val = _param_{}_read.load(std::memory_order_acquire);",
                         indent, cpp_type, param_name, param_name
                     );
                 }
@@ -2109,7 +2119,7 @@ impl<'a> CodegenCtx<'a> {
             };
             let _ = writeln!(
                 self.out,
-                "            {} (name == \"{}\") _param_{}.store({}(val), std::memory_order_release);",
+                "            {} (name == \"{}\") _param_{}_write.store({}(val), std::memory_order_release);",
                 keyword, param_name, param_name, converter
             );
         }
@@ -3232,8 +3242,12 @@ mod tests {
             &reg,
         );
         assert!(
-            cpp.contains("std::atomic<float> _param_gain(2.5f)"),
-            "should emit param atomic: {}",
+            cpp.contains("std::atomic<float> _param_gain_write(2.5f)")
+                && cpp.contains("std::atomic<float> _param_gain_read(2.5f)")
+                && cpp.contains(
+                    "_param_gain_read.store(_param_gain_write.load(std::memory_order_acquire)"
+                ),
+            "should emit param read/write buffers: {}",
             cpp
         );
     }
