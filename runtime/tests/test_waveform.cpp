@@ -123,6 +123,56 @@ TEST(sine_amplitude) {
     ASSERT_NEAR(out[0], 3.5f, 1e-5f);
 }
 
+TEST(sine_phase_continuity_across_firings) {
+    // Simulate two consecutive firings with block size N=256 at 10MHz,
+    // advancing iteration_index by N (the correct stride) between firings.
+    // Verify that the waveform is phase-continuous at the block boundary.
+    const int N = 256;
+    const double sr = 10'000'000.0;
+    const float freq = 100'000.0f;
+    const float amp = 0.8f;
+
+    pipit::detail::set_actor_task_rate_hz(sr);
+
+    Actor_sine<float> actor;
+    actor.freq = freq;
+    actor.amp = amp;
+    actor.N = N;
+
+    float in_buf[1];
+    float block0[N];
+    float block1[N];
+
+    // Firing 0: iteration_index = 0
+    pipit::detail::set_actor_iteration_index(0);
+    int rc = actor(in_buf, block0);
+    ASSERT_EQ(rc, ACTOR_OK);
+
+    // Firing 1: iteration_index = N (correct stride)
+    pipit::detail::set_actor_iteration_index(N);
+    rc = actor(in_buf, block1);
+    ASSERT_EQ(rc, ACTOR_OK);
+
+    // Verify phase continuity at the boundary:
+    // block0[N-1] corresponds to sample index N-1, block1[0] to sample index N.
+    // They should match the reference sine exactly.
+    double t_last = static_cast<double>(N - 1) / sr;
+    double t_next = static_cast<double>(N) / sr;
+    float expected_last = amp * static_cast<float>(std::sin(2.0 * M_PI * freq * t_last));
+    float expected_next = amp * static_cast<float>(std::sin(2.0 * M_PI * freq * t_next));
+    ASSERT_NEAR(block0[N - 1], expected_last, 1e-5f);
+    ASSERT_NEAR(block1[0], expected_next, 1e-5f);
+
+    // Also verify the phase difference between the two boundary samples is smooth
+    // (not a large discontinuity). Adjacent samples at 100kHz/10MHz differ by
+    // 2π * 100000/10000000 = 0.0628 radians — a small step.
+    float delta = std::abs(block1[0] - block0[N - 1]);
+    float max_step =
+        amp * static_cast<float>(
+                  2.0 * std::sin(M_PI * freq / sr)); // max |sin(x+dx)-sin(x)| ≤ 2*sin(dx/2)
+    ASSERT_TRUE(delta <= max_step + 1e-5f);
+}
+
 // ── Square wave tests ──
 
 TEST(square_basic) {
