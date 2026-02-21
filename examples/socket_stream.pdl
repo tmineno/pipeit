@@ -4,7 +4,7 @@
 #               PPKT protocol streaming, waveform generators,
 #               inter-process pipelines via UDP
 #
-# Usage:
+# Usage: 
 #   # Terminal 1 — run this pipeline (generates + sends, receives + prints)
 #   pcc examples/socket_stream.pdl \
 #     -I runtime/libpipit/include/std_actors.h \
@@ -16,12 +16,13 @@
 #   # Terminal 2 (optional) — view with oscilloscope
 #   tools/pipscope/build/pipscope --port 9100
 
-param freq = 10000000
+param freq = 100000
 param amp  = 0.8
-
-# Generate a sine wave and stream it out via UDP
-clock 100MHz sender {
-    sine<float>($freq, $amp) | socket_write("localhost:9100", 0)
+# Generate a sine wave and stream it out via UDP.
+# Block size 256 batches samples into ~1KB packets instead of
+# sending one sample per packet (which overwhelms UDP at 10MHz).
+clock 1000MHz sender {
+    sine<float>($freq, $amp)[] | socket_write("localhost:9100", 0)
 }
 
 # Receive samples from another process and print them

@@ -315,6 +315,130 @@ TEST(ppkt_send_chunked_sequence_continuity) {
     ASSERT_EQ(hdr.sequence, 13); // 10 + 3 chunks
 }
 
+// ── Frame boundary flag tests ──
+
+TEST(ppkt_send_chunked_single_sets_both_frame_flags) {
+    // A single-chunk send should set both FLAG_FRAME_START and FLAG_FRAME_END
+    DatagramReceiver rx;
+    ASSERT_TRUE(rx.open("localhost:19876", 15));
+
+    DatagramSender tx;
+    ASSERT_TRUE(tx.open("localhost:19876", 15));
+
+    PpktHeader hdr = ppkt_make_header(DTYPE_F32, 0);
+    hdr.sample_rate_hz = 48000.0;
+    hdr.timestamp_ns = pipit_now_ns();
+    hdr.iteration_index = 0;
+
+    float samples[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    int sent = ppkt_send_chunked(tx, hdr, samples, 4);
+    ASSERT_EQ(sent, 1);
+
+    usleep(1000);
+
+    uint8_t buf[512];
+    ssize_t n = rx.recv(buf, sizeof(buf));
+    ASSERT_TRUE(n > 0);
+
+    PpktHeader recv_hdr;
+    std::memcpy(&recv_hdr, buf, sizeof(PpktHeader));
+    ASSERT_TRUE((recv_hdr.flags & FLAG_FRAME_START) != 0);
+    ASSERT_TRUE((recv_hdr.flags & FLAG_FRAME_END) != 0);
+}
+
+TEST(ppkt_send_chunked_multi_sets_frame_boundaries) {
+    // Multi-chunk: first chunk has FRAME_START only, last has FRAME_END only,
+    // middle has neither.
+    DatagramReceiver rx;
+    ASSERT_TRUE(rx.open("localhost:19877", 15));
+
+    DatagramSender tx;
+    ASSERT_TRUE(tx.open("localhost:19877", 15));
+
+    PpktHeader hdr = ppkt_make_header(DTYPE_F32, 0);
+    hdr.sample_rate_hz = 1000.0;
+    hdr.timestamp_ns = pipit_now_ns();
+    hdr.iteration_index = 0;
+
+    float samples[20];
+    for (int i = 0; i < 20; i++)
+        samples[i] = static_cast<float>(i);
+
+    // MTU = 48 + 32 = 80 → max 8 f32 per chunk → 3 chunks (8+8+4)
+    size_t tiny_mtu = sizeof(PpktHeader) + 32;
+    int sent = ppkt_send_chunked(tx, hdr, samples, 20, tiny_mtu);
+    ASSERT_EQ(sent, 3);
+
+    usleep(1000);
+
+    uint8_t buf[512];
+
+    // First chunk: FRAME_START set, FRAME_END clear
+    ssize_t n = rx.recv(buf, sizeof(buf));
+    ASSERT_TRUE(n > 0);
+    PpktHeader h1;
+    std::memcpy(&h1, buf, sizeof(PpktHeader));
+    ASSERT_TRUE((h1.flags & FLAG_FRAME_START) != 0);
+    ASSERT_TRUE((h1.flags & FLAG_FRAME_END) == 0);
+
+    // Middle chunk: neither FRAME_START nor FRAME_END
+    n = rx.recv(buf, sizeof(buf));
+    ASSERT_TRUE(n > 0);
+    PpktHeader h2;
+    std::memcpy(&h2, buf, sizeof(PpktHeader));
+    ASSERT_TRUE((h2.flags & FLAG_FRAME_START) == 0);
+    ASSERT_TRUE((h2.flags & FLAG_FRAME_END) == 0);
+
+    // Last chunk: FRAME_END set, FRAME_START clear
+    n = rx.recv(buf, sizeof(buf));
+    ASSERT_TRUE(n > 0);
+    PpktHeader h3;
+    std::memcpy(&h3, buf, sizeof(PpktHeader));
+    ASSERT_TRUE((h3.flags & FLAG_FRAME_START) == 0);
+    ASSERT_TRUE((h3.flags & FLAG_FRAME_END) != 0);
+}
+
+TEST(ppkt_send_chunked_preserves_caller_flags_on_first_chunk) {
+    // Caller-set flags (e.g., FLAG_FIRST_FRAME) should be preserved on first chunk only
+    DatagramReceiver rx;
+    ASSERT_TRUE(rx.open("localhost:19878", 15));
+
+    DatagramSender tx;
+    ASSERT_TRUE(tx.open("localhost:19878", 15));
+
+    PpktHeader hdr = ppkt_make_header(DTYPE_F32, 0);
+    hdr.flags = FLAG_FIRST_FRAME; // caller sets stream-level flag
+    hdr.sample_rate_hz = 1000.0;
+    hdr.timestamp_ns = pipit_now_ns();
+    hdr.iteration_index = 0;
+
+    float samples[20];
+    for (int i = 0; i < 20; i++)
+        samples[i] = 0.0f;
+
+    size_t tiny_mtu = sizeof(PpktHeader) + 32;
+    ppkt_send_chunked(tx, hdr, samples, 20, tiny_mtu);
+
+    usleep(1000);
+
+    uint8_t buf[512];
+
+    // First chunk should have FLAG_FIRST_FRAME | FLAG_FRAME_START
+    ssize_t n = rx.recv(buf, sizeof(buf));
+    ASSERT_TRUE(n > 0);
+    PpktHeader h1;
+    std::memcpy(&h1, buf, sizeof(PpktHeader));
+    ASSERT_TRUE((h1.flags & FLAG_FIRST_FRAME) != 0);
+    ASSERT_TRUE((h1.flags & FLAG_FRAME_START) != 0);
+
+    // Second chunk should NOT have FLAG_FIRST_FRAME
+    n = rx.recv(buf, sizeof(buf));
+    ASSERT_TRUE(n > 0);
+    PpktHeader h2;
+    std::memcpy(&h2, buf, sizeof(PpktHeader));
+    ASSERT_TRUE((h2.flags & FLAG_FIRST_FRAME) == 0);
+}
+
 // ── Main ──
 
 int main() {

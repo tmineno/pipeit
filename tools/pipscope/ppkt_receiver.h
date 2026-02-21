@@ -138,6 +138,34 @@ inline size_t convert_to_float(const uint8_t *payload, size_t payload_bytes, uin
     return convert_to_float(payload, static_cast<uint32_t>(bounded_samples), dtype, out);
 }
 
+// ── Frame integrity stats ────────────────────────────────────────────────────
+
+struct FrameStats {
+    uint64_t accepted_frames = 0;
+    uint64_t dropped_frames = 0;
+    uint64_t drop_seq_gap = 0;       // sequence discontinuity
+    uint64_t drop_iter_gap = 0;      // iteration_index discontinuity
+    uint64_t drop_boundary = 0;      // missing start/end boundary
+    uint64_t drop_meta_mismatch = 0; // dtype/sample_rate changed mid-frame
+};
+
+// ── Pending frame accumulator ────────────────────────────────────────────────
+
+struct PendingFrame {
+    bool active = false;
+    uint32_t expected_sequence = 0;
+    uint64_t start_timestamp_ns = 0;
+    uint64_t next_iteration = 0;
+    uint8_t dtype = 0;
+    double sample_rate_hz = 0.0;
+    std::vector<float> samples;
+
+    void reset() {
+        active = false;
+        samples.clear();
+    }
+};
+
 // ── ChannelState ─────────────────────────────────────────────────────────────
 
 struct ChannelState {
@@ -146,6 +174,8 @@ struct ChannelState {
     uint32_t last_sequence = 0;
     uint64_t packet_count = 0;
     SampleBuffer buffer;
+    FrameStats stats;
+    PendingFrame pending;
 
     explicit ChannelState(uint16_t id, size_t buf_capacity) : chan_id(id), buffer(buf_capacity) {}
 };
@@ -157,6 +187,7 @@ struct ChannelSnapshot {
     uint16_t chan_id;
     double sample_rate_hz;
     uint64_t packet_count;
+    FrameStats stats;
     std::vector<float> samples;
 };
 
@@ -183,6 +214,10 @@ class PpktReceiver {
 
         int optval = 1;
         setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+
+        // Enlarge receive buffer to reduce kernel-level drops at high packet rates
+        int rcvbuf = 4 * 1024 * 1024; // 4 MB
+        setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
@@ -230,6 +265,7 @@ class PpktReceiver {
             snap.chan_id = ch.chan_id;
             snap.sample_rate_hz = ch.sample_rate_hz;
             snap.packet_count = ch.packet_count;
+            snap.stats = ch.stats;
             snap.samples.resize(max_samples);
             size_t n = ch.buffer.snapshot(snap.samples.data(), max_samples);
             snap.samples.resize(n);
@@ -303,14 +339,97 @@ class PpktReceiver {
         return inserted->second;
     }
 
-    void push_samples(const pipit::net::PpktHeader &hdr, const float *samples,
-                      size_t sample_count) {
+    enum class DropReason { SeqGap, IterGap, Boundary, MetaMismatch };
+
+    void record_drop(ChannelState &ch, DropReason reason) {
+        ch.stats.dropped_frames++;
+        switch (reason) {
+        case DropReason::SeqGap:
+            ch.stats.drop_seq_gap++;
+            break;
+        case DropReason::IterGap:
+            ch.stats.drop_iter_gap++;
+            break;
+        case DropReason::Boundary:
+            ch.stats.drop_boundary++;
+            break;
+        case DropReason::MetaMismatch:
+            ch.stats.drop_meta_mismatch++;
+            break;
+        }
+        ch.pending.reset();
+    }
+
+    void assemble_frame(const pipit::net::PpktHeader &hdr, const float *samples,
+                        size_t sample_count) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto &ch = get_or_create_channel(hdr.chan_id);
         ch.sample_rate_hz = hdr.sample_rate_hz;
         ch.last_sequence = hdr.sequence;
         ch.packet_count++;
-        ch.buffer.push(samples, sample_count);
+
+        bool is_start = (hdr.flags & pipit::net::FLAG_FRAME_START) != 0;
+        bool is_end = (hdr.flags & pipit::net::FLAG_FRAME_END) != 0;
+
+        // ── Start of a new frame ──
+        if (is_start) {
+            if (ch.pending.active) {
+                // Previous frame never closed — drop it
+                record_drop(ch, DropReason::Boundary);
+            }
+            ch.pending.active = true;
+            ch.pending.expected_sequence = hdr.sequence + 1;
+            ch.pending.start_timestamp_ns = hdr.timestamp_ns;
+            ch.pending.next_iteration = hdr.iteration_index + sample_count;
+            ch.pending.dtype = hdr.dtype;
+            ch.pending.sample_rate_hz = hdr.sample_rate_hz;
+            ch.pending.samples.assign(samples, samples + sample_count);
+
+            if (is_end) {
+                // Single-chunk frame — commit immediately
+                ch.stats.accepted_frames++;
+                ch.buffer.push(ch.pending.samples.data(), ch.pending.samples.size());
+                ch.pending.reset();
+            }
+            return;
+        }
+
+        // ── Continuation / end chunk without a preceding start ──
+        if (!ch.pending.active) {
+            record_drop(ch, DropReason::Boundary);
+            return;
+        }
+
+        // ── Validate sequence continuity ──
+        if (hdr.sequence != ch.pending.expected_sequence) {
+            record_drop(ch, DropReason::SeqGap);
+            return;
+        }
+
+        // ── Validate iteration continuity ──
+        if (hdr.iteration_index != ch.pending.next_iteration) {
+            record_drop(ch, DropReason::IterGap);
+            return;
+        }
+
+        // ── Validate metadata consistency within frame ──
+        if (hdr.timestamp_ns != ch.pending.start_timestamp_ns || hdr.dtype != ch.pending.dtype ||
+            hdr.sample_rate_hz != ch.pending.sample_rate_hz) {
+            record_drop(ch, DropReason::MetaMismatch);
+            return;
+        }
+
+        // ── Accumulate chunk ──
+        ch.pending.samples.insert(ch.pending.samples.end(), samples, samples + sample_count);
+        ch.pending.expected_sequence = hdr.sequence + 1;
+        ch.pending.next_iteration = hdr.iteration_index + sample_count;
+
+        // ── Commit if frame is complete ──
+        if (is_end) {
+            ch.stats.accepted_frames++;
+            ch.buffer.push(ch.pending.samples.data(), ch.pending.samples.size());
+            ch.pending.reset();
+        }
     }
 
     void recv_loop() {
@@ -340,7 +459,7 @@ class PpktReceiver {
                 continue;
             }
 
-            push_samples(hdr, conv_buf.data(), converted);
+            assemble_frame(hdr, conv_buf.data(), converted);
         }
     }
 };

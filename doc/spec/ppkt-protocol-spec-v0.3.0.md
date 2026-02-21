@@ -71,7 +71,11 @@ Offset  Size  Field            Type     Description
 |-----|--------------|------------------------------------------------|
 | 0   | first_frame  | First packet in a stream (initial connection)  |
 | 1   | last_frame   | Last packet in a stream (graceful shutdown)    |
-| 2-7 | reserved     | Must be 0                                      |
+| 2   | frame_start  | First chunk of a single actor firing           |
+| 3   | frame_end    | Last chunk of a single actor firing            |
+| 4-7 | reserved     | Must be 0                                      |
+
+When a firing produces a single chunk, both `frame_start` and `frame_end` MUST be set on that packet. When a firing is split into multiple chunks, the first chunk MUST set `frame_start`, the last chunk MUST set `frame_end`, and intermediate chunks MUST NOT set either bit.
 
 ## Field Semantics
 
@@ -138,8 +142,19 @@ Each chunk is a self-contained packet:
 - `iteration_index` is adjusted per chunk: `base_iter + offset` where `offset` is the sample offset within the original frame
 - `sequence` increments for each packet sent
 - `timestamp_ns` is the same for all chunks of one firing (they share the same wall-clock instant)
+- The first chunk of a firing sets `FLAG_FRAME_START`; the last sets `FLAG_FRAME_END`
+- A single-chunk firing sets both `FLAG_FRAME_START` and `FLAG_FRAME_END`
 
-Receivers do NOT need reassembly logic. Each packet is independently processable.
+### Frame-Atomic Reception
+
+Receivers that require phase-continuous visualization (e.g., oscilloscopes) SHOULD use the `frame_start` / `frame_end` flags to perform frame-atomic ingestion:
+
+1. Accumulate chunks into a pending frame buffer starting from a packet with `FLAG_FRAME_START`.
+2. Validate invariants during assembly: sequence continuity, iteration continuity, constant `timestamp_ns` / `dtype` / `sample_rate_hz` within a frame.
+3. Commit samples to the render buffer only when a valid `FLAG_FRAME_END` packet closes the frame.
+4. On any violation, drop the entire pending frame.
+
+Simple receivers that tolerate gaps MAY continue to process each packet independently.
 
 ## Error Handling
 
@@ -200,7 +215,13 @@ Payload (4 bytes):
 - [ ] PpktHeader struct is exactly 48 bytes with correct field offsets
 - [ ] Sender builds valid PPKT packets for f32, i32, cf32 dtypes
 - [ ] Sender chunks payloads exceeding MTU into multiple self-contained packets
+- [ ] Chunked sender sets FLAG_FRAME_START on first chunk and FLAG_FRAME_END on last chunk
+- [ ] Single-chunk send sets both FLAG_FRAME_START and FLAG_FRAME_END
 - [ ] Receiver validates magic and rejects invalid packets
 - [ ] Receiver outputs zeros when no data is available (non-blocking)
 - [ ] Loopback test: `socket_write` → `socket_read` on localhost preserves sample values
 - [ ] Sequence numbers increment per-channel and wrap correctly
+- [ ] Frame-atomic receiver accepts complete frames
+- [ ] Frame-atomic receiver drops frames with missing chunks (sequence gap)
+- [ ] Frame-atomic receiver drops frames with metadata mismatch
+- [ ] Frame-atomic receiver recovers after a dropped frame

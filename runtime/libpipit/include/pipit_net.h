@@ -57,6 +57,8 @@ inline size_t dtype_size(DType dt) {
 enum Flags : uint8_t {
     FLAG_FIRST_FRAME = 1 << 0,
     FLAG_LAST_FRAME = 1 << 1,
+    FLAG_FRAME_START = 1 << 2, // First chunk of a single actor firing
+    FLAG_FRAME_END = 1 << 3,   // Last chunk of a single actor firing
 };
 
 #pragma pack(push, 1)
@@ -315,8 +317,13 @@ static constexpr size_t PPKT_DEFAULT_MTU = 1472;
 /// MTU-sized packet, a single packet is sent.  Otherwise, the data is split
 /// into multiple packets.
 ///
+/// Frame boundary flags are set automatically: FLAG_FRAME_START on the first
+/// chunk, FLAG_FRAME_END on the last chunk.  Single-chunk frames get both.
+/// Callers may set additional flags (e.g., FLAG_FIRST_FRAME) in hdr.flags
+/// before calling; those bits are preserved on the first chunk.
+///
 /// @param sender   Opened DatagramSender
-/// @param hdr      Base header (sequence and iteration_index will be updated)
+/// @param hdr      Base header (sequence, iteration_index, and flags will be updated)
 /// @param data     Sample data pointer
 /// @param n        Total number of samples
 /// @param mtu      Maximum packet size (default: PPKT_DEFAULT_MTU)
@@ -336,14 +343,25 @@ inline int ppkt_send_chunked(DatagramSender &sender, PpktHeader &hdr, const void
     alignas(8) uint8_t pkt[65536];
 
     uint64_t base_iter = hdr.iteration_index;
+    uint8_t caller_flags = hdr.flags; // preserve caller-set flags for first chunk
     int packets_sent = 0;
     uint32_t offset = 0;
 
     while (offset < n) {
         uint32_t chunk = (n - offset < max_samples) ? (n - offset) : max_samples;
+        bool is_first = (offset == 0);
+        bool is_last = (offset + chunk >= n);
+
         hdr.sample_count = chunk;
         hdr.payload_bytes = static_cast<uint32_t>(chunk * dsz);
         hdr.iteration_index = base_iter + offset;
+
+        // Set frame boundary flags; preserve caller flags only on first chunk
+        hdr.flags = is_first ? caller_flags : 0;
+        if (is_first)
+            hdr.flags |= FLAG_FRAME_START;
+        if (is_last)
+            hdr.flags |= FLAG_FRAME_END;
 
         size_t pkt_size = sizeof(PpktHeader) + hdr.payload_bytes;
         std::memcpy(pkt, &hdr, sizeof(PpktHeader));
