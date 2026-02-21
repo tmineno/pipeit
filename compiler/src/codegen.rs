@@ -360,7 +360,9 @@ impl<'a> CodegenCtx<'a> {
             return;
         }
 
-        for buf_name in self.resolved.buffers.keys() {
+        let mut buf_names: Vec<&String> = self.resolved.buffers.keys().collect();
+        buf_names.sort();
+        for buf_name in buf_names {
             let wire_type = self.infer_buffer_wire_type(buf_name);
             let cpp_type = pipit_type_to_cpp(wire_type);
             let capacity = self.inter_task_buffer_capacity(buf_name, wire_type);
@@ -982,7 +984,9 @@ impl<'a> CodegenCtx<'a> {
         let aliases = self.build_passthrough_aliases(sub);
 
         // Pass 1: Declare real (non-aliased) buffers
-        for (&(src, tgt), &tokens) in &sched.edge_buffers {
+        let mut sorted_edges: Vec<_> = sched.edge_buffers.iter().collect();
+        sorted_edges.sort_by_key(|&(&(src, tgt), _)| (src.0, tgt.0));
+        for (&(src, tgt), &tokens) in sorted_edges {
             if back_edges.contains(&(src, tgt)) {
                 let var_name = format!("_fb_{}_{}", src.0, tgt.0);
                 names.insert((src, tgt), var_name);
@@ -1184,6 +1188,7 @@ impl<'a> CodegenCtx<'a> {
         rep > 1 && !is_passthrough && !is_buffer_io
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn plan_firing(
         &mut self,
         task_name: &str,
@@ -1611,6 +1616,7 @@ impl<'a> CodegenCtx<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_probe_in_existing_r_loop(
         &mut self,
         sub: &Subgraph,
@@ -1913,7 +1919,9 @@ impl<'a> CodegenCtx<'a> {
         let mut used_params: HashSet<String> = HashSet::new();
         self.collect_used_params(task_name, task_graph, &mut used_params);
 
-        for param_name in &used_params {
+        let mut sorted_params: Vec<&String> = used_params.iter().collect();
+        sorted_params.sort();
+        for param_name in sorted_params {
             if let Some(entry) = self.resolved.params.get(param_name) {
                 let stmt = &self.program.statements[entry.stmt_index];
                 if let StatementKind::Param(p) = &stmt.kind {
@@ -2047,7 +2055,9 @@ impl<'a> CodegenCtx<'a> {
         }
 
         // Shared buffer stats
-        for buf_name in self.resolved.buffers.keys() {
+        let mut buf_names: Vec<&String> = self.resolved.buffers.keys().collect();
+        buf_names.sort();
+        for buf_name in buf_names {
             let wire_type = self.infer_buffer_wire_type(buf_name);
             let cpp_type = pipit_type_to_cpp(wire_type);
             let _ = writeln!(
@@ -2114,7 +2124,10 @@ impl<'a> CodegenCtx<'a> {
             .push_str("            auto val = arg.substr(eq + 1);\n");
 
         let mut first = true;
-        for (param_name, entry) in &self.resolved.params {
+        let mut param_names: Vec<&String> = self.resolved.params.keys().collect();
+        param_names.sort();
+        for param_name in param_names {
+            let entry = &self.resolved.params[param_name];
             let keyword = if first { "if" } else { "else if" };
             first = false;
             let stmt = &self.program.statements[entry.stmt_index];
