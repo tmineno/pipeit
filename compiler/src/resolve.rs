@@ -25,6 +25,8 @@ use crate::registry::Registry;
 pub struct ResolveResult {
     pub resolved: ResolvedProgram,
     pub diagnostics: Vec<Diagnostic>,
+    /// ID allocator state after resolution, for continued allocation by HIR.
+    pub id_alloc: IdAllocator,
 }
 
 /// Resolution tables produced by name resolution.
@@ -172,6 +174,7 @@ pub fn resolve(program: &Program, registry: &Registry) -> ResolveResult {
     ResolveResult {
         resolved: ctx.resolved,
         diagnostics: ctx.diagnostics,
+        id_alloc: ctx.id_alloc,
     }
 }
 
