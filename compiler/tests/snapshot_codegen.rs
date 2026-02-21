@@ -49,7 +49,7 @@ fn full_pipeline_cpp(source: &str, registry: &pcc::registry::Registry) -> String
     );
     let program = parse_result.program.unwrap();
 
-    let resolve_result = pcc::resolve::resolve(&program, registry);
+    let mut resolve_result = pcc::resolve::resolve(&program, registry);
     assert!(
         resolve_result
             .diagnostics
@@ -85,7 +85,12 @@ fn full_pipeline_cpp(source: &str, registry: &pcc::registry::Registry) -> String
         "lowering verification failed (L1-L5)"
     );
 
-    let graph_result = pcc::graph::build_graph(&program, &resolve_result.resolved, registry);
+    let hir_program = pcc::hir::build_hir(
+        &program,
+        &resolve_result.resolved,
+        &mut resolve_result.id_alloc,
+    );
+    let graph_result = pcc::graph::build_graph(&hir_program, &resolve_result.resolved, registry);
     assert!(
         graph_result
             .diagnostics

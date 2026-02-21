@@ -150,10 +150,11 @@ fn compile_full(source: &str, registry: &registry::Registry, opts: &codegen::Cod
         .as_ref()
         .expect("benchmark scenario must parse");
 
-    let resolve_result = resolve::resolve(ast, registry);
+    let mut resolve_result = resolve::resolve(ast, registry);
     assert_no_errors("resolve", &resolve_result.diagnostics);
 
-    let graph_result = graph::build_graph(ast, &resolve_result.resolved, registry);
+    let hir_program = hir::build_hir(ast, &resolve_result.resolved, &mut resolve_result.id_alloc);
+    let graph_result = graph::build_graph(&hir_program, &resolve_result.resolved, registry);
     assert_no_errors("graph", &graph_result.diagnostics);
 
     let analysis_result =
@@ -218,12 +219,13 @@ fn bench_graph_phase(c: &mut Criterion, source: &str, registry: &registry::Regis
         "graph",
         || {
             let ast = parse_ast(source);
-            let rr = resolve::resolve(&ast, registry);
-            (ast, rr)
+            let mut rr = resolve::resolve(&ast, registry);
+            let hir = hir::build_hir(&ast, &rr.resolved, &mut rr.id_alloc);
+            (hir, rr)
         },
-        |(ast, rr)| {
+        |(hir, rr)| {
             assert_no_errors("resolve", &rr.diagnostics);
-            let r = graph::build_graph(black_box(&ast), black_box(&rr.resolved), registry);
+            let r = graph::build_graph(black_box(&hir), black_box(&rr.resolved), registry);
             black_box(&r.graph);
         },
     );
@@ -235,8 +237,9 @@ fn bench_analyze_phase(c: &mut Criterion, source: &str, registry: &registry::Reg
         "analyze",
         || {
             let ast = parse_ast(source);
-            let rr = resolve::resolve(&ast, registry);
-            let gr = graph::build_graph(&ast, &rr.resolved, registry);
+            let mut rr = resolve::resolve(&ast, registry);
+            let hir = hir::build_hir(&ast, &rr.resolved, &mut rr.id_alloc);
+            let gr = graph::build_graph(&hir, &rr.resolved, registry);
             (ast, rr, gr)
         },
         |(ast, rr, gr)| {
@@ -259,8 +262,9 @@ fn bench_schedule_phase(c: &mut Criterion, source: &str, registry: &registry::Re
         "schedule",
         || {
             let ast = parse_ast(source);
-            let rr = resolve::resolve(&ast, registry);
-            let gr = graph::build_graph(&ast, &rr.resolved, registry);
+            let mut rr = resolve::resolve(&ast, registry);
+            let hir = hir::build_hir(&ast, &rr.resolved, &mut rr.id_alloc);
+            let gr = graph::build_graph(&hir, &rr.resolved, registry);
             let ar = analyze::analyze(&ast, &rr.resolved, &gr.graph, registry);
             (ast, rr, gr, ar)
         },
@@ -291,8 +295,9 @@ fn bench_codegen_phase(
         "codegen",
         || {
             let ast = parse_ast(source);
-            let rr = resolve::resolve(&ast, registry);
-            let gr = graph::build_graph(&ast, &rr.resolved, registry);
+            let mut rr = resolve::resolve(&ast, registry);
+            let hir = hir::build_hir(&ast, &rr.resolved, &mut rr.id_alloc);
+            let gr = graph::build_graph(&hir, &rr.resolved, registry);
             let ar = analyze::analyze(&ast, &rr.resolved, &gr.graph, registry);
             let sr = schedule::schedule(&ast, &rr.resolved, &gr.graph, &ar.analysis, registry);
             (ast, rr, gr, ar, sr)

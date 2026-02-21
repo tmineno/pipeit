@@ -82,22 +82,29 @@ pub enum HirSwitchSource {
 pub struct HirPipeExpr {
     pub source: HirPipeSource,
     pub elements: Vec<HirPipeElem>,
-    pub sink: Option<String>, // buffer name for `-> name`
+    pub sink: Option<HirSink>,
     pub span: Span,
 }
 
 #[derive(Debug, Clone)]
 pub enum HirPipeSource {
     ActorCall(HirActorCall),
-    BufferRead(String),
-    TapRef(String),
+    BufferRead(String, Span),
+    TapRef(String, Span),
 }
 
 #[derive(Debug, Clone)]
 pub enum HirPipeElem {
     ActorCall(HirActorCall),
-    Tap(String),
-    Probe(String),
+    Tap(String, Span),
+    Probe(String, Span),
+}
+
+/// A pipe sink (`-> buffer_name`).
+#[derive(Debug, Clone)]
+pub struct HirSink {
+    pub buffer_name: String,
+    pub span: Span,
 }
 
 // ── Actor call ──────────────────────────────────────────────────────────────
@@ -338,15 +345,18 @@ impl<'a> HirBuilder<'a> {
                     }
                 }
                 PipeElem::Tap(ident) => {
-                    elements_expanded.push(HirPipeElem::Tap(ident.name.clone()));
+                    elements_expanded.push(HirPipeElem::Tap(ident.name.clone(), ident.span));
                 }
                 PipeElem::Probe(ident) => {
-                    elements_expanded.push(HirPipeElem::Probe(ident.name.clone()));
+                    elements_expanded.push(HirPipeElem::Probe(ident.name.clone(), ident.span));
                 }
             }
         }
 
-        let sink = expr.sink.as_ref().map(|s| s.buffer.name.clone());
+        let sink = expr.sink.as_ref().map(|s| HirSink {
+            buffer_name: s.buffer.name.clone(),
+            span: s.span,
+        });
 
         // Handle source expansion
         match source_expanded {
@@ -382,10 +392,10 @@ impl<'a> HirBuilder<'a> {
                 ExpandedCall::InlinedDefine(pipes) => ExpandedSource::InlinedDefine(pipes),
             },
             PipeSource::BufferRead(ident) => {
-                ExpandedSource::Single(HirPipeSource::BufferRead(ident.name.clone()))
+                ExpandedSource::Single(HirPipeSource::BufferRead(ident.name.clone(), ident.span))
             }
             PipeSource::TapRef(ident) => {
-                ExpandedSource::Single(HirPipeSource::TapRef(ident.name.clone()))
+                ExpandedSource::Single(HirPipeSource::TapRef(ident.name.clone(), ident.span))
             }
         }
     }

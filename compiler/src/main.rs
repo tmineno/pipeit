@@ -132,7 +132,7 @@ fn main() {
     }
 
     // ── Name resolution ──
-    let resolve_result = pcc::resolve::resolve(&program, &registry);
+    let mut resolve_result = pcc::resolve::resolve(&program, &registry);
     let resolve_has_errors =
         print_pipeline_diags(&cli.source, &source, &resolve_result.diagnostics);
     if resolve_has_errors {
@@ -190,8 +190,24 @@ fn main() {
         );
     }
 
+    // ── HIR normalization ──
+    let hir = pcc::hir::build_hir(
+        &program,
+        &resolve_result.resolved,
+        &mut resolve_result.id_alloc,
+    );
+
+    if cli.verbose {
+        eprintln!(
+            "pcc: HIR normalized, {} tasks, {} consts, {} params",
+            hir.tasks.len(),
+            hir.consts.len(),
+            hir.params.len(),
+        );
+    }
+
     // ── Graph construction ──
-    let graph_result = pcc::graph::build_graph(&program, &resolve_result.resolved, &registry);
+    let graph_result = pcc::graph::build_graph(&hir, &resolve_result.resolved, &registry);
     let graph_has_errors = print_pipeline_diags(&cli.source, &source, &graph_result.diagnostics);
     if graph_has_errors {
         std::process::exit(EXIT_COMPILE_ERROR);
