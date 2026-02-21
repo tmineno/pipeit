@@ -14,7 +14,7 @@
 //                produce `Diagnostic` entries.
 // Side effects: none.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use chumsky::span::Span as _;
 
@@ -24,6 +24,11 @@ use crate::registry::{
     ActorMeta, ParamKind, ParamType, PipitType, PortShape, Registry, TokenCount,
 };
 use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
+use crate::subgraph_index::{
+    build_global_node_index, build_subgraph_indices, subgraph_key, SubgraphIndex,
+};
+
+const SHAPE_WORKLIST_MIN_EDGES: usize = 24;
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -103,11 +108,69 @@ struct AnalyzeCtx<'a> {
     total_memory: u64,
     inferred_shapes: HashMap<NodeId, ShapeConstraint>,
     span_derived_dims: HashMap<(NodeId, String), u32>,
+    subgraph_indices: HashMap<usize, SubgraphIndex>,
+    subgraph_refs: HashMap<usize, &'a Subgraph>,
+    global_node_index: HashMap<NodeId, (usize, usize)>,
+    rv_by_task: HashMap<String, HashMap<NodeId, u32>>,
 }
 
 struct BalanceGraph {
     rates: HashMap<(NodeId, NodeId), (u32, u32)>,
     adjacency: HashMap<NodeId, Vec<NodeId>>,
+}
+
+#[derive(Default)]
+struct ShapeAdjacency {
+    incoming: HashMap<NodeId, Vec<usize>>,
+    outgoing: HashMap<NodeId, Vec<usize>>,
+}
+
+impl ShapeAdjacency {
+    fn from_subgraph(sub: &Subgraph) -> Self {
+        let mut adjacency = ShapeAdjacency::default();
+        for (edge_idx, edge) in sub.edges.iter().enumerate() {
+            adjacency
+                .outgoing
+                .entry(edge.source)
+                .or_default()
+                .push(edge_idx);
+            adjacency
+                .incoming
+                .entry(edge.target)
+                .or_default()
+                .push(edge_idx);
+        }
+        adjacency
+    }
+}
+
+struct ShapeWorklist {
+    queue: VecDeque<NodeId>,
+    queued: HashSet<NodeId>,
+}
+
+impl ShapeWorklist {
+    fn seeded(sub: &Subgraph) -> Self {
+        let mut queue = VecDeque::with_capacity(sub.nodes.len());
+        let mut queued = HashSet::with_capacity(sub.nodes.len());
+        for node in &sub.nodes {
+            queue.push_back(node.id);
+            queued.insert(node.id);
+        }
+        ShapeWorklist { queue, queued }
+    }
+
+    fn pop(&mut self) -> Option<NodeId> {
+        let node_id = self.queue.pop_front()?;
+        self.queued.remove(&node_id);
+        Some(node_id)
+    }
+
+    fn push(&mut self, node_id: NodeId) {
+        if self.queued.insert(node_id) {
+            self.queue.push_back(node_id);
+        }
+    }
 }
 
 impl<'a> AnalyzeCtx<'a> {
@@ -117,6 +180,9 @@ impl<'a> AnalyzeCtx<'a> {
         graph: &'a ProgramGraph,
         registry: &'a Registry,
     ) -> Self {
+        let subgraph_indices = build_subgraph_indices(graph);
+        let subgraph_refs = build_subgraph_refs(graph);
+        let global_node_index = build_global_node_index(graph, &subgraph_indices);
         AnalyzeCtx {
             program,
             resolved,
@@ -128,6 +194,10 @@ impl<'a> AnalyzeCtx<'a> {
             total_memory: 0,
             inferred_shapes: HashMap::new(),
             span_derived_dims: HashMap::new(),
+            subgraph_indices,
+            subgraph_refs,
+            global_node_index,
+            rv_by_task: HashMap::new(),
         }
     }
 
@@ -198,6 +268,36 @@ impl<'a> AnalyzeCtx<'a> {
         self.registry.lookup(name)
     }
 
+    fn subgraph_index(&self, sub: &Subgraph) -> Option<&SubgraphIndex> {
+        self.subgraph_indices.get(&subgraph_key(sub))
+    }
+
+    fn node_in_subgraph<'s>(&self, sub: &'s Subgraph, id: NodeId) -> Option<&'s Node> {
+        self.subgraph_index(sub)
+            .and_then(|idx| idx.node(sub, id))
+            .or_else(|| find_node(sub, id))
+    }
+
+    fn first_incoming_edge_in_subgraph<'s>(
+        &self,
+        sub: &'s Subgraph,
+        id: NodeId,
+    ) -> Option<&'s Edge> {
+        self.subgraph_index(sub)
+            .and_then(|idx| idx.first_incoming_edge(sub, id))
+            .or_else(|| sub.edges.iter().find(|e| e.target == id))
+    }
+
+    fn first_outgoing_edge_in_subgraph<'s>(
+        &self,
+        sub: &'s Subgraph,
+        id: NodeId,
+    ) -> Option<&'s Edge> {
+        self.subgraph_index(sub)
+            .and_then(|idx| idx.first_outgoing_edge(sub, id))
+            .or_else(|| sub.edges.iter().find(|e| e.source == id))
+    }
+
     /// Get the output type of a node, tracing through passthrough nodes.
     fn infer_output_type(&self, node: &Node, sub: &Subgraph) -> Option<PipitType> {
         match &node.kind {
@@ -242,12 +342,12 @@ impl<'a> AnalyzeCtx<'a> {
                 return None; // cycle guard
             }
             visited.push(current);
-            let node = find_node(sub, current)?;
+            let node = self.node_in_subgraph(sub, current)?;
             if let NodeKind::Actor { name, .. } = &node.kind {
                 return self.actor_meta(name).and_then(|m| m.out_type.as_concrete());
             }
             // Find predecessor
-            let pred = sub.edges.iter().find(|e| e.target == current);
+            let pred = self.first_incoming_edge_in_subgraph(sub, current);
             match pred {
                 Some(edge) => current = edge.source,
                 None => return None,
@@ -262,7 +362,7 @@ impl<'a> AnalyzeCtx<'a> {
         let write_node = find_buffer_write_in_task(task_graph, buffer_name)?;
         // Find the subgraph containing this node and trace backward
         for sub in subgraphs_of(task_graph) {
-            if find_node(sub, write_node).is_some() {
+            if self.node_in_subgraph(sub, write_node).is_some() {
                 return self.trace_type_backward(write_node, sub);
             }
         }
@@ -400,34 +500,131 @@ impl<'a> AnalyzeCtx<'a> {
     }
 
     fn infer_shapes_in_subgraph(&mut self, sub: &Subgraph) {
-        // Iterate until fixpoint (handles chains like fft()[256] | mag() | some_other())
+        if sub.nodes.is_empty() || sub.edges.is_empty() {
+            return;
+        }
+        if self.should_use_dense_shape_inference(sub) {
+            self.infer_shapes_in_subgraph_dense(sub);
+            return;
+        }
+
+        let adjacency = ShapeAdjacency::from_subgraph(sub);
+        let mut worklist = ShapeWorklist::seeded(sub);
+        while let Some(node_id) = worklist.pop() {
+            self.propagate_shapes_forward(sub, node_id, &adjacency, &mut worklist);
+            self.propagate_shapes_reverse(sub, node_id, &adjacency, &mut worklist);
+        }
+    }
+
+    fn infer_shapes_in_subgraph_dense(&mut self, sub: &Subgraph) {
+        // Dense fallback for small subgraphs: avoids worklist bookkeeping overhead.
         let mut changed = true;
         while changed {
             changed = false;
-            for edge in &sub.edges {
-                let src = match find_node(sub, edge.source) {
-                    Some(n) => n,
-                    None => continue,
-                };
-                let tgt = match find_node(sub, edge.target) {
-                    Some(n) => n,
-                    None => continue,
-                };
-
-                // Try: propagate from src's output shape → tgt's input shape
-                if let Some(sc) = self.try_propagate_shape(src, tgt, sub) {
-                    if self.upsert_inferred_shape(tgt.id, sc) {
-                        changed = true;
-                    }
-                }
-
-                // Try: propagate from tgt's input shape → src's output shape
-                if let Some(sc) = self.try_propagate_shape_reverse(tgt, src, sub) {
-                    if self.upsert_inferred_shape(src.id, sc) {
-                        changed = true;
-                    }
+            for edge_idx in 0..sub.edges.len() {
+                if self.propagate_shape_for_edge_dense(sub, edge_idx) {
+                    changed = true;
                 }
             }
+        }
+    }
+
+    fn should_use_dense_shape_inference(&self, sub: &Subgraph) -> bool {
+        sub.edges.len() < SHAPE_WORKLIST_MIN_EDGES
+    }
+
+    fn propagate_shapes_forward(
+        &mut self,
+        sub: &Subgraph,
+        node_id: NodeId,
+        adjacency: &ShapeAdjacency,
+        worklist: &mut ShapeWorklist,
+    ) {
+        let Some(edge_ids) = adjacency.outgoing.get(&node_id) else {
+            return;
+        };
+        for &edge_idx in edge_ids {
+            self.propagate_shape_forward_on_edge(sub, edge_idx, worklist);
+        }
+    }
+
+    fn propagate_shapes_reverse(
+        &mut self,
+        sub: &Subgraph,
+        node_id: NodeId,
+        adjacency: &ShapeAdjacency,
+        worklist: &mut ShapeWorklist,
+    ) {
+        let Some(edge_ids) = adjacency.incoming.get(&node_id) else {
+            return;
+        };
+        for &edge_idx in edge_ids {
+            self.propagate_shape_reverse_on_edge(sub, edge_idx, worklist);
+        }
+    }
+
+    fn propagate_shape_forward_on_edge(
+        &mut self,
+        sub: &Subgraph,
+        edge_idx: usize,
+        worklist: &mut ShapeWorklist,
+    ) {
+        let Some((src, tgt)) = self.edge_endpoints(sub, edge_idx) else {
+            return;
+        };
+        if let Some(sc) = self.try_propagate_shape(src, tgt, sub) {
+            self.upsert_inferred_shape_and_enqueue(tgt.id, sc, worklist);
+        }
+    }
+
+    fn propagate_shape_reverse_on_edge(
+        &mut self,
+        sub: &Subgraph,
+        edge_idx: usize,
+        worklist: &mut ShapeWorklist,
+    ) {
+        let Some((src, tgt)) = self.edge_endpoints(sub, edge_idx) else {
+            return;
+        };
+        if let Some(sc) = self.try_propagate_shape_reverse(tgt, src, sub) {
+            self.upsert_inferred_shape_and_enqueue(src.id, sc, worklist);
+        }
+    }
+
+    fn propagate_shape_for_edge_dense(&mut self, sub: &Subgraph, edge_idx: usize) -> bool {
+        let Some((src, tgt)) = self.edge_endpoints(sub, edge_idx) else {
+            return false;
+        };
+
+        let mut changed = false;
+        if let Some(sc) = self.try_propagate_shape(src, tgt, sub) {
+            changed |= self.upsert_inferred_shape(tgt.id, sc);
+        }
+        if let Some(sc) = self.try_propagate_shape_reverse(tgt, src, sub) {
+            changed |= self.upsert_inferred_shape(src.id, sc);
+        }
+        changed
+    }
+
+    fn edge_endpoints<'s>(
+        &self,
+        sub: &'s Subgraph,
+        edge_idx: usize,
+    ) -> Option<(&'s Node, &'s Node)> {
+        let edge = sub.edges.get(edge_idx)?;
+        let src = self.node_in_subgraph(sub, edge.source)?;
+        let tgt = self.node_in_subgraph(sub, edge.target)?;
+        Some((src, tgt))
+    }
+
+    fn upsert_inferred_shape_and_enqueue(
+        &mut self,
+        node_id: NodeId,
+        sc: ShapeConstraint,
+        worklist: &mut ShapeWorklist,
+    ) {
+        if self.upsert_inferred_shape(node_id, sc) {
+            worklist.push(node_id);
         }
     }
 
@@ -458,6 +655,7 @@ impl<'a> AnalyzeCtx<'a> {
 
     /// Resolve a single port dimension using precedence:
     /// explicit arg / explicit shape / span-derived / existing inferred.
+    #[allow(clippy::too_many_arguments)]
     fn resolve_port_dim_preferred(
         &self,
         node_id: NodeId,
@@ -490,7 +688,9 @@ impl<'a> AnalyzeCtx<'a> {
     /// Per-dimension behavior:
     /// - keep dimensions already fixed by higher-priority sources
     /// - fill only unresolved dimensions from propagated dims
+    ///
     /// Returns merged shape and whether any unresolved dimension was newly filled.
+    #[allow(clippy::too_many_arguments)]
     fn merge_propagated_shape(
         &self,
         node_id: NodeId,
@@ -529,6 +729,37 @@ impl<'a> AnalyzeCtx<'a> {
         Some((ShapeConstraint { dims, span }, changed))
     }
 
+    fn unresolved_actor_shape_target<'n>(&self, node: &'n Node) -> Option<(&'n [Arg], &ActorMeta)> {
+        let NodeKind::Actor {
+            name,
+            args,
+            shape_constraint,
+            ..
+        } = &node.kind
+        else {
+            return None;
+        };
+        if shape_constraint.is_some() {
+            return None;
+        }
+        let meta = self.actor_meta(name)?;
+        Some((args.as_slice(), meta))
+    }
+
+    fn target_has_fixed_actor_input_shape(&self, node: &Node) -> bool {
+        let NodeKind::Actor { name, .. } = &node.kind else {
+            return false;
+        };
+        let Some(meta) = self.actor_meta(name) else {
+            return false;
+        };
+        !meta
+            .in_shape
+            .dims
+            .iter()
+            .any(|d| matches!(d, TokenCount::Symbolic(_)))
+    }
+
     /// Try to propagate shape from src's output to tgt's input.
     /// Returns an inferred ShapeConstraint for tgt if successful.
     fn try_propagate_shape(
@@ -537,23 +768,7 @@ impl<'a> AnalyzeCtx<'a> {
         tgt: &Node,
         sub: &Subgraph,
     ) -> Option<ShapeConstraint> {
-        // tgt must be an actor with unresolved input shape
-        let (tgt_name, tgt_args, tgt_sc) = match &tgt.kind {
-            NodeKind::Actor {
-                name,
-                args,
-                shape_constraint,
-                ..
-            } => (name.as_str(), args.as_slice(), shape_constraint.as_ref()),
-            _ => return None,
-        };
-
-        // Explicit shape constraints are authoritative at call-site.
-        if tgt_sc.is_some() {
-            return None;
-        }
-
-        let tgt_meta = self.actor_meta(tgt_name)?;
+        let (tgt_args, tgt_meta) = self.unresolved_actor_shape_target(tgt)?;
 
         // Get src's resolved output shape (as a list of concrete dim values)
         let src_dims = self.resolve_output_shape_dims(src, sub)?;
@@ -563,16 +778,12 @@ impl<'a> AnalyzeCtx<'a> {
             &tgt_meta.in_shape,
             tgt_meta,
             tgt_args,
-            tgt_sc,
+            None,
             existing,
             &src_dims,
             tgt.span,
         )?;
-        if changed {
-            Some(sc)
-        } else {
-            None
-        }
+        changed.then_some(sc)
     }
 
     /// Try to propagate shape from tgt's input back to src's output.
@@ -583,41 +794,14 @@ impl<'a> AnalyzeCtx<'a> {
         src: &Node,
         sub: &Subgraph,
     ) -> Option<ShapeConstraint> {
-        // src must be an actor with unresolved output shape
-        let (src_name, src_args, src_sc) = match &src.kind {
-            NodeKind::Actor {
-                name,
-                args,
-                shape_constraint,
-                ..
-            } => (name.as_str(), args.as_slice(), shape_constraint.as_ref()),
-            _ => return None,
-        };
-
-        // Explicit shape constraints are authoritative at call-site.
-        if src_sc.is_some() {
-            return None;
-        }
-
-        let src_meta = self.actor_meta(src_name)?;
+        let (src_args, src_meta) = self.unresolved_actor_shape_target(src)?;
 
         // Only propagate backward when tgt's input shape has symbolic dimensions.
         // If all dims are Literal, the shape is fixed by the actor definition
         // (e.g. stdout IN(float,1)) and should not be treated as a frame dimension
         // to propagate backward.
-        let tgt_meta_for_check = match &tgt.kind {
-            NodeKind::Actor { name, .. } => self.actor_meta(name),
-            _ => None,
-        };
-        if let Some(tm) = tgt_meta_for_check {
-            if !tm
-                .in_shape
-                .dims
-                .iter()
-                .any(|d| matches!(d, TokenCount::Symbolic(_)))
-            {
-                return None;
-            }
+        if self.target_has_fixed_actor_input_shape(tgt) {
+            return None;
         }
 
         // Get tgt's resolved input shape dims
@@ -634,16 +818,12 @@ impl<'a> AnalyzeCtx<'a> {
             &src_meta.out_shape,
             src_meta,
             src_args,
-            src_sc,
+            None,
             existing,
             &tgt_dims,
             src.span,
         )?;
-        if changed {
-            Some(sc)
-        } else {
-            None
-        }
+        changed.then_some(sc)
     }
 
     /// Resolve a node's output shape to concrete dim values.
@@ -703,11 +883,11 @@ impl<'a> AnalyzeCtx<'a> {
                 return None;
             }
             visited.push(current);
-            let node = find_node(sub, current)?;
+            let node = self.node_in_subgraph(sub, current)?;
             if let NodeKind::Actor { .. } = &node.kind {
                 return self.resolve_output_shape_dims(node, sub);
             }
-            let pred = sub.edges.iter().find(|e| e.target == current);
+            let pred = self.first_incoming_edge_in_subgraph(sub, current);
             match pred {
                 Some(edge) => current = edge.source,
                 None => return None,
@@ -724,12 +904,12 @@ impl<'a> AnalyzeCtx<'a> {
                 return None;
             }
             visited.push(current);
-            let node = find_node(sub, current)?;
+            let node = self.node_in_subgraph(sub, current)?;
             if let NodeKind::Actor { .. } = &node.kind {
                 return self.resolve_input_shape_dims(node, sub);
             }
             // Find first successor
-            let succ = sub.edges.iter().find(|e| e.source == current);
+            let succ = self.first_outgoing_edge_in_subgraph(sub, current);
             match succ {
                 Some(edge) => current = edge.target,
                 None => return None,
@@ -855,6 +1035,44 @@ impl<'a> AnalyzeCtx<'a> {
         self.check_edge_shape_conflicts(sub);
     }
 
+    fn unique_symbolic_dims<'m>(&self, meta: &'m ActorMeta) -> Vec<&'m str> {
+        let mut seen = HashSet::new();
+        let mut syms = Vec::new();
+        for dim in meta.in_shape.dims.iter().chain(meta.out_shape.dims.iter()) {
+            let TokenCount::Symbolic(sym) = dim else {
+                continue;
+            };
+            let key = sym.as_str();
+            if seen.insert(key) {
+                syms.push(key);
+            }
+        }
+        syms
+    }
+
+    fn param_index_by_name<'m>(&self, meta: &'m ActorMeta) -> HashMap<&'m str, usize> {
+        meta.params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.name.as_str(), i))
+            .collect()
+    }
+
+    fn shape_constraint_index_by_symbol<'m>(&self, meta: &'m ActorMeta) -> HashMap<&'m str, usize> {
+        let mut indices = HashMap::new();
+        for (i, dim) in meta.in_shape.dims.iter().enumerate() {
+            if let TokenCount::Symbolic(sym) = dim {
+                indices.entry(sym.as_str()).or_insert(i);
+            }
+        }
+        for (i, dim) in meta.out_shape.dims.iter().enumerate() {
+            if let TokenCount::Symbolic(sym) = dim {
+                indices.entry(sym.as_str()).or_insert(i);
+            }
+        }
+        indices
+    }
+
     /// Check for conflicts between dimension resolution sources:
     /// - explicit arg vs span-derived
     /// - shape constraint vs span-derived
@@ -868,25 +1086,22 @@ impl<'a> AnalyzeCtx<'a> {
         else {
             return;
         };
-        let Some(meta) = self.actor_meta(name).cloned() else {
+        let Some(meta) = self.actor_meta(name) else {
             return;
         };
 
-        let mut seen = HashSet::new();
-        for dim in meta.in_shape.dims.iter().chain(meta.out_shape.dims.iter()) {
-            let sym = match dim {
-                TokenCount::Symbolic(s) => s,
-                _ => continue,
-            };
-            if !seen.insert(sym.clone()) {
-                continue;
-            }
+        let symbolic_dims = self.unique_symbolic_dims(meta);
+        let param_indices = self.param_index_by_name(meta);
+        let sc_indices = self.shape_constraint_index_by_symbol(meta);
+        let mut pending = Vec::new();
+        for sym in symbolic_dims {
+            let sym_name = sym;
 
             // Compute span-inferred value directly (not from span_derived_dims map,
             // since that map skips entries when explicit arg is present).
             let span_val = crate::dim_resolve::span_arg_length_for_dim(
-                sym,
-                &meta,
+                sym_name,
+                meta,
                 args,
                 self.resolved,
                 self.program,
@@ -897,67 +1112,53 @@ impl<'a> AnalyzeCtx<'a> {
             };
 
             // Check: explicit arg vs span-derived
-            let from_arg = meta
-                .params
-                .iter()
-                .position(|p| p.name == *sym)
-                .and_then(|idx| args.get(idx))
+            let from_arg = param_indices
+                .get(sym_name)
+                .and_then(|idx| args.get(*idx))
                 .and_then(|arg| {
                     crate::dim_resolve::resolve_arg_to_u32(arg, self.resolved, self.program)
                 });
             if let Some(arg_val) = from_arg {
                 if arg_val != span_val {
-                    self.error_with_hint(
+                    pending.push((
                         node.span,
                         format!(
                             "conflicting dimension '{}' at actor '{}': \
                              explicit argument specifies {}, but span-derived value is {}",
-                            sym, name, arg_val, span_val
+                            sym_name, name, arg_val, span_val
                         ),
                         "remove explicit argument to auto-infer from span, \
                          or align span length with explicit argument"
                             .to_string(),
-                    );
+                    ));
                 }
             }
 
             // Check: shape constraint vs span-derived
-            // Find position of this sym in in_shape or out_shape for SC lookup
             if let Some(sc) = shape_constraint {
-                let sc_idx = meta
-                    .in_shape
-                    .dims
-                    .iter()
-                    .enumerate()
-                    .find(|(_, d)| matches!(d, TokenCount::Symbolic(s) if s == sym))
-                    .map(|(i, _)| i)
-                    .or_else(|| {
-                        meta.out_shape
-                            .dims
-                            .iter()
-                            .enumerate()
-                            .find(|(_, d)| matches!(d, TokenCount::Symbolic(s) if s == sym))
-                            .map(|(i, _)| i)
-                    });
-                if let Some(idx) = sc_idx {
-                    if let Some(sc_val) = sc.dims.get(idx).and_then(|sd| {
+                if let Some(idx) = sc_indices.get(sym_name) {
+                    if let Some(sc_val) = sc.dims.get(*idx).and_then(|sd| {
                         crate::dim_resolve::resolve_shape_dim(sd, self.resolved, self.program)
                     }) {
                         if sc_val != span_val {
-                            self.error_with_hint(
+                            pending.push((
                                 sc.span,
                                 format!(
                                     "conflicting dimension '{}' at actor '{}': \
                                      shape constraint specifies {}, but span-derived value is {}",
-                                    sym, name, sc_val, span_val
+                                    sym_name, name, sc_val, span_val
                                 ),
                                 "align the shape constraint with the span argument length"
                                     .to_string(),
-                            );
+                            ));
                         }
                     }
                 }
             }
+        }
+
+        for (span, message, hint) in pending {
+            self.error_with_hint(span, message, hint);
         }
     }
 
@@ -1074,8 +1275,8 @@ impl<'a> AnalyzeCtx<'a> {
     }
 
     fn find_shape_conflict_on_edge(&self, sub: &Subgraph, edge: &Edge) -> Option<(Span, String)> {
-        let src = find_node(sub, edge.source)?;
-        let tgt = find_node(sub, edge.target)?;
+        let src = self.node_in_subgraph(sub, edge.source)?;
+        let tgt = self.node_in_subgraph(sub, edge.target)?;
         let (tgt_name, tgt_sc) = match &tgt.kind {
             NodeKind::Actor {
                 name,
@@ -1199,11 +1400,11 @@ impl<'a> AnalyzeCtx<'a> {
 
     fn check_types_in_subgraph(&mut self, _task_name: &str, sub: &Subgraph) {
         for edge in &sub.edges {
-            let src_node = match find_node(sub, edge.source) {
+            let src_node = match self.node_in_subgraph(sub, edge.source) {
                 Some(n) => n,
                 None => continue,
             };
-            let tgt_node = match find_node(sub, edge.target) {
+            let tgt_node = match self.node_in_subgraph(sub, edge.target) {
                 Some(n) => n,
                 None => continue,
             };
@@ -1262,6 +1463,10 @@ impl<'a> AnalyzeCtx<'a> {
         let rv = normalize_repetition_vector(&rv_rat);
         let consistent = self.verify_balance_equations(sub, task_name, &balance.rates, &rv);
         if consistent && !rv.is_empty() {
+            let task_rv = self.rv_by_task.entry(task_name.to_string()).or_default();
+            for (&node_id, &count) in &rv {
+                task_rv.insert(node_id, count);
+            }
             self.repetition_vectors
                 .insert((task_name.to_string(), label.to_string()), rv);
         }
@@ -1280,10 +1485,10 @@ impl<'a> AnalyzeCtx<'a> {
         }
 
         for edge in &sub.edges {
-            let Some(src) = find_node(sub, edge.source) else {
+            let Some(src) = self.node_in_subgraph(sub, edge.source) else {
                 continue;
             };
-            let Some(tgt) = find_node(sub, edge.target) else {
+            let Some(tgt) = self.node_in_subgraph(sub, edge.target) else {
                 continue;
             };
 
@@ -1393,8 +1598,8 @@ impl<'a> AnalyzeCtx<'a> {
         p: u32,
         c: u32,
     ) {
-        let src = find_node(sub, edge.source);
-        let tgt = find_node(sub, edge.target);
+        let src = self.node_in_subgraph(sub, edge.source);
+        let tgt = self.node_in_subgraph(sub, edge.target);
         let src_name = src.map(node_display_name).unwrap_or("?".into());
         let tgt_name = tgt.map(node_display_name).unwrap_or("?".into());
         self.error(
@@ -1446,6 +1651,13 @@ impl<'a> AnalyzeCtx<'a> {
     }
 
     fn find_node_in_any_subgraph(&self, node_id: NodeId) -> Option<&Node> {
+        if let Some((sub_key, node_pos)) = self.global_node_index.get(&node_id).copied() {
+            return self
+                .subgraph_refs
+                .get(&sub_key)
+                .and_then(|sub| sub.nodes.get(node_pos));
+        }
+
         for task_graph in self.graph.tasks.values() {
             for sub in subgraphs_of(task_graph) {
                 if let Some(node) = find_node(sub, node_id) {
@@ -1509,24 +1721,10 @@ impl<'a> AnalyzeCtx<'a> {
 
     /// Look up the repetition vector value for a specific node in a task.
     fn get_rv_for_node(&self, task_name: &str, node_id: NodeId) -> Option<u32> {
-        // Try "pipeline" label first
-        if let Some(rv) = self
-            .repetition_vectors
-            .get(&(task_name.to_string(), "pipeline".to_string()))
-        {
-            if let Some(&val) = rv.get(&node_id) {
-                return Some(val);
-            }
-        }
-        // Try "control" and mode labels for modal tasks
-        for ((tn, _label), rv) in &self.repetition_vectors {
-            if tn == task_name {
-                if let Some(&val) = rv.get(&node_id) {
-                    return Some(val);
-                }
-            }
-        }
-        None
+        self.rv_by_task
+            .get(task_name)
+            .and_then(|rv| rv.get(&node_id))
+            .copied()
     }
 
     // ── Phase 5: Buffer size computation ────────────────────────────────
@@ -1707,6 +1905,16 @@ fn subgraphs_of(task_graph: &TaskGraph) -> Vec<&Subgraph> {
             subs
         }
     }
+}
+
+fn build_subgraph_refs(graph: &ProgramGraph) -> HashMap<usize, &Subgraph> {
+    let mut refs = HashMap::new();
+    for task_graph in graph.tasks.values() {
+        for sub in subgraphs_of(task_graph) {
+            refs.insert(subgraph_key(sub), sub);
+        }
+    }
+    refs
 }
 
 /// Find the NodeId of a BufferWrite node in a task.

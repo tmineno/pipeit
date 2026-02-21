@@ -1,23 +1,21 @@
 # Pipit Benchmarks
 
-## Scripts
+`./run_all.sh` is the only script in this directory.
 
-- `run_all.sh` — benchmark runner, filtering, report generation
-- `profile_bench.sh` — uftrace-based per-function profiling and flame graph data
+It provides three minimal functions:
+
+1. Filtered benchmark execution
+2. Report generation
+3. JSON -> Markdown conversion
 
 ## Categories
 
-| Category | Framework | Source | Output |
-|---|---|---|---|
-| `compiler` | Criterion (Rust) | `compiler/benches/compiler_bench.rs` | `compiler_bench.json` |
-| `ringbuf` | Google Benchmark | `benches/ringbuf_bench.cpp` | `ringbuf_bench.json` |
-| `timer` | Google Benchmark | `benches/timer_bench.cpp` | `timer_bench.json` |
-| `thread` | Google Benchmark | `benches/thread_bench.cpp` | `thread_bench.json` |
-| `e2e` | Google Benchmark | `benches/e2e_bench.cpp` | `e2e_bench.json` |
-| `pdl` | pcc + runtime stats | `benches/pdl/*.pdl` | `pdl_bench.txt` |
-| `profile` | uftrace | `benches/profile_bench.sh` | `profile/` |
-
-`all` runs every category (default when no `--filter` specified).
+- `compiler`
+- `ringbuf`
+- `timer`
+- `thread`
+- `pdl`
+- `all`
 
 ## Usage
 
@@ -28,57 +26,66 @@
 # Run selected categories only
 ./run_all.sh --filter timer --filter thread
 
-# Run benchmarks and generate markdown report
+# Run benchmark and generate markdown report to current directory
+./run_all.sh --report
+
+# Run benchmark and generate markdown report to specified directory
 ./run_all.sh --report --output-dir /path/to/output
 
-# Convert existing JSON to markdown report (no benchmark run)
+# Convert JSON to markdown report (no benchmark run), output to specified directory
 ./run_all.sh --report --json /path/to/json_or_dir --output-dir /path/to/output
+
+# Convert JSON to markdown report (no benchmark run), output to current directory
+./run_all.sh --report --json /path/to/json_or_dir
 ```
 
 ## Report Output
 
-Default report path: `./benchmark_report.md` (current directory, or `--output-dir` if provided).
+Default report path:
 
-If `--json` is not specified, report input JSON files are discovered from the benchmark output directory (`benches/results` by default, or `--output-dir`).
+- `./benchmark_report.md` (current directory)
 
-## Build
-
-No separate CMakeLists.txt. C++ benchmarks are compiled inline by `run_all.sh`:
-
-```
-c++ -std=c++20 -O3 -march=native -DNDEBUG \
-    -I runtime/libpipit/include \
-    -I runtime/libpipit/include/third_party \
-    -I examples \
-    <source.cpp> -lbenchmark -lpthread -o <exe>
-```
-
-PDL benchmarks: `pcc` compiles `.pdl` → `.cpp`, then the generated C++ is compiled and executed with runtime statistics.
+If `--json` is not specified, report input JSON files are discovered from benchmark output directory (`benches/results` by default, or `--output-dir` if provided).
 
 ## KPI Mapping
 
-- `compiler` — compile-time and phase-scaling metrics
-- `ringbuf` — shared-buffer throughput and contention/backpressure metrics
-- `timer` — jitter/overrun and batching (K-factor) behavior
-- `thread` — task deadline miss rate and scaling behavior
-- `e2e` — pipeline max throughput (CPU-bound) and socket loopback
-- `pdl` — end-to-end task stats from generated runtime executables
-- `profile` — per-function timing via uftrace instrumentation
+- `compiler`: compile-time and phase-scaling metrics
+- `ringbuf`: shared-buffer throughput and contention/backpressure metrics
+- `timer`: jitter/overrun and batching (`K-factor`) behavior
+- `thread`: task deadline miss rate and scaling behavior
+- `pdl`: end-to-end task stats from generated runtime executables
 
 ## Compiler Bench KPIs
 
 `compiler/benches/compiler_bench.rs` is organized into KPI groups:
 
-- `kpi/parse_latency` — parser latency on representative programs
-- `kpi/full_compile_latency` — full compile latency (parse → resolve → graph → analyze → schedule → codegen)
-- `kpi/phase_latency/*` — per-phase latency breakdown on a non-trivial pipeline
-- `kpi/parse_scaling` — parser scalability vs number of tasks
+- `kpi/parse_latency`: parser latency on representative programs
+- `kpi/full_compile_latency`: full compile latency (`parse -> resolve -> graph -> analyze -> schedule -> codegen`)
+- `kpi/phase_latency/*`: per-phase latency breakdown on a non-trivial pipeline
+- `kpi/parse_scaling`: parser scalability vs number of tasks
 
-## PDL Benchmarks
+## Stable Compiler Measurements
 
-`benches/pdl/` contains representative pipelines:
+Use `./compiler_bench_stable.sh` for reproducible compiler KPI runs.
 
-- `simple.pdl` — single-task baseline
-- `modal.pdl` — CSDF mode switching
-- `multitask.pdl` — multi-task shared buffer communication
-- `sdr_receiver.pdl` — multi-rate chain (FFT, FIR, decimation, shared buffers)
+What it enforces:
+
+- CPU pinning via `taskset`
+- fixed Criterion timing knobs
+- optional sequential baseline-vs-current runs via `git worktree`
+
+Examples:
+
+```bash
+# Full compile KPI set on pinned CPU
+./compiler_bench_stable.sh
+
+# Single KPI
+./compiler_bench_stable.sh --filter 'kpi/full_compile_latency/complex'
+
+# A/B against baseline ref
+./compiler_bench_stable.sh --baseline-ref HEAD
+```
+
+`--baseline-ref` mode uses a shared cargo target dir plus Criterion
+`--save-baseline/--baseline`, so the reported `change:` numbers are true A/B.

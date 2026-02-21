@@ -5,6 +5,7 @@
 // Test macro pattern follows runtime/tests/test_net.cpp.
 //
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -47,6 +48,11 @@
 #define ASSERT_FALSE(cond) ASSERT_TRUE(!(cond))
 
 using namespace pipit::net;
+
+static uint16_t next_test_port() {
+    static std::atomic<uint16_t> next{24000};
+    return next.fetch_add(1);
+}
 
 // ── Helper: send a PPKT packet to localhost:port ─────────────────────────────
 
@@ -228,16 +234,18 @@ TEST(convert_i8) {
 // ── PpktReceiver E2E tests (UDP loopback) ────────────────────────────────────
 
 TEST(receiver_starts_and_stops) {
+    uint16_t port = next_test_port();
     pipscope::PpktReceiver rx(1024);
-    ASSERT_TRUE(rx.start(19900));
+    ASSERT_TRUE(rx.start(port));
     usleep(5000);
     rx.stop();
     // No crash = pass
 }
 
 TEST(receiver_no_data_empty_snapshot) {
+    uint16_t port = next_test_port();
     pipscope::PpktReceiver rx(1024);
-    ASSERT_TRUE(rx.start(19901));
+    ASSERT_TRUE(rx.start(port));
     usleep(5000);
 
     auto snaps = rx.snapshot(100);
@@ -247,13 +255,14 @@ TEST(receiver_no_data_empty_snapshot) {
 }
 
 TEST(receiver_single_channel) {
+    uint16_t port = next_test_port();
     pipscope::PpktReceiver rx(1024);
-    ASSERT_TRUE(rx.start(19902));
+    ASSERT_TRUE(rx.start(port));
     usleep(5000);
 
     // Send 4 float samples to channel 0
     float samples[4] = {1.0f, 2.0f, 3.0f, 4.0f};
-    send_ppkt(19902, 0, samples, 4, 48000.0);
+    send_ppkt(port, 0, samples, 4, 48000.0);
 
     usleep(10000); // wait for receiver thread to process
 
@@ -272,17 +281,18 @@ TEST(receiver_single_channel) {
 }
 
 TEST(receiver_multi_channel) {
+    uint16_t port = next_test_port();
     pipscope::PpktReceiver rx(1024);
-    ASSERT_TRUE(rx.start(19903));
+    ASSERT_TRUE(rx.start(port));
     usleep(5000);
 
     // Send to channel 0
     float ch0[3] = {10.0f, 20.0f, 30.0f};
-    send_ppkt(19903, 0, ch0, 3, 1000.0);
+    send_ppkt(port, 0, ch0, 3, 1000.0);
 
     // Send to channel 5
     float ch5[2] = {100.0f, 200.0f};
-    send_ppkt(19903, 5, ch5, 2, 48000.0);
+    send_ppkt(port, 5, ch5, 2, 48000.0);
 
     usleep(10000);
 
@@ -304,13 +314,16 @@ TEST(receiver_multi_channel) {
 }
 
 TEST(receiver_validates_ppkt) {
+    uint16_t port = next_test_port();
     pipscope::PpktReceiver rx(1024);
-    ASSERT_TRUE(rx.start(19904));
+    ASSERT_TRUE(rx.start(port));
     usleep(5000);
 
     // Send a packet with invalid magic
     DatagramSender tx;
-    ASSERT_TRUE(tx.open("localhost:19904", 15));
+    char addr[32];
+    snprintf(addr, sizeof(addr), "localhost:%u", port);
+    ASSERT_TRUE(tx.open(addr, strlen(addr)));
 
     PpktHeader hdr = ppkt_make_header(DTYPE_F32, 0);
     hdr.magic[0] = 'X'; // corrupt magic
@@ -333,19 +346,20 @@ TEST(receiver_validates_ppkt) {
 }
 
 TEST(receiver_multiple_packets_accumulate) {
+    uint16_t port = next_test_port();
     pipscope::PpktReceiver rx(1024);
-    ASSERT_TRUE(rx.start(19905));
+    ASSERT_TRUE(rx.start(port));
     usleep(5000);
 
     // Send 3 packets to same channel
     float s1[2] = {1.0f, 2.0f};
     float s2[2] = {3.0f, 4.0f};
     float s3[2] = {5.0f, 6.0f};
-    send_ppkt(19905, 0, s1, 2);
+    send_ppkt(port, 0, s1, 2);
     usleep(1000);
-    send_ppkt(19905, 0, s2, 2);
+    send_ppkt(port, 0, s2, 2);
     usleep(1000);
-    send_ppkt(19905, 0, s3, 2);
+    send_ppkt(port, 0, s3, 2);
 
     usleep(10000);
 
@@ -364,13 +378,14 @@ TEST(receiver_multiple_packets_accumulate) {
 }
 
 TEST(receiver_dtype_i16_conversion) {
+    uint16_t port = next_test_port();
     pipscope::PpktReceiver rx(1024);
-    ASSERT_TRUE(rx.start(19906));
+    ASSERT_TRUE(rx.start(port));
     usleep(5000);
 
     // Send i16 samples
     int16_t i16_samples[3] = {1000, -2000, 32767};
-    send_ppkt_raw(19906, 0, DTYPE_I16, i16_samples, 3, 6);
+    send_ppkt_raw(port, 0, DTYPE_I16, i16_samples, 3, 6);
 
     usleep(10000);
 
@@ -385,13 +400,14 @@ TEST(receiver_dtype_i16_conversion) {
 }
 
 TEST(receiver_dtype_f64_conversion) {
+    uint16_t port = next_test_port();
     pipscope::PpktReceiver rx(1024);
-    ASSERT_TRUE(rx.start(19907));
+    ASSERT_TRUE(rx.start(port));
     usleep(5000);
 
     // Send f64 samples
     double f64_samples[2] = {3.14, -2.718};
-    send_ppkt_raw(19907, 0, DTYPE_F64, f64_samples, 2, 16);
+    send_ppkt_raw(port, 0, DTYPE_F64, f64_samples, 2, 16);
 
     usleep(10000);
 
@@ -401,6 +417,27 @@ TEST(receiver_dtype_f64_conversion) {
     // Compare with tolerance for float precision
     ASSERT_TRUE(snaps[0].samples[0] > 3.13f && snaps[0].samples[0] < 3.15f);
     ASSERT_TRUE(snaps[0].samples[1] > -2.72f && snaps[0].samples[1] < -2.71f);
+
+    rx.stop();
+}
+
+TEST(receiver_clamps_samples_to_payload_bytes) {
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(1024);
+    ASSERT_TRUE(rx.start(port));
+    usleep(5000);
+
+    // Header claims 10 i16 samples, but payload has only 2 samples (4 bytes).
+    int16_t i16_samples[2] = {111, -222};
+    send_ppkt_raw(port, 0, DTYPE_I16, i16_samples, 10, 4);
+
+    usleep(10000);
+
+    auto snaps = rx.snapshot(100);
+    ASSERT_EQ(snaps.size(), 1);
+    ASSERT_EQ(snaps[0].samples.size(), 2);
+    ASSERT_EQ(snaps[0].samples[0], 111.0f);
+    ASSERT_EQ(snaps[0].samples[1], -222.0f);
 
     rx.stop();
 }

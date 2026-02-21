@@ -124,6 +124,25 @@ fn has_errors(diags: &[resolve::Diagnostic]) -> bool {
         .any(|d| matches!(d.level, resolve::DiagLevel::Error))
 }
 
+fn assert_no_errors(stage: &str, diags: &[resolve::Diagnostic]) {
+    assert!(
+        !has_errors(diags),
+        "{stage} produced diagnostics: {diags:#?}"
+    );
+}
+
+fn bench_phase<I, Setup, Run>(c: &mut Criterion, phase: &str, mut setup: Setup, mut run: Run)
+where
+    Setup: FnMut() -> I,
+    Run: FnMut(I),
+{
+    let mut group = c.benchmark_group(format!("kpi/phase_latency/{phase}"));
+    group.bench_function("complex", |b| {
+        b.iter_batched(&mut setup, &mut run, BatchSize::SmallInput);
+    });
+    group.finish();
+}
+
 fn compile_full(source: &str, registry: &registry::Registry, opts: &codegen::CodegenOptions) {
     let parse_result = parser::parse(source);
     let ast = parse_result
@@ -132,14 +151,14 @@ fn compile_full(source: &str, registry: &registry::Registry, opts: &codegen::Cod
         .expect("benchmark scenario must parse");
 
     let resolve_result = resolve::resolve(ast, registry);
-    assert!(!has_errors(&resolve_result.diagnostics));
+    assert_no_errors("resolve", &resolve_result.diagnostics);
 
     let graph_result = graph::build_graph(ast, &resolve_result.resolved, registry);
-    assert!(!has_errors(&graph_result.diagnostics));
+    assert_no_errors("graph", &graph_result.diagnostics);
 
     let analysis_result =
         analyze::analyze(ast, &resolve_result.resolved, &graph_result.graph, registry);
-    assert!(!has_errors(&analysis_result.diagnostics));
+    assert_no_errors("analyze", &analysis_result.diagnostics);
 
     let schedule_result = schedule::schedule(
         ast,
@@ -148,7 +167,7 @@ fn compile_full(source: &str, registry: &registry::Registry, opts: &codegen::Cod
         &analysis_result.analysis,
         registry,
     );
-    assert!(!has_errors(&schedule_result.diagnostics));
+    assert_no_errors("schedule", &schedule_result.diagnostics);
 
     let generated = codegen::codegen(
         ast,
@@ -161,6 +180,140 @@ fn compile_full(source: &str, registry: &registry::Registry, opts: &codegen::Cod
     );
 
     black_box(generated);
+}
+
+fn parse_ast(source: &str) -> ast::Program {
+    parser::parse(source)
+        .program
+        .expect("benchmark scenario must parse")
+}
+
+fn bench_parse_phase(c: &mut Criterion, source: &str) {
+    bench_phase(
+        c,
+        "parse",
+        || source,
+        |src| {
+            let r = parser::parse(black_box(src));
+            black_box(&r.program);
+        },
+    );
+}
+
+fn bench_resolve_phase(c: &mut Criterion, source: &str, registry: &registry::Registry) {
+    bench_phase(
+        c,
+        "resolve",
+        || parse_ast(source),
+        |ast| {
+            let r = resolve::resolve(black_box(&ast), registry);
+            black_box(&r.resolved);
+        },
+    );
+}
+
+fn bench_graph_phase(c: &mut Criterion, source: &str, registry: &registry::Registry) {
+    bench_phase(
+        c,
+        "graph",
+        || {
+            let ast = parse_ast(source);
+            let rr = resolve::resolve(&ast, registry);
+            (ast, rr)
+        },
+        |(ast, rr)| {
+            assert_no_errors("resolve", &rr.diagnostics);
+            let r = graph::build_graph(black_box(&ast), black_box(&rr.resolved), registry);
+            black_box(&r.graph);
+        },
+    );
+}
+
+fn bench_analyze_phase(c: &mut Criterion, source: &str, registry: &registry::Registry) {
+    bench_phase(
+        c,
+        "analyze",
+        || {
+            let ast = parse_ast(source);
+            let rr = resolve::resolve(&ast, registry);
+            let gr = graph::build_graph(&ast, &rr.resolved, registry);
+            (ast, rr, gr)
+        },
+        |(ast, rr, gr)| {
+            assert_no_errors("resolve", &rr.diagnostics);
+            assert_no_errors("graph", &gr.diagnostics);
+            let r = analyze::analyze(
+                black_box(&ast),
+                black_box(&rr.resolved),
+                black_box(&gr.graph),
+                registry,
+            );
+            black_box(&r.analysis);
+        },
+    );
+}
+
+fn bench_schedule_phase(c: &mut Criterion, source: &str, registry: &registry::Registry) {
+    bench_phase(
+        c,
+        "schedule",
+        || {
+            let ast = parse_ast(source);
+            let rr = resolve::resolve(&ast, registry);
+            let gr = graph::build_graph(&ast, &rr.resolved, registry);
+            let ar = analyze::analyze(&ast, &rr.resolved, &gr.graph, registry);
+            (ast, rr, gr, ar)
+        },
+        |(ast, rr, gr, ar)| {
+            assert_no_errors("resolve", &rr.diagnostics);
+            assert_no_errors("graph", &gr.diagnostics);
+            assert_no_errors("analyze", &ar.diagnostics);
+            let r = schedule::schedule(
+                black_box(&ast),
+                black_box(&rr.resolved),
+                black_box(&gr.graph),
+                black_box(&ar.analysis),
+                registry,
+            );
+            black_box(&r.schedule);
+        },
+    );
+}
+
+fn bench_codegen_phase(
+    c: &mut Criterion,
+    source: &str,
+    registry: &registry::Registry,
+    opts: &codegen::CodegenOptions,
+) {
+    bench_phase(
+        c,
+        "codegen",
+        || {
+            let ast = parse_ast(source);
+            let rr = resolve::resolve(&ast, registry);
+            let gr = graph::build_graph(&ast, &rr.resolved, registry);
+            let ar = analyze::analyze(&ast, &rr.resolved, &gr.graph, registry);
+            let sr = schedule::schedule(&ast, &rr.resolved, &gr.graph, &ar.analysis, registry);
+            (ast, rr, gr, ar, sr)
+        },
+        |(ast, rr, gr, ar, sr)| {
+            assert_no_errors("resolve", &rr.diagnostics);
+            assert_no_errors("graph", &gr.diagnostics);
+            assert_no_errors("analyze", &ar.diagnostics);
+            assert_no_errors("schedule", &sr.diagnostics);
+            let result = codegen::codegen(
+                black_box(&ast),
+                black_box(&rr.resolved),
+                black_box(&gr.graph),
+                black_box(&ar.analysis),
+                black_box(&sr.schedule),
+                registry,
+                opts,
+            );
+            black_box(&result);
+        },
+    );
 }
 
 // KPI: parser latency for representative scenarios.
@@ -205,158 +358,12 @@ fn bench_kpi_phase_latency(c: &mut Criterion) {
         include_paths: vec![],
     };
     let source = COMPLEX_PIPELINE;
-
-    // parse
-    {
-        let mut group = c.benchmark_group("kpi/phase_latency/parse");
-        group.bench_function("complex", |b| {
-            b.iter(|| {
-                let r = parser::parse(black_box(source));
-                black_box(&r.program);
-            });
-        });
-        group.finish();
-    }
-
-    // resolve (setup: parse)
-    {
-        let mut group = c.benchmark_group("kpi/phase_latency/resolve");
-        group.bench_function("complex", |b| {
-            b.iter_batched(
-                || parser::parse(source),
-                |parse_result| {
-                    let ast = parse_result
-                        .program
-                        .as_ref()
-                        .expect("benchmark scenario must parse");
-                    let r = resolve::resolve(black_box(ast), &registry);
-                    black_box(&r.resolved);
-                },
-                BatchSize::SmallInput,
-            );
-        });
-        group.finish();
-    }
-
-    // graph (setup: parse + resolve)
-    {
-        let mut group = c.benchmark_group("kpi/phase_latency/graph");
-        group.bench_function("complex", |b| {
-            b.iter_batched(
-                || {
-                    let pr = parser::parse(source);
-                    let ast = pr.program.unwrap();
-                    let rr = resolve::resolve(&ast, &registry);
-                    (ast, rr)
-                },
-                |(ast, rr)| {
-                    assert!(!has_errors(&rr.diagnostics));
-                    let r = graph::build_graph(black_box(&ast), black_box(&rr.resolved), &registry);
-                    black_box(&r.graph);
-                },
-                BatchSize::SmallInput,
-            );
-        });
-        group.finish();
-    }
-
-    // analyze (setup: parse + resolve + graph)
-    {
-        let mut group = c.benchmark_group("kpi/phase_latency/analyze");
-        group.bench_function("complex", |b| {
-            b.iter_batched(
-                || {
-                    let pr = parser::parse(source);
-                    let ast = pr.program.unwrap();
-                    let rr = resolve::resolve(&ast, &registry);
-                    let gr = graph::build_graph(&ast, &rr.resolved, &registry);
-                    (ast, rr, gr)
-                },
-                |(ast, rr, gr)| {
-                    assert!(!has_errors(&rr.diagnostics));
-                    assert!(!has_errors(&gr.diagnostics));
-                    let r = analyze::analyze(
-                        black_box(&ast),
-                        black_box(&rr.resolved),
-                        black_box(&gr.graph),
-                        &registry,
-                    );
-                    black_box(&r.analysis);
-                },
-                BatchSize::SmallInput,
-            );
-        });
-        group.finish();
-    }
-
-    // schedule (setup: parse + resolve + graph + analyze)
-    {
-        let mut group = c.benchmark_group("kpi/phase_latency/schedule");
-        group.bench_function("complex", |b| {
-            b.iter_batched(
-                || {
-                    let pr = parser::parse(source);
-                    let ast = pr.program.unwrap();
-                    let rr = resolve::resolve(&ast, &registry);
-                    let gr = graph::build_graph(&ast, &rr.resolved, &registry);
-                    let ar = analyze::analyze(&ast, &rr.resolved, &gr.graph, &registry);
-                    (ast, rr, gr, ar)
-                },
-                |(ast, rr, gr, ar)| {
-                    assert!(!has_errors(&rr.diagnostics));
-                    assert!(!has_errors(&gr.diagnostics));
-                    assert!(!has_errors(&ar.diagnostics));
-                    let r = schedule::schedule(
-                        black_box(&ast),
-                        black_box(&rr.resolved),
-                        black_box(&gr.graph),
-                        black_box(&ar.analysis),
-                        &registry,
-                    );
-                    black_box(&r.schedule);
-                },
-                BatchSize::SmallInput,
-            );
-        });
-        group.finish();
-    }
-
-    // codegen (setup: all prior phases)
-    {
-        let mut group = c.benchmark_group("kpi/phase_latency/codegen");
-        group.bench_function("complex", |b| {
-            b.iter_batched(
-                || {
-                    let pr = parser::parse(source);
-                    let ast = pr.program.unwrap();
-                    let rr = resolve::resolve(&ast, &registry);
-                    let gr = graph::build_graph(&ast, &rr.resolved, &registry);
-                    let ar = analyze::analyze(&ast, &rr.resolved, &gr.graph, &registry);
-                    let sr =
-                        schedule::schedule(&ast, &rr.resolved, &gr.graph, &ar.analysis, &registry);
-                    (ast, rr, gr, ar, sr)
-                },
-                |(ast, rr, gr, ar, sr)| {
-                    assert!(!has_errors(&rr.diagnostics));
-                    assert!(!has_errors(&gr.diagnostics));
-                    assert!(!has_errors(&ar.diagnostics));
-                    assert!(!has_errors(&sr.diagnostics));
-                    let result = codegen::codegen(
-                        black_box(&ast),
-                        black_box(&rr.resolved),
-                        black_box(&gr.graph),
-                        black_box(&ar.analysis),
-                        black_box(&sr.schedule),
-                        &registry,
-                        &opts,
-                    );
-                    black_box(&result);
-                },
-                BatchSize::SmallInput,
-            );
-        });
-        group.finish();
-    }
+    bench_parse_phase(c, source);
+    bench_resolve_phase(c, source, &registry);
+    bench_graph_phase(c, source, &registry);
+    bench_analyze_phase(c, source, &registry);
+    bench_schedule_phase(c, source, &registry);
+    bench_codegen_phase(c, source, &registry, &opts);
 }
 
 // KPI: parser scaling vs number of tasks.

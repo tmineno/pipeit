@@ -21,6 +21,7 @@ use crate::lower::LoweredProgram;
 use crate::registry::{ActorMeta, ParamKind, ParamType, PipitType, Registry, TokenCount};
 use crate::resolve::{Diagnostic, ResolvedProgram};
 use crate::schedule::*;
+use crate::subgraph_index::{build_subgraph_indices, subgraph_key, SubgraphIndex};
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -86,8 +87,31 @@ struct CodegenCtx<'a> {
     registry: &'a Registry,
     options: &'a CodegenOptions,
     lowered: Option<&'a LoweredProgram>,
+    subgraph_indices: HashMap<usize, SubgraphIndex>,
     out: String,
     diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Debug)]
+struct FiringPlan {
+    use_loop: bool,
+    body_indent: String,
+    hoisted_actor_var: Option<String>,
+}
+
+#[derive(Debug)]
+struct ActorCallPlan {
+    in_ptr: String,
+    out_ptr: String,
+    call_expr: String,
+}
+
+#[derive(Debug, Clone)]
+struct FusionCandidate {
+    start_idx: usize,
+    end_idx: usize,
+    rep: u32,
+    node_ids: Vec<NodeId>,
 }
 
 impl<'a> CodegenCtx<'a> {
@@ -102,6 +126,7 @@ impl<'a> CodegenCtx<'a> {
         options: &'a CodegenOptions,
         lowered: Option<&'a LoweredProgram>,
     ) -> Self {
+        let subgraph_indices = build_subgraph_indices(graph);
         CodegenCtx {
             program,
             resolved,
@@ -111,6 +136,7 @@ impl<'a> CodegenCtx<'a> {
             registry,
             options,
             lowered,
+            subgraph_indices,
             out: String::with_capacity(8192),
             diagnostics: Vec::new(),
         }
@@ -121,6 +147,38 @@ impl<'a> CodegenCtx<'a> {
     /// the raw registry.
     fn lookup_actor(&self, actor_name: &str, call_span: Span) -> Option<&ActorMeta> {
         lookup_actor_in(self.lowered, self.registry, actor_name, call_span)
+    }
+
+    fn subgraph_index(&self, sub: &Subgraph) -> Option<&SubgraphIndex> {
+        self.subgraph_indices.get(&subgraph_key(sub))
+    }
+
+    fn node_in_subgraph<'s>(&self, sub: &'s Subgraph, id: NodeId) -> Option<&'s Node> {
+        self.subgraph_index(sub)
+            .and_then(|idx| idx.node(sub, id))
+            .or_else(|| find_node(sub, id))
+    }
+
+    fn first_incoming_edge_in_subgraph<'s>(
+        &self,
+        sub: &'s Subgraph,
+        id: NodeId,
+    ) -> Option<&'s Edge> {
+        self.subgraph_index(sub)
+            .and_then(|idx| idx.first_incoming_edge(sub, id))
+            .or_else(|| sub.edges.iter().find(|e| e.target == id))
+    }
+
+    fn incoming_edge_count_in_subgraph(&self, sub: &Subgraph, id: NodeId) -> usize {
+        self.subgraph_index(sub)
+            .map(|idx| idx.incoming_count(id))
+            .unwrap_or_else(|| sub.edges.iter().filter(|e| e.target == id).count())
+    }
+
+    fn outgoing_edge_count_in_subgraph(&self, sub: &Subgraph, id: NodeId) -> usize {
+        self.subgraph_index(sub)
+            .map(|idx| idx.outgoing_count(id))
+            .unwrap_or_else(|| sub.edges.iter().filter(|e| e.source == id).count())
     }
 
     /// Format the C++ actor struct name, including template parameters for
@@ -351,177 +409,288 @@ impl<'a> CodegenCtx<'a> {
     // ── Phase 6: Task functions ─────────────────────────────────────────
 
     fn emit_task_functions(&mut self) {
-        // Sort task names for deterministic output
-        let mut task_names: Vec<&String> = self.schedule.tasks.keys().collect();
-        task_names.sort();
+        for task_name in self.sorted_task_names() {
+            let Some(task_graph) = self.graph.tasks.get(task_name.as_str()) else {
+                continue;
+            };
+            self.emit_task_function(&task_name, task_graph);
+        }
+    }
 
-        for task_name in task_names {
-            let meta = &self.schedule.tasks[task_name];
-            let task_graph = self.graph.tasks.get(task_name.as_str());
-            if task_graph.is_none() {
+    fn sorted_task_names(&self) -> Vec<String> {
+        let mut task_names: Vec<String> = self.schedule.tasks.keys().cloned().collect();
+        task_names.sort();
+        task_names
+    }
+
+    fn emit_task_function(&mut self, task_name: &str, task_graph: &TaskGraph) {
+        let Some(meta) = self.schedule.tasks.get(task_name) else {
+            return;
+        };
+        let _ = writeln!(self.out, "void task_{}() {{", task_name);
+        self.emit_task_prologue(task_name, meta, task_graph);
+        self.out
+            .push_str("    while (!_stop.load(std::memory_order_acquire)) {\n");
+        self.out.push_str("        _timer.wait();\n");
+
+        let policy = self.emit_task_overrun_policy(task_name);
+        let tick_hoisted_actors = self.emit_tick_hoisted_actor_declarations(
+            task_name,
+            task_graph,
+            &meta.schedule,
+            "        ",
+        );
+        let indent = self.emit_task_iteration_setup(task_name, task_graph, meta.k_factor);
+        self.emit_task_schedule_dispatch(
+            task_name,
+            task_graph,
+            &meta.schedule,
+            indent,
+            &tick_hoisted_actors,
+        );
+
+        if meta.k_factor > 1 {
+            self.out.push_str("        }\n");
+        }
+        if policy == "backlog" {
+            self.out.push_str("        }\n");
+        }
+        self.out.push_str("    }\n");
+        self.out.push_str("}\n\n");
+    }
+
+    fn emit_tick_hoisted_actor_declarations(
+        &mut self,
+        task_name: &str,
+        task_graph: &TaskGraph,
+        schedule: &TaskSchedule,
+        indent: &str,
+    ) -> HashMap<NodeId, String> {
+        let mut hoisted = HashMap::new();
+        match (task_graph, schedule) {
+            (TaskGraph::Pipeline(sub), TaskSchedule::Pipeline(sched)) => {
+                self.emit_tick_hoisted_for_subgraph(task_name, sub, sched, indent, &mut hoisted);
+            }
+            (
+                TaskGraph::Modal { control, modes },
+                TaskSchedule::Modal {
+                    control: ctrl_sched,
+                    modes: mode_scheds,
+                },
+            ) => {
+                self.emit_tick_hoisted_for_subgraph(
+                    task_name,
+                    control,
+                    ctrl_sched,
+                    indent,
+                    &mut hoisted,
+                );
+                for (mode_name, mode_sched) in mode_scheds {
+                    let mode_sub = modes.iter().find(|(name, _)| name == mode_name);
+                    if let Some((_, sub)) = mode_sub {
+                        self.emit_tick_hoisted_for_subgraph(
+                            task_name,
+                            sub,
+                            mode_sched,
+                            indent,
+                            &mut hoisted,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+        hoisted
+    }
+
+    fn emit_tick_hoisted_for_subgraph(
+        &mut self,
+        task_name: &str,
+        sub: &Subgraph,
+        sched: &SubgraphSchedule,
+        indent: &str,
+        hoisted: &mut HashMap<NodeId, String>,
+    ) {
+        for entry in &sched.firings {
+            if hoisted.contains_key(&entry.node_id) {
                 continue;
             }
-            let task_graph = task_graph.unwrap();
-
-            let _ = writeln!(self.out, "void task_{}() {{", task_name);
-
-            // Wait for all task threads to be created before starting timer
-            self.out.push_str(
-                "    while (!_start.load(std::memory_order_acquire)) { std::this_thread::yield(); }\n",
-            );
-
-            // Timer (measure_latency enabled only when stats are active;
-            //        spin_ns from `set timer_spin`, default 10us; `auto` = adaptive)
-            let spin_ns = if self.get_set_ident("timer_spin") == Some("auto") {
-                -1_i64 // sentinel for adaptive EWMA mode
-            } else {
-                self.get_set_number("timer_spin").unwrap_or(10_000.0) as i64
+            let Some(node) = self.node_in_subgraph(sub, entry.node_id) else {
+                continue;
             };
-            let _ = writeln!(
-                self.out,
-                "    pipit::Timer _timer({:.1}, _stats, {});",
-                meta.freq_hz / meta.k_factor as f64,
-                spin_ns
-            );
-            let _ = writeln!(
-                self.out,
-                "    pipit::detail::set_actor_task_rate_hz({:.1});",
-                meta.freq_hz
-            );
-            self.out.push_str("    uint64_t _iter_idx = 0;\n");
+            let Some(var_name) = self
+                .maybe_emit_hoisted_actor_declaration(task_name, sub, sched, node, indent, false)
+            else {
+                continue;
+            };
+            hoisted.insert(node.id, var_name);
+        }
+    }
 
-            // Feedback back-edge buffers (persist across K-loop iterations)
-            self.emit_feedback_buffers(task_name, task_graph, &meta.schedule);
-            if matches!(&meta.schedule, TaskSchedule::Modal { .. }) {
-                self.out.push_str("    int32_t _active_mode = -1;\n");
-            }
+    fn emit_task_prologue(&mut self, task_name: &str, meta: &TaskMeta, task_graph: &TaskGraph) {
+        // Wait for all task threads to be created before starting timer.
+        self.out.push_str(
+            "    while (!_start.load(std::memory_order_acquire)) { std::this_thread::yield(); }\n",
+        );
 
-            // Main loop
-            self.out
-                .push_str("    while (!_stop.load(std::memory_order_acquire)) {\n");
-            self.out.push_str("        _timer.wait();\n");
+        // Timer (measure_latency enabled only when stats are active;
+        // spin_ns from `set timer_spin`, default 10us; `auto` = adaptive).
+        let spin_ns = if self.get_set_ident("timer_spin") == Some("auto") {
+            -1_i64
+        } else {
+            self.get_set_number("timer_spin").unwrap_or(10_000.0) as i64
+        };
+        let _ = writeln!(
+            self.out,
+            "    pipit::Timer _timer({:.1}, _stats, {});",
+            meta.freq_hz / meta.k_factor as f64,
+            spin_ns
+        );
+        let _ = writeln!(
+            self.out,
+            "    pipit::detail::set_actor_task_rate_hz({:.1});",
+            meta.freq_hz
+        );
+        self.out.push_str("    uint64_t _iter_idx = 0;\n");
 
-            // Overrun policy + stats
-            let policy = self.get_overrun_policy().to_string();
-            match policy.as_str() {
-                "drop" => {
-                    let _ = writeln!(
-                        self.out,
-                        "        if (_timer.overrun()) {{ if (_stats) _stats_{}.record_miss(); continue; }}",
-                        task_name
-                    );
-                }
-                "slip" => {
-                    self.out
-                        .push_str("        if (_timer.overrun()) _timer.reset_phase();\n");
-                }
-                "backlog" => {
-                    self.out
-                        .push_str("        int _backlog = _timer.overrun() ? static_cast<int>(_timer.missed_count()) : 0;\n");
-                    self.out
-                        .push_str("        for (int _bl = 0; _bl <= _backlog; ++_bl) {\n");
-                }
-                _ => {}
-            }
-            let _ = writeln!(
-                self.out,
-                "        if (_stats) _stats_{}.record_tick(_timer.last_latency());",
-                task_name
-            );
+        // Feedback back-edge buffers (persist across K-loop iterations).
+        self.emit_feedback_buffers(task_name, task_graph, &meta.schedule);
+        if matches!(&meta.schedule, TaskSchedule::Modal { .. }) {
+            self.out.push_str("    int32_t _active_mode = -1;\n");
+        }
+    }
 
-            // K-loop
-            if meta.k_factor > 1 {
+    fn emit_task_overrun_policy(&mut self, task_name: &str) -> String {
+        let policy = self.get_overrun_policy().to_string();
+        match policy.as_str() {
+            "drop" => {
                 let _ = writeln!(
                     self.out,
-                    "        for (int _k = 0; _k < {}; ++_k) {{",
-                    meta.k_factor
+                    "        if (_timer.overrun()) {{ if (_stats) _stats_{}.record_miss(); continue; }}",
+                    task_name
                 );
-                self.out.push_str(
-                    "            pipit::detail::set_actor_iteration_index(_iter_idx++);\n",
-                );
-                self.emit_param_reads(task_name, task_graph, "            ");
-            } else {
+            }
+            "slip" => {
                 self.out
-                    .push_str("        pipit::detail::set_actor_iteration_index(_iter_idx++);\n");
-                self.emit_param_reads(task_name, task_graph, "        ");
+                    .push_str("        if (_timer.overrun()) _timer.reset_phase();\n");
             }
+            "backlog" => {
+                self.out.push_str(
+                    "        int _backlog = _timer.overrun() ? static_cast<int>(_timer.missed_count()) : 0;\n",
+                );
+                self.out
+                    .push_str("        for (int _bl = 0; _bl <= _backlog; ++_bl) {\n");
+            }
+            _ => {}
+        }
+        let _ = writeln!(
+            self.out,
+            "        if (_stats) _stats_{}.record_tick(_timer.last_latency());",
+            task_name
+        );
+        policy
+    }
 
-            let indent = if meta.k_factor > 1 {
-                "            "
-            } else {
-                "        "
-            };
+    fn emit_task_iteration_setup(
+        &mut self,
+        task_name: &str,
+        task_graph: &TaskGraph,
+        k_factor: u32,
+    ) -> &'static str {
+        if k_factor > 1 {
+            let _ = writeln!(
+                self.out,
+                "        for (int _k = 0; _k < {}; ++_k) {{",
+                k_factor
+            );
+            self.out
+                .push_str("            pipit::detail::set_actor_iteration_index(_iter_idx++);\n");
+            self.emit_param_reads(task_name, task_graph, "            ");
+            "            "
+        } else {
+            self.out
+                .push_str("        pipit::detail::set_actor_iteration_index(_iter_idx++);\n");
+            self.emit_param_reads(task_name, task_graph, "        ");
+            "        "
+        }
+    }
 
-            match &meta.schedule {
-                TaskSchedule::Pipeline(sched) => {
-                    let sub = match task_graph {
-                        TaskGraph::Pipeline(s) => s,
-                        _ => continue,
-                    };
-                    self.emit_subgraph_firings(task_name, "pipeline", sub, sched, indent);
-                }
-                TaskSchedule::Modal { control, modes } => {
-                    let (ctrl_sub, mode_subs) = match task_graph {
-                        TaskGraph::Modal {
-                            control: c,
-                            modes: m,
-                        } => (c, m),
-                        _ => continue,
-                    };
+    fn emit_task_schedule_dispatch(
+        &mut self,
+        task_name: &str,
+        task_graph: &TaskGraph,
+        schedule: &TaskSchedule,
+        indent: &str,
+        tick_hoisted_actors: &HashMap<NodeId, String>,
+    ) {
+        match schedule {
+            TaskSchedule::Pipeline(sched) => {
+                let TaskGraph::Pipeline(sub) = task_graph else {
+                    return;
+                };
+                self.emit_subgraph_firings(
+                    task_name,
+                    "pipeline",
+                    sub,
+                    sched,
+                    indent,
+                    tick_hoisted_actors,
+                );
+            }
+            TaskSchedule::Modal { control, modes } => {
+                let TaskGraph::Modal {
+                    control: ctrl_sub,
+                    modes: mode_subs,
+                } = task_graph
+                else {
+                    return;
+                };
 
-                    // Control subgraph
-                    let _ = writeln!(self.out, "{}// Control subgraph", indent);
-                    self.emit_subgraph_firings(task_name, "control", ctrl_sub, control, indent);
+                let _ = writeln!(self.out, "{}// Control subgraph", indent);
+                self.emit_subgraph_firings(
+                    task_name,
+                    "control",
+                    ctrl_sub,
+                    control,
+                    indent,
+                    tick_hoisted_actors,
+                );
 
-                    // Resolve control source (control output / param / external buffer)
-                    self.emit_ctrl_source_read(task_name, ctrl_sub, indent);
-                    let _ = writeln!(
-                        self.out,
-                        "{}if (_active_mode != -1 && _ctrl != _active_mode) {{",
-                        indent
-                    );
-                    self.emit_mode_feedback_resets(
-                        task_name,
-                        mode_subs,
-                        modes,
-                        &format!("{}    ", indent),
-                    );
-                    let _ = writeln!(self.out, "{}}}", indent);
-                    let _ = writeln!(self.out, "{}_active_mode = _ctrl;", indent);
+                self.emit_ctrl_source_read(task_name, ctrl_sub, indent);
+                let _ = writeln!(
+                    self.out,
+                    "{}if (_active_mode != -1 && _ctrl != _active_mode) {{",
+                    indent
+                );
+                self.emit_mode_feedback_resets(
+                    task_name,
+                    mode_subs,
+                    modes,
+                    &format!("{}    ", indent),
+                );
+                let _ = writeln!(self.out, "{}}}", indent);
+                let _ = writeln!(self.out, "{}_active_mode = _ctrl;", indent);
 
-                    // Mode dispatch
-                    let _ = writeln!(self.out, "{}switch (_ctrl) {{", indent);
-                    for (i, (mode_name, mode_sched)) in modes.iter().enumerate() {
-                        let _ = writeln!(self.out, "{}case {}: {{", indent, i);
-                        let mode_sub = mode_subs.iter().find(|(n, _)| n == mode_name);
-                        if let Some((_, sub)) = mode_sub {
-                            self.emit_subgraph_firings(
-                                task_name,
-                                mode_name,
-                                sub,
-                                mode_sched,
-                                &format!("{}    ", indent),
-                            );
-                        }
-                        let _ = writeln!(self.out, "{}    break;", indent);
-                        let _ = writeln!(self.out, "{}}}", indent);
+                let _ = writeln!(self.out, "{}switch (_ctrl) {{", indent);
+                for (i, (mode_name, mode_sched)) in modes.iter().enumerate() {
+                    let _ = writeln!(self.out, "{}case {}: {{", indent, i);
+                    let mode_sub = mode_subs.iter().find(|(n, _)| n == mode_name);
+                    if let Some((_, sub)) = mode_sub {
+                        self.emit_subgraph_firings(
+                            task_name,
+                            mode_name,
+                            sub,
+                            mode_sched,
+                            &format!("{}    ", indent),
+                            tick_hoisted_actors,
+                        );
                     }
-                    let _ = writeln!(self.out, "{}default: break;", indent);
+                    let _ = writeln!(self.out, "{}    break;", indent);
                     let _ = writeln!(self.out, "{}}}", indent);
                 }
+                let _ = writeln!(self.out, "{}default: break;", indent);
+                let _ = writeln!(self.out, "{}}}", indent);
             }
-
-            if meta.k_factor > 1 {
-                self.out.push_str("        }\n");
-            }
-
-            // Close backlog loop if applicable
-            if policy == "backlog" {
-                self.out.push_str("        }\n");
-            }
-
-            self.out.push_str("    }\n");
-            self.out.push_str("}\n\n");
         }
     }
 
@@ -534,20 +703,259 @@ impl<'a> CodegenCtx<'a> {
         sub: &Subgraph,
         sched: &SubgraphSchedule,
         indent: &str,
+        tick_hoisted_actors: &HashMap<NodeId, String>,
     ) {
         // Declare intra-task edge buffers
         let edge_bufs = self.declare_edge_buffers(task_name, label, sub, sched, indent);
 
-        // Emit each firing in topological order
-        for entry in &sched.firings {
-            let node = match find_node(sub, entry.node_id) {
+        let fusion_by_start = self.plan_fusion_candidates(task_name, sub, sched);
+        let mut idx = 0usize;
+        while idx < sched.firings.len() {
+            if let Some(candidate) = fusion_by_start.get(&idx) {
+                if self.emit_fused_actor_chain(
+                    task_name,
+                    sub,
+                    sched,
+                    candidate,
+                    indent,
+                    &edge_bufs,
+                    tick_hoisted_actors,
+                ) {
+                    idx = candidate.end_idx + 1;
+                    continue;
+                }
+            }
+
+            let entry = &sched.firings[idx];
+            let node = match self.node_in_subgraph(sub, entry.node_id) {
                 Some(n) => n,
-                None => continue,
+                None => {
+                    idx += 1;
+                    continue;
+                }
             };
             self.emit_firing(
-                task_name, label, sub, sched, node, entry, indent, &edge_bufs,
+                task_name,
+                label,
+                sub,
+                sched,
+                node,
+                entry,
+                indent,
+                &edge_bufs,
+                tick_hoisted_actors,
             );
+            idx += 1;
         }
+    }
+
+    fn plan_fusion_candidates(
+        &self,
+        task_name: &str,
+        sub: &Subgraph,
+        sched: &SubgraphSchedule,
+    ) -> HashMap<usize, FusionCandidate> {
+        let mut fused = HashMap::new();
+        if sched.firings.len() < 2 {
+            return fused;
+        }
+        let back_edges = self.identify_back_edges(task_name, sub);
+
+        let mut i = 0usize;
+        while i + 1 < sched.firings.len() {
+            let start = i;
+            let start_entry = &sched.firings[start];
+            let rep = start_entry.repetition_count;
+            if rep <= 1 || !self.is_fusion_entry_eligible(sub, start_entry, &back_edges) {
+                i += 1;
+                continue;
+            }
+
+            let mut end = i;
+            let mut node_ids = vec![start_entry.node_id];
+            let mut chain_node_ids: HashSet<NodeId> = HashSet::from([start_entry.node_id]);
+
+            while end + 1 < sched.firings.len() {
+                let next = &sched.firings[end + 1];
+                if !self.can_append_to_fusion_chain(sub, rep, next, &chain_node_ids, &back_edges) {
+                    break;
+                }
+                end += 1;
+                node_ids.push(next.node_id);
+                chain_node_ids.insert(next.node_id);
+            }
+
+            if node_ids.len() > 1 {
+                fused.insert(
+                    start,
+                    FusionCandidate {
+                        start_idx: start,
+                        end_idx: end,
+                        rep,
+                        node_ids,
+                    },
+                );
+                i = end + 1;
+            } else {
+                i += 1;
+            }
+        }
+
+        fused
+    }
+
+    fn is_fusion_entry_eligible(
+        &self,
+        sub: &Subgraph,
+        entry: &FiringEntry,
+        back_edges: &HashSet<(NodeId, NodeId)>,
+    ) -> bool {
+        let Some(node) = self.node_in_subgraph(sub, entry.node_id) else {
+            return false;
+        };
+
+        if back_edges
+            .iter()
+            .any(|(src, tgt)| *src == entry.node_id || *tgt == entry.node_id)
+        {
+            return false;
+        }
+
+        match &node.kind {
+            NodeKind::Actor { args, .. } => {
+                if args.iter().any(|arg| matches!(arg, Arg::TapRef(_))) {
+                    return false;
+                }
+                let in_deg = self.incoming_edge_count_in_subgraph(sub, entry.node_id);
+                let out_deg = self.outgoing_edge_count_in_subgraph(sub, entry.node_id);
+                in_deg <= 1 && out_deg == 1
+            }
+            NodeKind::Fork { .. } | NodeKind::Probe { .. } => true,
+            _ => false,
+        }
+    }
+
+    fn can_append_to_fusion_chain(
+        &self,
+        sub: &Subgraph,
+        rep: u32,
+        next: &FiringEntry,
+        chain_node_ids: &HashSet<NodeId>,
+        back_edges: &HashSet<(NodeId, NodeId)>,
+    ) -> bool {
+        if chain_node_ids.contains(&next.node_id) {
+            return false;
+        }
+        let Some(next_node) = self.node_in_subgraph(sub, next.node_id) else {
+            return false;
+        };
+        let rep_compatible = match &next_node.kind {
+            NodeKind::Actor { .. } => next.repetition_count == rep,
+            NodeKind::Fork { .. } | NodeKind::Probe { .. } => true,
+            _ => false,
+        };
+        if !rep_compatible {
+            return false;
+        }
+        if !self.is_fusion_entry_eligible(sub, next, back_edges) {
+            return false;
+        }
+
+        sub.edges
+            .iter()
+            .any(|e| e.target == next.node_id && chain_node_ids.contains(&e.source))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_fused_actor_chain(
+        &mut self,
+        task_name: &str,
+        sub: &Subgraph,
+        sched: &SubgraphSchedule,
+        candidate: &FusionCandidate,
+        indent: &str,
+        edge_bufs: &HashMap<(NodeId, NodeId), String>,
+        tick_hoisted_actors: &HashMap<NodeId, String>,
+    ) -> bool {
+        if candidate.start_idx >= sched.firings.len()
+            || candidate.end_idx >= sched.firings.len()
+            || candidate.start_idx >= candidate.end_idx
+        {
+            return false;
+        }
+
+        if !candidate.node_ids.iter().all(|&nid| {
+            matches!(
+                self.node_in_subgraph(sub, nid).map(|n| &n.kind),
+                Some(NodeKind::Actor { .. } | NodeKind::Fork { .. } | NodeKind::Probe { .. })
+            )
+        }) {
+            return false;
+        }
+
+        let mut hoisted_vars: HashMap<NodeId, String> = HashMap::new();
+        for &node_id in &candidate.node_ids {
+            let Some(node) = self.node_in_subgraph(sub, node_id) else {
+                return false;
+            };
+            if !matches!(node.kind, NodeKind::Actor { .. }) {
+                continue;
+            }
+            if let Some(var_name) = tick_hoisted_actors.get(&node_id) {
+                hoisted_vars.insert(node_id, var_name.clone());
+                continue;
+            }
+            if let Some(var_name) =
+                self.maybe_emit_hoisted_actor_declaration(task_name, sub, sched, node, indent, true)
+            {
+                hoisted_vars.insert(node_id, var_name);
+            }
+        }
+
+        for &node_id in &candidate.node_ids {
+            let Some(node) = self.node_in_subgraph(sub, node_id) else {
+                return false;
+            };
+            if matches!(node.kind, NodeKind::Fork { .. }) {
+                self.emit_fork(sub, sched, node, indent, edge_bufs);
+            }
+        }
+
+        let _ = writeln!(
+            self.out,
+            "{}for (int _r = 0; _r < {}; ++_r) {{",
+            indent, candidate.rep
+        );
+        let body_indent = format!("{}    ", indent);
+        for &node_id in &candidate.node_ids {
+            let Some(node) = self.node_in_subgraph(sub, node_id) else {
+                return false;
+            };
+            match &node.kind {
+                NodeKind::Actor { .. } => self.emit_actor_body_in_existing_r_loop(
+                    task_name,
+                    sub,
+                    sched,
+                    node,
+                    body_indent.as_str(),
+                    edge_bufs,
+                    hoisted_vars.get(&node_id).map(String::as_str),
+                ),
+                NodeKind::Fork { .. } => {}
+                NodeKind::Probe { probe_name } => self.emit_probe_in_existing_r_loop(
+                    sub,
+                    sched,
+                    node,
+                    candidate.rep,
+                    probe_name,
+                    body_indent.as_str(),
+                    edge_bufs,
+                ),
+                _ => return false,
+            }
+        }
+        let _ = writeln!(self.out, "{}}}", indent);
+        true
     }
 
     fn declare_edge_buffers(
@@ -650,9 +1058,10 @@ impl<'a> CodegenCtx<'a> {
     #[allow(clippy::too_many_arguments)]
     /// Check if an actor's constructor params are all loop-invariant.
     /// If true, the actor can be constructed once before the repetition loop.
-    fn is_actor_hoistable(&self, args: &[Arg]) -> bool {
+    fn is_actor_hoistable(&self, args: &[Arg], allow_param_ref: bool) -> bool {
         args.iter().all(|arg| match arg {
-            Arg::Value(_) | Arg::ConstRef(_) | Arg::ParamRef(_) => true,
+            Arg::Value(_) | Arg::ConstRef(_) => true,
+            Arg::ParamRef(_) => allow_param_ref,
             Arg::TapRef(_) => false,
         })
     }
@@ -668,120 +1077,29 @@ impl<'a> CodegenCtx<'a> {
         entry: &FiringEntry,
         indent: &str,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
+        tick_hoisted_actors: &HashMap<NodeId, String>,
     ) {
-        // Fork/Probe are zero-copy passthrough nodes — no loop needed.
-        // BufferRead/BufferWrite perform block ring-buffer transfers outside the
-        // repetition loop for better throughput.
-        let is_passthrough = matches!(node.kind, NodeKind::Fork { .. } | NodeKind::Probe { .. });
-        let is_buffer_io = matches!(
-            node.kind,
-            NodeKind::BufferRead { .. } | NodeKind::BufferWrite { .. }
+        let plan = self.plan_firing(
+            task_name,
+            sub,
+            sched,
+            node,
+            entry,
+            indent,
+            tick_hoisted_actors,
         );
-
-        let rep = entry.repetition_count;
-        let use_loop = rep > 1 && !is_passthrough && !is_buffer_io;
-        let inner_indent;
-        let ind;
-
-        // Actor construction hoisting: for hoistable actors with rep > 1,
-        // declare the actor once before the loop to avoid repeated construction.
-        let hoisted_actor_var: Option<String> = if use_loop {
-            if let NodeKind::Actor {
-                name,
-                call_span,
-                args,
-                shape_constraint,
-            } = &node.kind
-            {
-                if self.is_actor_hoistable(args) {
-                    if let Some(meta) =
-                        lookup_actor_in(self.lowered, self.registry, name, *call_span)
-                    {
-                        let effective_sc = shape_constraint
-                            .as_ref()
-                            .or_else(|| self.analysis.inferred_shapes.get(&node.id));
-                        let schedule_dim_overrides = self.build_schedule_dim_overrides(
-                            meta,
-                            args,
-                            effective_sc,
-                            sched,
-                            node.id,
-                            sub,
-                        );
-                        let params = self.format_actor_params(
-                            task_name,
-                            meta,
-                            args,
-                            effective_sc,
-                            &schedule_dim_overrides,
-                            node.id,
-                        );
-                        let cpp_name = self.actor_cpp_name(name, *call_span);
-                        let var_name = format!("_actor_{}", node.id.0);
-                        if params.is_empty() {
-                            let _ = writeln!(
-                                self.out,
-                                "{}auto {} = {}{{}};",
-                                indent, var_name, cpp_name
-                            );
-                        } else {
-                            let _ = writeln!(
-                                self.out,
-                                "{}auto {} = {}{{{}}};",
-                                indent, var_name, cpp_name, params
-                            );
-                        }
-                        Some(var_name)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        if use_loop {
-            let _ = writeln!(
-                self.out,
-                "{}for (int _r = 0; _r < {}; ++_r) {{",
-                indent, rep
-            );
-            inner_indent = format!("{}    ", indent);
-            ind = inner_indent.as_str();
-        } else {
-            ind = indent;
-        }
+        let ind = plan.body_indent.as_str();
 
         match &node.kind {
-            NodeKind::Actor {
-                name,
-                call_span,
-                args,
-                shape_constraint,
-            } => {
-                // Use explicit shape constraint, or inferred from analysis
-                let effective_sc = shape_constraint
-                    .as_ref()
-                    .or_else(|| self.analysis.inferred_shapes.get(&node.id));
-                self.emit_actor_firing(
-                    task_name,
-                    sub,
-                    sched,
-                    node,
-                    name,
-                    *call_span,
-                    args,
-                    effective_sc,
-                    ind,
-                    edge_bufs,
-                    hoisted_actor_var.as_deref(),
-                );
-            }
+            NodeKind::Actor { .. } => self.emit_actor_body_in_existing_r_loop(
+                task_name,
+                sub,
+                sched,
+                node,
+                ind,
+                edge_bufs,
+                plan.hoisted_actor_var.as_deref(),
+            ),
             NodeKind::Fork { .. } => {
                 self.emit_fork(sub, sched, node, ind, edge_bufs);
             }
@@ -806,9 +1124,146 @@ impl<'a> CodegenCtx<'a> {
             }
         }
 
-        if use_loop {
+        if plan.use_loop {
             let _ = writeln!(self.out, "{}}}", indent);
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_actor_body_in_existing_r_loop(
+        &mut self,
+        task_name: &str,
+        sub: &Subgraph,
+        sched: &SubgraphSchedule,
+        node: &Node,
+        indent: &str,
+        edge_bufs: &HashMap<(NodeId, NodeId), String>,
+        hoisted_var: Option<&str>,
+    ) {
+        let NodeKind::Actor {
+            name,
+            call_span,
+            args,
+            shape_constraint,
+        } = &node.kind
+        else {
+            return;
+        };
+
+        let effective_sc = shape_constraint
+            .as_ref()
+            .or_else(|| self.analysis.inferred_shapes.get(&node.id));
+        self.emit_actor_firing(
+            task_name,
+            sub,
+            sched,
+            node,
+            name,
+            *call_span,
+            args,
+            effective_sc,
+            indent,
+            edge_bufs,
+            hoisted_var,
+        );
+    }
+
+    fn should_use_firing_loop(&self, node: &Node, rep: u32) -> bool {
+        // Fork/Probe are zero-copy passthrough nodes; buffer I/O already performs
+        // block transfers, so these nodes do not benefit from per-firing loops.
+        let is_passthrough = matches!(node.kind, NodeKind::Fork { .. } | NodeKind::Probe { .. });
+        let is_buffer_io = matches!(
+            node.kind,
+            NodeKind::BufferRead { .. } | NodeKind::BufferWrite { .. }
+        );
+        rep > 1 && !is_passthrough && !is_buffer_io
+    }
+
+    fn plan_firing(
+        &mut self,
+        task_name: &str,
+        sub: &Subgraph,
+        sched: &SubgraphSchedule,
+        node: &Node,
+        entry: &FiringEntry,
+        indent: &str,
+        tick_hoisted_actors: &HashMap<NodeId, String>,
+    ) -> FiringPlan {
+        let use_loop = self.should_use_firing_loop(node, entry.repetition_count);
+        let hoisted_actor_var = if let Some(var_name) = tick_hoisted_actors.get(&node.id) {
+            Some(var_name.clone())
+        } else if use_loop {
+            self.maybe_emit_hoisted_actor_declaration(task_name, sub, sched, node, indent, true)
+        } else {
+            None
+        };
+
+        let body_indent = if use_loop {
+            let _ = writeln!(
+                self.out,
+                "{}for (int _r = 0; _r < {}; ++_r) {{",
+                indent, entry.repetition_count
+            );
+            format!("{}    ", indent)
+        } else {
+            indent.to_string()
+        };
+
+        FiringPlan {
+            use_loop,
+            body_indent,
+            hoisted_actor_var,
+        }
+    }
+
+    fn maybe_emit_hoisted_actor_declaration(
+        &mut self,
+        task_name: &str,
+        sub: &Subgraph,
+        sched: &SubgraphSchedule,
+        node: &Node,
+        indent: &str,
+        allow_param_ref: bool,
+    ) -> Option<String> {
+        let NodeKind::Actor {
+            name,
+            call_span,
+            args,
+            shape_constraint,
+        } = &node.kind
+        else {
+            return None;
+        };
+        if !self.is_actor_hoistable(args, allow_param_ref) {
+            return None;
+        }
+
+        let meta = lookup_actor_in(self.lowered, self.registry, name, *call_span)?;
+        let effective_sc = shape_constraint
+            .as_ref()
+            .or_else(|| self.analysis.inferred_shapes.get(&node.id));
+        let schedule_dim_overrides =
+            self.build_schedule_dim_overrides(meta, args, effective_sc, sched, node.id, sub);
+        let params = self.format_actor_params(
+            task_name,
+            meta,
+            args,
+            effective_sc,
+            &schedule_dim_overrides,
+            node.id,
+        );
+        let cpp_name = self.actor_cpp_name(name, *call_span);
+        let var_name = format!("_actor_{}", node.id.0);
+        if params.is_empty() {
+            let _ = writeln!(self.out, "{}auto {} = {}{{}};", indent, var_name, cpp_name);
+        } else {
+            let _ = writeln!(
+                self.out,
+                "{}auto {} = {}{{{}}};",
+                indent, var_name, cpp_name, params
+            );
+        }
+        Some(var_name)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -830,118 +1285,81 @@ impl<'a> CodegenCtx<'a> {
             Some(m) => m,
             None => return,
         };
+        let plan = self.build_actor_call_plan(
+            task_name,
+            sub,
+            sched,
+            node,
+            actor_name,
+            call_span,
+            args,
+            shape_constraint,
+            indent,
+            edge_bufs,
+            hoisted_var,
+            meta,
+        );
+        let _io_plan = (&plan.in_ptr, &plan.out_ptr);
 
+        let _ = writeln!(self.out, "{}if ({} != ACTOR_OK) {{", indent, plan.call_expr);
+        let _ = writeln!(
+            self.out,
+            "{}    fprintf(stderr, \"runtime error: actor '{}' in task '{}' returned ACTOR_ERROR\\n\");",
+            indent, actor_name, task_name
+        );
+        let _ = writeln!(
+            self.out,
+            "{}    _exit_code.store(1, std::memory_order_release);",
+            indent
+        );
+        let _ = writeln!(
+            self.out,
+            "{}    _stop.store(true, std::memory_order_release);",
+            indent
+        );
+        let _ = writeln!(self.out, "{}    return;", indent);
+        let _ = writeln!(self.out, "{}}}", indent);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_actor_call_plan(
+        &mut self,
+        task_name: &str,
+        sub: &Subgraph,
+        sched: &SubgraphSchedule,
+        node: &Node,
+        actor_name: &str,
+        call_span: Span,
+        args: &[Arg],
+        shape_constraint: Option<&ShapeConstraint>,
+        indent: &str,
+        edge_bufs: &HashMap<(NodeId, NodeId), String>,
+        hoisted_var: Option<&str>,
+        meta: &ActorMeta,
+    ) -> ActorCallPlan {
         let in_count = self.node_in_rate(node.id);
         let out_count = self.node_out_rate(node.id);
         let in_cpp = pipit_type_to_cpp(meta.in_type.as_concrete().unwrap_or(PipitType::Float));
-        let _out_cpp = pipit_type_to_cpp(meta.out_type.as_concrete().unwrap_or(PipitType::Float));
 
-        // Input: find upstream edge buffers
         let incoming_edges: Vec<&Edge> = sub.edges.iter().filter(|e| e.target == node.id).collect();
+        let in_ptr = self.build_actor_input_ptr(
+            sched,
+            node,
+            meta,
+            in_count,
+            in_cpp,
+            &incoming_edges,
+            indent,
+            edge_bufs,
+        );
 
-        let in_ptr = if meta.in_type == PipitType::Void || incoming_edges.is_empty() {
-            "nullptr".to_string()
-        } else if incoming_edges.len() == 1 {
-            let edge = incoming_edges[0];
-            if let Some(buf_name) = edge_bufs.get(&(edge.source, edge.target)) {
-                let rep = self.firing_repetition(sched, node.id);
-                if rep > 1 {
-                    let stride = in_count.unwrap_or_else(|| {
-                        self.edge_buffer_tokens(sched, edge.source, edge.target) / rep
-                    });
-                    format!("&{}[_r * {}]", buf_name, stride)
-                } else {
-                    buf_name.clone()
-                }
-            } else {
-                "nullptr".to_string()
-            }
-        } else {
-            // Multi-input actor: concatenate into a local buffer
-            let total_tokens: u32 = incoming_edges
-                .iter()
-                .map(|e| self.edge_buffer_tokens(sched, e.source, e.target))
-                .sum();
-            let effective_in = in_count.unwrap_or(total_tokens);
-            let local_in = format!("_in_{}", node.id.0);
-            let _ = writeln!(
-                self.out,
-                "{}{} {}[{}];",
-                indent, in_cpp, local_in, effective_in
-            );
-            let mut offset = 0u32;
-            let per_edge = effective_in / incoming_edges.len() as u32;
-            for edge in &incoming_edges {
-                if let Some(buf_name) = edge_bufs.get(&(edge.source, edge.target)) {
-                    let rep = self.firing_repetition(sched, node.id);
-                    let src_expr = if rep > 1 {
-                        format!("&{}[_r * {}]", buf_name, per_edge)
-                    } else {
-                        buf_name.clone()
-                    };
-                    let _ = writeln!(
-                        self.out,
-                        "{}std::memcpy(&{}[{}], {}, {} * sizeof({}));",
-                        indent, local_in, offset, src_expr, per_edge, in_cpp
-                    );
-                }
-                offset += per_edge;
-            }
-            local_in
-        };
-
-        // Output buffer
         let outgoing_edges: Vec<&Edge> = sub.edges.iter().filter(|e| e.source == node.id).collect();
+        let out_ptr =
+            self.build_actor_output_ptr(sched, node, meta, out_count, &outgoing_edges, edge_bufs);
 
-        let out_ptr = if meta.out_type == PipitType::Void || outgoing_edges.is_empty() {
-            "nullptr".to_string()
-        } else if outgoing_edges.len() == 1 {
-            let edge = outgoing_edges[0];
-            if let Some(buf_name) = edge_bufs.get(&(edge.source, edge.target)) {
-                let rep = self.firing_repetition(sched, node.id);
-                if rep > 1 {
-                    let stride = out_count.unwrap_or_else(|| {
-                        self.edge_buffer_tokens(sched, edge.source, edge.target) / rep
-                    });
-                    format!("&{}[_r * {}]", buf_name, stride)
-                } else {
-                    buf_name.clone()
-                }
-            } else {
-                "nullptr".to_string()
-            }
-        } else {
-            // Multiple outgoing edges: write to first, then copy to rest (handled by fork)
-            if let Some(buf_name) =
-                edge_bufs.get(&(outgoing_edges[0].source, outgoing_edges[0].target))
-            {
-                let rep = self.firing_repetition(sched, node.id);
-                if rep > 1 {
-                    let stride = out_count.unwrap_or_else(|| {
-                        self.edge_buffer_tokens(
-                            sched,
-                            outgoing_edges[0].source,
-                            outgoing_edges[0].target,
-                        ) / rep
-                    });
-                    format!("&{}[_r * {}]", buf_name, stride)
-                } else {
-                    buf_name.clone()
-                }
-            } else {
-                "nullptr".to_string()
-            }
-        };
-
-        // Build schedule-based dimension overrides for symbolic params that
-        // couldn't be resolved from args or shape constraints.  The SDF solver
-        // computes per-edge token counts that give us the correct value.
         let schedule_dim_overrides =
             self.build_schedule_dim_overrides(meta, args, shape_constraint, sched, node.id, sub);
-
-        // Construct actor and fire, check return value
-        let call = if let Some(var_name) = hoisted_var {
-            // Actor was hoisted before the loop — just call operator()
+        let call_expr = if let Some(var_name) = hoisted_var {
             format!("{}.operator()({}, {})", var_name, in_ptr, out_ptr)
         } else {
             let params = self.format_actor_params(
@@ -962,24 +1380,190 @@ impl<'a> CodegenCtx<'a> {
                 )
             }
         };
-        let _ = writeln!(self.out, "{}if ({} != ACTOR_OK) {{", indent, call);
-        let _ = writeln!(
-            self.out,
-            "{}    fprintf(stderr, \"runtime error: actor '{}' in task '{}' returned ACTOR_ERROR\\n\");",
-            indent, actor_name, task_name
-        );
-        let _ = writeln!(
-            self.out,
-            "{}    _exit_code.store(1, std::memory_order_release);",
-            indent
-        );
-        let _ = writeln!(
-            self.out,
-            "{}    _stop.store(true, std::memory_order_release);",
-            indent
-        );
-        let _ = writeln!(self.out, "{}    return;", indent);
-        let _ = writeln!(self.out, "{}}}", indent);
+
+        ActorCallPlan {
+            in_ptr,
+            out_ptr,
+            call_expr,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_actor_input_ptr(
+        &mut self,
+        sched: &SubgraphSchedule,
+        node: &Node,
+        meta: &ActorMeta,
+        in_count: Option<u32>,
+        in_cpp: &str,
+        incoming_edges: &[&Edge],
+        indent: &str,
+        edge_bufs: &HashMap<(NodeId, NodeId), String>,
+    ) -> String {
+        if meta.in_type == PipitType::Void || incoming_edges.is_empty() {
+            return "nullptr".to_string();
+        }
+        if incoming_edges.len() == 1 {
+            let edge = incoming_edges[0];
+            if let Some(buf_name) = edge_bufs.get(&(edge.source, edge.target)) {
+                let rep = self.firing_repetition(sched, node.id);
+                if rep > 1 {
+                    let stride = in_count.unwrap_or_else(|| {
+                        self.edge_buffer_tokens(sched, edge.source, edge.target) / rep
+                    });
+                    return format!("&{}[_r * {}]", buf_name, stride);
+                }
+                return buf_name.clone();
+            }
+            return "nullptr".to_string();
+        }
+
+        // Multi-input actor: concatenate each edge slice into a local buffer.
+        let rep = self.firing_repetition(sched, node.id);
+        let mut segments: Vec<(String, u32)> = Vec::with_capacity(incoming_edges.len());
+        for edge in incoming_edges {
+            let Some(buf_name) = edge_bufs.get(&(edge.source, edge.target)) else {
+                continue;
+            };
+            let total_tokens = self.edge_buffer_tokens(sched, edge.source, edge.target);
+            let tokens_per_firing = if rep > 1 {
+                total_tokens / rep
+            } else {
+                total_tokens
+            };
+            let src_expr = if rep > 1 {
+                format!("&{}[_r * {}]", buf_name, tokens_per_firing)
+            } else {
+                buf_name.clone()
+            };
+            segments.push((src_expr, tokens_per_firing));
+        }
+        if segments.is_empty() {
+            return "nullptr".to_string();
+        }
+
+        let total_tokens: u32 = segments.iter().map(|(_, n)| *n).sum();
+        let effective_in = in_count.unwrap_or(total_tokens);
+        let local_in = format!("_in_{}", node.id.0);
+        if total_tokens == effective_in {
+            let _ = writeln!(
+                self.out,
+                "{}{} {}[{}];",
+                indent, in_cpp, local_in, effective_in
+            );
+        } else {
+            // Keep deterministic behavior when inferred IN size diverges from edge slices.
+            let _ = writeln!(
+                self.out,
+                "{}{} {}[{}] = {{}};",
+                indent, in_cpp, local_in, effective_in
+            );
+        }
+
+        let mut offset = 0u32;
+        for (src_expr, tokens) in segments {
+            if offset >= effective_in {
+                break;
+            }
+            let copy_tokens = tokens.min(effective_in - offset);
+            self.emit_compact_input_copy(
+                indent,
+                &local_in,
+                offset,
+                src_expr.as_str(),
+                copy_tokens,
+                in_cpp,
+            );
+            offset += copy_tokens;
+        }
+        local_in
+    }
+
+    fn emit_compact_input_copy(
+        &mut self,
+        indent: &str,
+        dst_buf: &str,
+        dst_offset: u32,
+        src_expr: &str,
+        tokens: u32,
+        cpp_type: &str,
+    ) {
+        match tokens {
+            0 => {}
+            1 => {
+                let _ = writeln!(
+                    self.out,
+                    "{}{}[{}] = ({})[0];",
+                    indent, dst_buf, dst_offset, src_expr
+                );
+            }
+            2..=4 => {
+                for i in 0..tokens {
+                    let _ = writeln!(
+                        self.out,
+                        "{}{}[{}] = ({})[{}];",
+                        indent,
+                        dst_buf,
+                        dst_offset + i,
+                        src_expr,
+                        i
+                    );
+                }
+            }
+            _ => {
+                let _ = writeln!(
+                    self.out,
+                    "{}std::memcpy(&{}[{}], {}, {} * sizeof({}));",
+                    indent, dst_buf, dst_offset, src_expr, tokens, cpp_type
+                );
+            }
+        }
+    }
+
+    fn build_actor_output_ptr(
+        &self,
+        sched: &SubgraphSchedule,
+        node: &Node,
+        meta: &ActorMeta,
+        out_count: Option<u32>,
+        outgoing_edges: &[&Edge],
+        edge_bufs: &HashMap<(NodeId, NodeId), String>,
+    ) -> String {
+        if meta.out_type == PipitType::Void || outgoing_edges.is_empty() {
+            return "nullptr".to_string();
+        }
+        if outgoing_edges.len() == 1 {
+            let edge = outgoing_edges[0];
+            if let Some(buf_name) = edge_bufs.get(&(edge.source, edge.target)) {
+                let rep = self.firing_repetition(sched, node.id);
+                if rep > 1 {
+                    let stride = out_count.unwrap_or_else(|| {
+                        self.edge_buffer_tokens(sched, edge.source, edge.target) / rep
+                    });
+                    return format!("&{}[_r * {}]", buf_name, stride);
+                }
+                return buf_name.clone();
+            }
+            return "nullptr".to_string();
+        }
+
+        // Multiple outgoing edges: write to first, then copy to rest (handled by fork).
+        if let Some(buf_name) = edge_bufs.get(&(outgoing_edges[0].source, outgoing_edges[0].target))
+        {
+            let rep = self.firing_repetition(sched, node.id);
+            if rep > 1 {
+                let stride = out_count.unwrap_or_else(|| {
+                    self.edge_buffer_tokens(
+                        sched,
+                        outgoing_edges[0].source,
+                        outgoing_edges[0].target,
+                    ) / rep
+                });
+                return format!("&{}[_r * {}]", buf_name, stride);
+            }
+            return buf_name.clone();
+        }
+        "nullptr".to_string()
     }
 
     fn emit_fork(
@@ -1008,36 +1592,86 @@ impl<'a> CodegenCtx<'a> {
     ) {
         // Probe is a no-op for data flow: downstream shares the upstream buffer.
         // Observation hook emits actual data when probe is enabled (stripped in release).
-        if !self.options.release {
-            let incoming: Vec<&Edge> = sub.edges.iter().filter(|e| e.target == node.id).collect();
-            if let Some(in_edge) = incoming.first() {
-                if let Some(src_buf) = edge_bufs.get(&(in_edge.source, in_edge.target)) {
-                    let wire_type = self.infer_edge_wire_type(sub, in_edge.source);
-                    let cpp_type = pipit_type_to_cpp(wire_type);
-                    let count = self.edge_buffer_tokens(sched, in_edge.source, in_edge.target);
-                    let fmt_spec = match cpp_type {
-                        "float" | "double" => "%f",
-                        "int32_t" | "int16_t" | "int8_t" => "%d",
-                        _ => "%f", // cfloat/cdouble: print real part
-                    };
-                    let _ = writeln!(self.out, "{}#ifndef NDEBUG", indent);
-                    let _ = writeln!(self.out, "{}if (_probe_{}_enabled) {{", indent, probe_name);
-                    let _ = writeln!(
-                        self.out,
-                        "{}    for (int _pi = 0; _pi < {}; ++_pi)",
-                        indent, count
-                    );
-                    let _ = writeln!(
-                        self.out,
-                        "{}        fprintf(_probe_output_file, \"[probe:{}] {}\\n\", {}[_pi]);",
-                        indent, probe_name, fmt_spec, src_buf
-                    );
-                    let _ = writeln!(self.out, "{}    fflush(_probe_output_file);", indent);
-                    let _ = writeln!(self.out, "{}}}", indent);
-                    let _ = writeln!(self.out, "{}#endif", indent);
-                }
+        if self.options.release {
+            return;
+        }
+        let incoming: Vec<&Edge> = sub.edges.iter().filter(|e| e.target == node.id).collect();
+        if let Some(in_edge) = incoming.first() {
+            if let Some(src_buf) = edge_bufs.get(&(in_edge.source, in_edge.target)) {
+                let wire_type = self.infer_edge_wire_type(sub, in_edge.source);
+                let cpp_type = pipit_type_to_cpp(wire_type);
+                let count = self.edge_buffer_tokens(sched, in_edge.source, in_edge.target);
+                self.emit_probe_observation(probe_name, indent, src_buf.as_str(), count, cpp_type);
             }
         }
+    }
+
+    fn emit_probe_in_existing_r_loop(
+        &mut self,
+        sub: &Subgraph,
+        sched: &SubgraphSchedule,
+        node: &Node,
+        fused_rep: u32,
+        probe_name: &str,
+        indent: &str,
+        edge_bufs: &HashMap<(NodeId, NodeId), String>,
+    ) {
+        if self.options.release {
+            return;
+        }
+        let incoming: Vec<&Edge> = sub.edges.iter().filter(|e| e.target == node.id).collect();
+        if let Some(in_edge) = incoming.first() {
+            if let Some(src_buf) = edge_bufs.get(&(in_edge.source, in_edge.target)) {
+                let wire_type = self.infer_edge_wire_type(sub, in_edge.source);
+                let cpp_type = pipit_type_to_cpp(wire_type);
+                let total_tokens = self.edge_buffer_tokens(sched, in_edge.source, in_edge.target);
+                let rep = fused_rep.max(1);
+                let count = if rep > 1 {
+                    total_tokens / rep
+                } else {
+                    total_tokens
+                };
+                if count == 0 {
+                    return;
+                }
+                let src_expr = if rep > 1 {
+                    format!("&{}[_r * {}]", src_buf, count)
+                } else {
+                    src_buf.clone()
+                };
+                self.emit_probe_observation(probe_name, indent, &src_expr, count, cpp_type);
+            }
+        }
+    }
+
+    fn emit_probe_observation(
+        &mut self,
+        probe_name: &str,
+        indent: &str,
+        src_expr: &str,
+        count: u32,
+        cpp_type: &str,
+    ) {
+        let fmt_spec = match cpp_type {
+            "float" | "double" => "%f",
+            "int32_t" | "int16_t" | "int8_t" => "%d",
+            _ => "%f", // cfloat/cdouble: print real part
+        };
+        let _ = writeln!(self.out, "{}#ifndef NDEBUG", indent);
+        let _ = writeln!(self.out, "{}if (_probe_{}_enabled) {{", indent, probe_name);
+        let _ = writeln!(
+            self.out,
+            "{}    for (int _pi = 0; _pi < {}; ++_pi)",
+            indent, count
+        );
+        let _ = writeln!(
+            self.out,
+            "{}        fprintf(_probe_output_file, \"[probe:{}] {}\\n\", ({})[_pi]);",
+            indent, probe_name, fmt_spec, src_expr
+        );
+        let _ = writeln!(self.out, "{}    fflush(_probe_output_file);", indent);
+        let _ = writeln!(self.out, "{}}}", indent);
+        let _ = writeln!(self.out, "{}#endif", indent);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1226,7 +1860,7 @@ impl<'a> CodegenCtx<'a> {
                 continue;
             }
             for (i, &nid) in cycle.iter().enumerate() {
-                if let Some(node) = find_node(sub, nid) {
+                if let Some(node) = self.node_in_subgraph(sub, nid) {
                     if matches!(&node.kind, NodeKind::Actor { name, .. } if name == "delay") {
                         let next_nid = cycle[(i + 1) % cycle.len()];
                         if sub
@@ -1245,7 +1879,7 @@ impl<'a> CodegenCtx<'a> {
     }
 
     fn delay_init_value(&self, sub: &Subgraph, node_id: NodeId) -> String {
-        if let Some(node) = find_node(sub, node_id) {
+        if let Some(node) = self.node_in_subgraph(sub, node_id) {
             if let NodeKind::Actor { args, name, .. } = &node.kind {
                 if name == "delay" {
                     // Second arg is init value
@@ -1930,43 +2564,63 @@ impl<'a> CodegenCtx<'a> {
                     }
                 }
             } else if param.kind == ParamKind::Param {
-                // No arg at this index — try to infer dimension param from shape constraint,
-                // then from span args, then from analysis-recorded span-derived dims,
-                // then from schedule-resolved edge buffer sizes
-                if let Some(val) = self
-                    .resolve_dim_param_from_shape(&param.name, meta, shape_constraint)
-                    .or_else(|| self.infer_dim_param_from_span_args(&param.name, meta, args))
-                    .or_else(|| {
-                        self.analysis
-                            .span_derived_dims
-                            .get(&(node_id, param.name.clone()))
-                            .copied()
-                    })
-                    .or_else(|| schedule_dim_overrides.get(&param.name).copied())
-                {
-                    parts.push(val.to_string());
-                } else if let Some(array_arg) = last_array_const {
-                    // Auto-fill span param from prior array const
-                    if matches!(
-                        param.param_type,
-                        ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
-                    ) {
-                        parts.push(self.arg_to_cpp_value(array_arg, &param.param_type));
-                        last_array_const = None;
-                    }
-                }
-            } else if let Some(array_arg) = last_array_const {
-                // Auto-fill span param from prior array const (runtime param case)
-                if matches!(
-                    param.param_type,
-                    ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
+                // No arg at this index — try shape/span/analysis/schedule-based inference.
+                if let Some(val) = self.resolve_missing_param_value(
+                    &param.name,
+                    meta,
+                    args,
+                    shape_constraint,
+                    schedule_dim_overrides,
+                    node_id,
                 ) {
-                    parts.push(self.arg_to_cpp_value(array_arg, &param.param_type));
-                    last_array_const = None;
+                    parts.push(val.to_string());
+                    continue;
                 }
+                self.try_autofill_span_param(&mut parts, &mut last_array_const, &param.param_type);
+            } else {
+                self.try_autofill_span_param(&mut parts, &mut last_array_const, &param.param_type);
             }
         }
         parts.join(", ")
+    }
+
+    fn resolve_missing_param_value(
+        &self,
+        param_name: &str,
+        meta: &ActorMeta,
+        args: &[Arg],
+        shape_constraint: Option<&ShapeConstraint>,
+        schedule_dim_overrides: &HashMap<String, u32>,
+        node_id: NodeId,
+    ) -> Option<u32> {
+        self.resolve_dim_param_from_shape(param_name, meta, shape_constraint)
+            .or_else(|| self.infer_dim_param_from_span_args(param_name, meta, args))
+            .or_else(|| {
+                self.analysis
+                    .span_derived_dims
+                    .get(&(node_id, param_name.to_string()))
+                    .copied()
+            })
+            .or_else(|| schedule_dim_overrides.get(param_name).copied())
+    }
+
+    fn try_autofill_span_param(
+        &self,
+        parts: &mut Vec<String>,
+        last_array_const: &mut Option<&Arg>,
+        param_type: &ParamType,
+    ) {
+        let Some(array_arg) = *last_array_const else {
+            return;
+        };
+        if !matches!(
+            param_type,
+            ParamType::SpanFloat | ParamType::SpanChar | ParamType::SpanTypeParam(_)
+        ) {
+            return;
+        }
+        parts.push(self.arg_to_cpp_value(array_arg, param_type));
+        *last_array_const = None;
     }
 
     /// Resolve a dimension parameter from shape constraints.
@@ -2078,7 +2732,7 @@ impl<'a> CodegenCtx<'a> {
             if !visited.insert(current) {
                 return PipitType::Float; // fallback
             }
-            if let Some(node) = find_node(sub, current) {
+            if let Some(node) = self.node_in_subgraph(sub, current) {
                 match &node.kind {
                     NodeKind::Actor {
                         name, call_span, ..
@@ -2093,7 +2747,7 @@ impl<'a> CodegenCtx<'a> {
                     }
                     _ => {
                         // Passthrough: trace backward
-                        if let Some(edge) = sub.edges.iter().find(|e| e.target == current) {
+                        if let Some(edge) = self.first_incoming_edge_in_subgraph(sub, current) {
                             current = edge.source;
                         } else {
                             return PipitType::Float;
@@ -2208,6 +2862,81 @@ impl<'a> CodegenCtx<'a> {
         sched.edge_buffers.get(&(src, tgt)).copied().unwrap_or(1)
     }
 
+    fn consistent_dim_override_from_edges<'e, I>(
+        &self,
+        sched: &SubgraphSchedule,
+        rep: u32,
+        mut edges: I,
+    ) -> Option<u32>
+    where
+        I: Iterator<Item = &'e Edge>,
+    {
+        if rep == 0 {
+            return None;
+        }
+
+        let first = edges.next()?;
+        let candidate = self.edge_buffer_tokens(sched, first.source, first.target) / rep;
+        for edge in edges {
+            let tokens = self.edge_buffer_tokens(sched, edge.source, edge.target);
+            let val = tokens / rep;
+            if candidate != val {
+                return None;
+            }
+        }
+        Some(candidate)
+    }
+
+    fn symbolic_shape_sides<'m>(&self, meta: &'m ActorMeta) -> HashMap<&'m str, (bool, bool)> {
+        let mut sides = HashMap::new();
+        for dim in &meta.in_shape.dims {
+            let TokenCount::Symbolic(sym) = dim else {
+                continue;
+            };
+            sides
+                .entry(sym.as_str())
+                .and_modify(|entry: &mut (bool, bool)| entry.0 = true)
+                .or_insert((true, false));
+        }
+        for dim in &meta.out_shape.dims {
+            let TokenCount::Symbolic(sym) = dim else {
+                continue;
+            };
+            sides
+                .entry(sym.as_str())
+                .and_modify(|entry: &mut (bool, bool)| entry.1 = true)
+                .or_insert((false, true));
+        }
+        sides
+    }
+
+    fn provided_param_names<'m>(&self, meta: &'m ActorMeta, args: &[Arg]) -> HashSet<&'m str> {
+        meta.params
+            .iter()
+            .zip(args.iter())
+            .map(|(p, _)| p.name.as_str())
+            .collect()
+    }
+
+    fn is_schedule_dim_override_blocked(
+        &self,
+        sym: &str,
+        meta: &ActorMeta,
+        args: &[Arg],
+        shape_constraint: Option<&ShapeConstraint>,
+        node_id: NodeId,
+        provided_params: &HashSet<&str>,
+    ) -> bool {
+        self.resolve_dim_param_from_shape(sym, meta, shape_constraint)
+            .or_else(|| self.infer_dim_param_from_span_args(sym, meta, args))
+            .is_some()
+            || self
+                .analysis
+                .span_derived_dims
+                .contains_key(&(node_id, sym.to_string()))
+            || provided_params.contains(sym)
+    }
+
     /// Build dimension overrides from the SDF schedule for symbolic params that
     /// couldn't be resolved from args or shape constraints.
     ///
@@ -2226,77 +2955,39 @@ impl<'a> CodegenCtx<'a> {
     ) -> HashMap<String, u32> {
         let mut overrides = HashMap::new();
         let rep = self.firing_repetition(sched, node_id);
+        let incoming_override = self.consistent_dim_override_from_edges(
+            sched,
+            rep,
+            sub.edges.iter().filter(|e| e.target == node_id),
+        );
+        let outgoing_override = self.consistent_dim_override_from_edges(
+            sched,
+            rep,
+            sub.edges.iter().filter(|e| e.source == node_id),
+        );
+        let symbolic_sides = self.symbolic_shape_sides(meta);
+        let provided_params = self.provided_param_names(meta, args);
 
-        // Check input shape dims
-        for dim in &meta.in_shape.dims {
-            if let TokenCount::Symbolic(sym) = dim {
-                if overrides.contains_key(sym.as_str()) {
+        for (sym, (in_side, out_side)) in symbolic_sides {
+            if self.is_schedule_dim_override_blocked(
+                sym,
+                meta,
+                args,
+                shape_constraint,
+                node_id,
+                &provided_params,
+            ) {
+                continue;
+            }
+            if in_side {
+                if let Some(val) = incoming_override {
+                    overrides.insert(sym.to_string(), val);
                     continue;
-                }
-                // Skip if already resolvable
-                if self
-                    .resolve_dim_param_from_shape(sym, meta, shape_constraint)
-                    .or_else(|| self.infer_dim_param_from_span_args(sym, meta, args))
-                    .is_some()
-                {
-                    continue;
-                }
-                // Skip if authoritatively recorded in analysis
-                if self
-                    .analysis
-                    .span_derived_dims
-                    .contains_key(&(node_id, sym.clone()))
-                {
-                    continue;
-                }
-                // Also skip if there's an explicit arg for this param
-                if let Some(idx) = meta.params.iter().position(|p| p.name == *sym) {
-                    if args.get(idx).is_some() {
-                        continue;
-                    }
-                }
-                // Derive from incoming edge buffer tokens
-                if let Some(edge) = sub.edges.iter().find(|e| e.target == node_id) {
-                    let tokens = self.edge_buffer_tokens(sched, edge.source, edge.target);
-                    if rep > 0 {
-                        overrides.insert(sym.clone(), tokens / rep);
-                    }
                 }
             }
-        }
-
-        // Check output shape dims
-        for dim in &meta.out_shape.dims {
-            if let TokenCount::Symbolic(sym) = dim {
-                if overrides.contains_key(sym.as_str()) {
-                    continue;
-                }
-                if self
-                    .resolve_dim_param_from_shape(sym, meta, shape_constraint)
-                    .or_else(|| self.infer_dim_param_from_span_args(sym, meta, args))
-                    .is_some()
-                {
-                    continue;
-                }
-                // Skip if authoritatively recorded in analysis
-                if self
-                    .analysis
-                    .span_derived_dims
-                    .contains_key(&(node_id, sym.clone()))
-                {
-                    continue;
-                }
-                if let Some(idx) = meta.params.iter().position(|p| p.name == *sym) {
-                    if args.get(idx).is_some() {
-                        continue;
-                    }
-                }
-                // Derive from outgoing edge buffer tokens
-                if let Some(edge) = sub.edges.iter().find(|e| e.source == node_id) {
-                    let tokens = self.edge_buffer_tokens(sched, edge.source, edge.target);
-                    if rep > 0 {
-                        overrides.insert(sym.clone(), tokens / rep);
-                    }
+            if out_side {
+                if let Some(val) = outgoing_override {
+                    overrides.insert(sym.to_string(), val);
                 }
             }
         }
@@ -2497,6 +3188,10 @@ mod tests {
         result.generated.cpp_source
     }
 
+    fn count_occurrences(haystack: &str, needle: &str) -> usize {
+        haystack.match_indices(needle).count()
+    }
+
     // ── Const emission tests ────────────────────────────────────────────
 
     #[test]
@@ -2603,6 +3298,138 @@ mod tests {
         assert!(
             cpp.contains("_r *"),
             "repetition loop should use _r offset expressions: {}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn same_rep_chain_fused_into_single_r_loop() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            concat!(
+                "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
+                "clock 1kHz t { constant(0.0) | fft(256) | c2r() | fir(coeff) | stdout() }",
+            ),
+            &reg,
+        );
+        assert_eq!(
+            count_occurrences(&cpp, "for (int _r = 0; _r < 5; ++_r)"),
+            1,
+            "rep=5 chain should be fused into a single loop, got:\n{}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn rep_mismatch_not_fused() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            concat!(
+                "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
+                "clock 1kHz t { constant(0.0) | fft(256) | c2r() | fir(coeff) | stdout() }",
+            ),
+            &reg,
+        );
+        assert_eq!(
+            count_occurrences(&cpp, "for (int _r = 0; _r < 5; ++_r)"),
+            1,
+            "rep=5 actors should be fused once, got:\n{}",
+            cpp
+        );
+        let pos_c2r_call = cpp
+            .find("_actor_2.operator()(&_e1_2[_r * 256], &_e2_3[_r * 256])")
+            .expect("expected c2r call in rep=5 loop");
+        let pos_fir_loop = cpp
+            .find("for (int _r = 0; _r < 256; ++_r)")
+            .expect("expected separate rep=256 loop for fir");
+        assert!(
+            pos_c2r_call < pos_fir_loop,
+            "rep mismatch boundary (c2r->fir) should remain separated, got:\n{}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn feedback_edge_not_fused() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            concat!(
+                "clock 1kHz iir {\n",
+                "    constant(0.0)[4] | add(:fb) | mul(2.0) | :out | stdout()\n",
+                "    :out | delay(1, 0.0) | :fb\n",
+                "}\n"
+            ),
+            &reg,
+        );
+        assert!(
+            cpp.contains("_fb_"),
+            "feedback buffer should be present for cycle graph, got:\n{}",
+            cpp
+        );
+        assert!(
+            count_occurrences(&cpp, "for (int _r = 0; _r < ") >= 3,
+            "feedback-related nodes should not be coalesced into a single fused loop, got:\n{}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn fork_passthrough_chain_fused_into_single_r_loop() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            concat!(
+                "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
+                "clock 1kHz t {\n",
+                "    constant(0.0)[256] | fft(256) | :raw | c2r() | fir(coeff) | stdout()\n",
+                "    :raw | mag() | stdout()\n",
+                "}\n"
+            ),
+            &reg,
+        );
+        assert_eq!(
+            count_occurrences(&cpp, "for (int _r = 0; _r < 5; ++_r)"),
+            1,
+            "fork-branch same-rep region should be fused into one loop, got:\n{}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn probe_passthrough_fusion_uses_per_firing_slice() {
+        let reg = test_registry();
+        let cpp = codegen_ok(
+            concat!(
+                "const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]\n",
+                "clock 1kHz t {\n",
+                "    constant(0.0)[256] | fft(256) | ?spec | c2r() | fir(coeff) | stdout()\n",
+                "}\n"
+            ),
+            &reg,
+        );
+        assert_eq!(
+            count_occurrences(&cpp, "for (int _r = 0; _r < 5; ++_r)"),
+            1,
+            "probe passthrough chain should be fused into one loop, got:\n{}",
+            cpp
+        );
+        assert!(
+            cpp.contains("[probe:spec]"),
+            "probe output formatting should be emitted in debug mode, got:\n{}",
+            cpp
+        );
+        assert!(
+            cpp.contains("for (int _pi = 0; _pi < 256; ++_pi)"),
+            "fused probe should observe per-firing slice (256), got:\n{}",
+            cpp
+        );
+        assert!(
+            !cpp.contains("for (int _pi = 0; _pi < 1280; ++_pi)"),
+            "fused probe should not replay full buffer per _r, got:\n{}",
+            cpp
+        );
+        assert!(
+            cpp.contains("_r * 256"),
+            "fused probe should index by _r slice offset, got:\n{}",
             cpp
         );
     }
@@ -3248,6 +4075,48 @@ mod tests {
         assert!(
             cpp.contains("_actor_") && cpp.contains(".operator()("),
             "hoisted actor should be called via .operator() inside the loop, got:\n{}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn actor_construction_hoisted_before_k_loop() {
+        let reg = test_registry();
+        let cpp = codegen_ok("clock 10MHz t { constant(0.0) | stdout() }", &reg);
+        let task_start = cpp.find("void task_t()").expect("missing task_t");
+        let task_tail = &cpp[task_start..];
+        let task_end = task_tail.find("int main(").unwrap_or(task_tail.len());
+        let task = &task_tail[..task_end];
+
+        let decl_pos = task
+            .find("auto _actor_")
+            .expect("expected hoisted actor declaration in task_t");
+        let k_pos = task
+            .find("for (int _k = 0; _k < ")
+            .expect("expected k-loop in task_t");
+        assert!(
+            decl_pos < k_pos,
+            "actor should be hoisted before _k loop in task_t, got:\n{}",
+            task
+        );
+    }
+
+    #[test]
+    fn multi_input_single_token_edges_avoid_memcpy() {
+        let reg = test_registry();
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root = manifest_dir.parent().expect("missing workspace root");
+        let path = root.join("examples/feedback.pdl");
+        let source = std::fs::read_to_string(path).expect("failed to read feedback.pdl");
+        let cpp = codegen_ok(&source, &reg);
+        assert!(
+            !cpp.contains("std::memcpy(&_in_"),
+            "single-token multi-input copies should use direct assignments, got:\n{}",
+            cpp
+        );
+        assert!(
+            cpp.contains("_in_") && cpp.contains("[0] = (") && cpp.contains("[1] = ("),
+            "feedback add input packing should still populate local input slots, got:\n{}",
             cpp
         );
     }

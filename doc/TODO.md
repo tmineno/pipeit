@@ -106,17 +106,89 @@
 
 ---
 
-## v0.3.3 - Vendored SIMD & FFT Acceleration
+## v0.3.3 - Compiler Refactor Strategy (Analyze/Codegen)
 
-- [x] Vendor PocketFFT (BSD-3) — replace naive Cooley-Tukey FFT (2.5–6x speedup)
-- [x] Vendor xsimd (BSD-3) — portable SIMD intrinsics
-- [x] Vectorize 8 actors with xsimd: `mul`, `fir`, `mean`, `rms`, `min`, `max`, `c2r`, `mag`
-- [x] Add `convolution` actor to `std_math.h`
-- [x] Skip `third_party/` in pcc header discovery to avoid architecture-specific sub-headers
-- [x] Add `third_party/` to all include paths (CMake, benches, tests)
-- [x] Refactor `codegen_compile.rs`: extract `run_pcc`, `temp_path`, `compile_cpp_to_binary` helpers
-- [x] Exclude `third_party/` from clang-format in CI and pre-commit
-- [x] Add MIT LICENSE at project root
+**Goal**: Reduce algorithmic bottlenecks and maintenance cost in compiler hot paths after v0.3.2 merge.
+
+- [x] **Phase 1: Graph index layer (shared lookup cache)**
+  - [x] Add subgraph-local indexes: `NodeId -> Node`, incoming/outgoing edge lists
+  - [x] Add analysis/codegen lookup helpers backed by indexes (replace repeated linear `find_node` / edge scans)
+  - [x] Add task/node repetition-vector index for O(1) cross-clock lookups
+  - [x] Keep deterministic behavior/output unchanged
+
+- [x] **Phase 2: Analyze worklist propagation**
+  - [x] Refactor shape inference fixpoint to worklist-driven propagation (process only affected nodes/edges)
+  - [x] Rework passthrough tracing to use indexed adjacency instead of repeated `iter().find(...)`
+  - [x] Preserve dimension precedence and existing diagnostics
+
+- [x] **Phase 3: Codegen decomposition**
+  - [x] Split `emit_task_functions` into smaller schedule/mode/timer emission helpers
+  - [x] Split `emit_firing` + `emit_actor_firing` into planning vs emission steps
+  - [x] Extract actor-call plan struct (in/out ptr, strides, params, hoist metadata)
+  - [x] Keep generated C++ output deterministic
+
+- [x] **Phase 4: Dimension-override safety hardening**
+  - [x] Remove first-edge-wins behavior in `build_schedule_dim_overrides` for symbolic dimensions
+  - [x] Add deterministic multi-edge resolution/validation rules
+  - [x] Align override conflict handling with `dim_resolve` helpers and analysis diagnostics
+
+- [x] **Exit Criteria**
+  - [x] Reduce ~50% NLOC/complexity for prioritized hotspots:
+    - [x] `compiler/src/codegen.rs`: `emit_task_functions`, `emit_firing`, `emit_actor_firing`
+    - [x] `compiler/src/analyze.rs`: shape propagation/tracing hot path
+  - [x] No correctness regressions (existing unit/integration/runtime tests pass)
+  - [x] No statistically significant codegen/analyze benchmark regression vs pre-refactor baseline
+
+---
+
+## v0.3.4 - Compiler Performance Follow-up (Next)
+
+**Goal**: Improve end-to-end compile latency using profiler-guided optimization after v0.3.3 refactor.
+
+- [ ] **Priority 1 / Phase 4: Remaining compiler hotspots** (high benefit, low-medium complexity)
+  - [x] Reduce complexity/duplication in:
+    - [x] `compiler/src/analyze.rs`: `check_dim_source_conflicts`
+    - [x] `compiler/src/codegen.rs`: `format_actor_params`
+    - [x] `compiler/src/codegen.rs`: `build_schedule_dim_overrides`
+  - [ ] `compiler/src/codegen.rs`: optimize `param_cpp_type` and literal/type conversion helpers
+  - [ ] `compiler/src/analyze.rs`: optimize `record_span_derived_dims` (dedup/indexing/allocation reduction)
+  - [ ] Re-profile to confirm hotspot migration after each optimization phase
+
+- [ ] **Priority 2 / Phase 2: Type inference allocation/clone reduction (profile-priority)** (high criticality, medium complexity)
+  - [ ] Remove or minimize remaining `ActorMeta` cloning in `type_infer` hot paths (monomorphization/result materialization path)
+  - [x] Add cache for `get_effective_meta` / monomorphized meta lookup
+  - [ ] Reduce String/HashMap churn in monomorphization keys (prefer reused keys/interned forms)
+
+- [ ] **Priority 3 / Phase 3: Registry + header loading costs** (high benefit for repeated compile workflows, medium-high complexity)
+  - [ ] Cache parsed header metadata across repeated invocations (hash-keyed)
+  - [ ] Avoid redundant overlay work when include-set + header hashes are unchanged
+  - [ ] Re-benchmark repeated single-file compiles (`simple`, `multitask`, `modal`) after cache changes
+
+- [ ] **Priority 4 / Exit Criteria validation**
+  - [ ] `kpi/full_compile_latency/complex` median improved by >= 5% vs v0.3.3 baseline
+  - [ ] `kpi/full_compile_latency/modal` median improved by >= 5% vs v0.3.3 baseline
+  - [ ] No statistically significant regressions in analyze/codegen phase KPIs (using CI `compiler-perf-ab` trend)
+  - [ ] No correctness regressions (all unit/integration/runtime tests pass)
+
+- [ ] **Priority 5 / Phase 6: Deferred - task-internal branch parallelization study** (intentionally after single-thread wins)
+  - [ ] Define safety gate for parallel branches (side-effect-free + thread-safe actors only)
+  - [ ] Add actor metadata/annotation strategy for effect/thread-safety classification
+  - [ ] Specify deterministic behavior policy for sinks/probes/shared-buffer boundaries
+  - [ ] Prototype runtime-context propagation (`iteration_index`, `task_rate_hz`) for branch workers
+  - [ ] Only enable after benchmarked speedup and regression-free correctness validation
+
+- [x] **Completed in v0.3.4**
+  - [x] **Phase 1: Measurement hardening**
+  - [x] Adopt `benches/compiler_bench_stable.sh` as the default local performance workflow
+  - [x] Add profiling notes doc for reproducible method + hotspot evidence (`doc/PROFILING_NOTES_v0.3.3.md`)
+  - [x] Add CI job for pinned, sequential A/B compiler KPI runs (`--save-baseline/--baseline`)
+  - [x] Store baseline artifact/report for compiler KPI A/B run in CI (`compiler-perf-ab`)
+  - [x] **Phase 5: Intra-task branch optimization (safe-first)**
+  - [x] Extend loop fusion to treat `Fork/Probe` as transparent for same-`_r` actor chains
+  - [x] Fuse patterns like `fft -> fork -> c2r` / `fft -> fork -> mag` in a single `_r`-granularity schedule
+  - [x] Keep task-internal execution single-threaded in this phase (no branch threading yet)
+  - [x] Add codegen tests to lock correctness (FIFO/order/error behavior unchanged)
+  - [x] Confirmed `static` edge-buffer declarations inside `_k` loop are not a runtime allocation bottleneck; declaration-hoist is readability-first and de-prioritized
 
 ---
 
@@ -193,7 +265,7 @@
   - [ ] `std(N)` - Standard deviation
   - [ ] `xcorr(N)` - Cross-correlation
   - [ ] `acorr(N)` - Auto-correlation
-  - [x] `convolve(N, kernel)` - Convolution (added in v0.3.3 as `convolution`)
+  - [ ] `convolve(N, kernel)` - Convolution
 
 - [ ] **Control flow** (MEDIUM complexity):
   - [ ] `gate(threshold)` - Pass/block based on signal level
@@ -325,7 +397,6 @@
 - **New pipeline**: `parse → resolve → type_infer → lower_verify → graph → analyze → schedule → codegen`
 - **ADR numbering**: ADR-015 = spec alignment (from review/spec), ADR-016 = polymorphism & safe widening, ADR-017 = analysis-owned node port-rate resolution
 - **v0.3.2** applies v0.3.0 polymorphism to 11 std actors; begins modular header split (`std_math.h`)
-- **v0.3.3** vendors PocketFFT + xsimd, vectorizes 8 actors, adds convolution; MIT LICENSE added
 - **v0.4.x** now includes former v0.3.0 stdlib expansion backlog
 - **v0.4.0** covers remaining language evolution after v0.3.0 type system work
 - **v0.5.0+** deferred until core is stable and well-characterized
