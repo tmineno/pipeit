@@ -140,11 +140,11 @@
 
 ### Phase 0: Spec/ADR Contract Freeze (Design Gate)
 
-- [ ] Publish `doc/spec/pcc-spec-v0.4.0.md` with explicit IR boundaries (`AST -> HIR -> THIR -> LIR`) and pass ownership
-- [ ] Add ADR: pass manager architecture, artifact model, and cache invalidation rules
-- [ ] Add ADR: stable semantic IDs (replace span-keyed semantic maps with stable IDs for identity)
-- [ ] Add ADR: diagnostics data model (`code`, primary/secondary spans, cause chain, machine-readable payload)
-- [ ] Backward-compatibility decision gate: keep v0.3 language/CLI behavior unless marked as explicit breaking change
+- [x] Publish `doc/spec/pcc-spec-v0.4.0.md` with explicit IR boundaries (`AST -> HIR -> THIR -> LIR`) and pass ownership
+- [x] Add ADR: pass manager architecture, artifact model, and cache invalidation rules (`doc/adr/020-pass-manager-artifact-model-and-invalidation.md`)
+- [x] Add ADR: stable semantic IDs (replace span-keyed semantic maps with stable IDs for identity) (`doc/adr/021-stable-semantic-ids-over-span-keys.md`)
+- [x] Add ADR: diagnostics data model (`code`, primary/secondary spans, cause chain, machine-readable payload) (`doc/adr/022-unified-diagnostics-model-with-cause-chain.md`)
+- [x] Backward-compatibility decision gate: keep v0.3 language/CLI behavior unless marked as explicit breaking change (`doc/adr/023-v040-backward-compatibility-gate.md`, `doc/spec/pcc-spec-v0.4.0.md`)
 
 ### Phase 1: Mechanical Foundations (No Behavior Change)
 
@@ -443,6 +443,7 @@
 - **New modules**: `type_infer.rs` (constraint-based type inference), `lower.rs` (typed lowering + L1-L5 verification)
 - **New pipeline**: `parse → resolve → type_infer → lower_verify → graph → analyze → schedule → codegen`
 - **ADR numbering**: ADR-015 = spec alignment (from review/spec), ADR-016 = polymorphism & safe widening, ADR-017 = analysis-owned node port-rate resolution
+- **v0.4.0 Phase 0 ADRs**: ADR-020 (pass manager/artifact model), ADR-021 (stable semantic IDs), ADR-022 (diagnostics model), ADR-023 (backward-compatibility gate)
 - **v0.3.2** applies v0.3.0 polymorphism to 11 std actors; begins modular header split (`std_math.h`)
 - **v0.5.x** now includes former v0.3.0 stdlib expansion backlog
 - **pre-v0.4.0 open items** were moved to `v0.5.x` backlog (`Deferred Backlog from v0.3.x`)
