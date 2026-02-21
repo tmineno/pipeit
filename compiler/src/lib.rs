@@ -18,5 +18,6 @@ pub mod registry;
 pub mod resolve;
 pub mod schedule;
 pub mod subgraph_index;
+pub mod thir;
 pub mod timing;
 pub mod type_infer;
