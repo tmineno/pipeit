@@ -20,6 +20,7 @@ use chumsky::span::Span as _;
 
 use crate::ast::*;
 use crate::graph::*;
+use crate::program_query;
 use crate::registry::{
     ActorMeta, ParamKind, ParamType, PipitType, PortShape, Registry, TokenCount,
 };
@@ -467,14 +468,10 @@ impl<'a> AnalyzeCtx<'a> {
     /// - (`set mem` value, Some(span)) when explicitly configured.
     /// - (64MB, None) when omitted (spec default).
     fn get_mem_limit(&self) -> (u64, Option<Span>) {
-        for stmt in &self.program.statements {
-            if let StatementKind::Set(set) = &stmt.kind {
-                if set.name.name == "mem" {
-                    if let SetValue::Size(bytes, span) = &set.value {
-                        return (*bytes, Some(*span));
-                    }
-                }
-            }
+        if let Some((SetValue::Size(bytes, _), span)) =
+            program_query::get_set_value_with_span(self.program, "mem")
+        {
+            return (*bytes, Some(span));
         }
         (64 * 1024 * 1024, None)
     }

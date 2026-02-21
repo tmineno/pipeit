@@ -18,6 +18,7 @@ use crate::analyze::AnalyzedProgram;
 use crate::ast::*;
 use crate::graph::*;
 use crate::lower::LoweredProgram;
+use crate::program_query;
 use crate::registry::{ActorMeta, ParamKind, ParamType, PipitType, Registry, TokenCount};
 use crate::resolve::{Diagnostic, ResolvedProgram};
 use crate::schedule::*;
@@ -536,10 +537,10 @@ impl<'a> CodegenCtx<'a> {
 
         // Timer (measure_latency enabled only when stats are active;
         // spin_ns from `set timer_spin`, default 10us; `auto` = adaptive).
-        let spin_ns = if self.get_set_ident("timer_spin") == Some("auto") {
+        let spin_ns = if program_query::get_set_ident(self.program, "timer_spin") == Some("auto") {
             -1_i64
         } else {
-            self.get_set_number("timer_spin").unwrap_or(10_000.0) as i64
+            program_query::get_set_number(self.program, "timer_spin").unwrap_or(10_000.0) as i64
         };
         let _ = writeln!(
             self.out,
@@ -2039,7 +2040,8 @@ impl<'a> CodegenCtx<'a> {
             );
         }
 
-        let mem_limit = self.get_set_size("mem").unwrap_or(64 * 1024 * 1024);
+        let mem_limit =
+            program_query::get_set_size(self.program, "mem").unwrap_or(64 * 1024 * 1024);
         let _ = writeln!(
             self.out,
             "        fprintf(stderr, \"[stats] memory pool: %zuB allocated, %zuB used\\n\", (size_t){}, (size_t){});",
@@ -2408,48 +2410,11 @@ impl<'a> CodegenCtx<'a> {
         }
     }
 
-    fn get_set_ident<'b>(&'b self, name: &str) -> Option<&'b str> {
-        for stmt in &self.program.statements {
-            if let StatementKind::Set(set) = &stmt.kind {
-                if set.name.name == name {
-                    if let SetValue::Ident(ident) = &set.value {
-                        return Some(&ident.name);
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    fn get_set_number(&self, name: &str) -> Option<f64> {
-        for stmt in &self.program.statements {
-            if let StatementKind::Set(set) = &stmt.kind {
-                if set.name.name == name {
-                    if let SetValue::Number(n, _) = &set.value {
-                        return Some(*n);
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    fn get_set_size(&self, name: &str) -> Option<u64> {
-        for stmt in &self.program.statements {
-            if let StatementKind::Set(set) = &stmt.kind {
-                if set.name.name == name {
-                    if let SetValue::Size(v, _) = &set.value {
-                        return Some(*v);
-                    }
-                }
-            }
-        }
-        None
-    }
-
     fn get_overrun_policy(&self) -> &str {
-        match self.get_set_ident("overrun") {
-            Some("drop") | Some("slip") | Some("backlog") => self.get_set_ident("overrun").unwrap(),
+        match program_query::get_set_ident(self.program, "overrun") {
+            Some("drop") | Some("slip") | Some("backlog") => {
+                program_query::get_set_ident(self.program, "overrun").unwrap()
+            }
             _ => "drop",
         }
     }

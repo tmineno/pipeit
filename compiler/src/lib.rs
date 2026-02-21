@@ -11,6 +11,7 @@ pub mod graph;
 pub mod lexer;
 pub mod lower;
 pub mod parser;
+pub mod program_query;
 pub mod registry;
 pub mod resolve;
 pub mod schedule;

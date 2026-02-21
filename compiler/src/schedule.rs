@@ -20,6 +20,7 @@ use chumsky::span::Span as _;
 use crate::analyze::AnalyzedProgram;
 use crate::ast::*;
 use crate::graph::*;
+use crate::program_query;
 use crate::registry::Registry;
 use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
 
@@ -144,22 +145,6 @@ impl<'a> ScheduleCtx<'a> {
         }
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────
-
-    /// Read a `set` directive with a `Freq` value (e.g., `set tick_rate = 1kHz`).
-    fn get_set_freq(&self, name: &str) -> Option<f64> {
-        for stmt in &self.program.statements {
-            if let StatementKind::Set(set) = &stmt.kind {
-                if set.name.name == name {
-                    if let SetValue::Freq(f, _) = &set.value {
-                        return Some(*f);
-                    }
-                }
-            }
-        }
-        None
-    }
-
     // ── Task scheduling ─────────────────────────────────────────────────
 
     fn schedule_all_tasks(&mut self) {
@@ -220,7 +205,8 @@ impl<'a> ScheduleCtx<'a> {
             }
         };
 
-        let tick_rate_hz = self.get_set_freq("tick_rate").unwrap_or(10_000.0);
+        let tick_rate_hz =
+            program_query::get_set_freq(self.program, "tick_rate").unwrap_or(10_000.0);
         let k = compute_k_factor(freq_hz, tick_rate_hz);
 
         // Rate guardrails (ADR-014): warn when effective timer rate is unsustainable
