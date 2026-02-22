@@ -183,7 +183,7 @@ fn main() {
 
     // ── Typed lowering & verification ──
     let lower_result = pcc::lower::lower_and_verify(
-        &program,
+        &hir,
         &resolve_result.resolved,
         &type_infer_result.typed,
         &registry,

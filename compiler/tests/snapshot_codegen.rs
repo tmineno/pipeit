@@ -74,12 +74,8 @@ fn full_pipeline_cpp(source: &str, registry: &pcc::registry::Registry) -> String
         type_result.diagnostics
     );
 
-    let lower_result = pcc::lower::lower_and_verify(
-        &program,
-        &resolve_result.resolved,
-        &type_result.typed,
-        registry,
-    );
+    let lower_result =
+        pcc::lower::lower_and_verify(&hir, &resolve_result.resolved, &type_result.typed, registry);
     assert!(
         !lower_result.has_errors(),
         "lower errors: {:?}",

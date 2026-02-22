@@ -20,8 +20,8 @@ expression: cpp
 static constexpr float _const_coeff[] = {0.1f, 0.2f, 0.4f, 0.2f, 0.1f};
 static constexpr auto _const_fft_size = 256;
 
-static std::atomic<int> _param_gain_write(1);
-static std::atomic<int> _param_gain_read(1);
+static std::atomic<float> _param_gain_write(1);
+static std::atomic<float> _param_gain_read(1);
 
 static pipit::RingBuffer<float, 512, 1> _ringbuf_signal;
 
@@ -53,7 +53,7 @@ void task_capture() {
         for (int _k = 0; _k < 1000; ++_k) {
             pipit::detail::set_actor_iteration_index(_iter_idx++);
             _param_gain_read.store(_param_gain_write.load(std::memory_order_acquire), std::memory_order_release);
-            int _param_gain_val = _param_gain_read.load(std::memory_order_acquire);
+            float _param_gain_val = _param_gain_read.load(std::memory_order_acquire);
             static float _e0_1[1280];
             static float _e1_2[1280];
             static cfloat _e2_3[1280];
@@ -222,7 +222,7 @@ int main(int argc, char* argv[]) {
             }
             auto name = arg.substr(0, eq);
             auto val = arg.substr(eq + 1);
-            if (name == "gain") _param_gain_write.store(std::stoi(val), std::memory_order_release);
+            if (name == "gain") _param_gain_write.store(std::stof(val), std::memory_order_release);
             else {
                 std::fprintf(stderr, "startup error: unknown param '%s'\\n", name.c_str());
                 return 2;

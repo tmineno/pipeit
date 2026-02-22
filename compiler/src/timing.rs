@@ -307,7 +307,7 @@ mod tests {
         let type_result =
             crate::type_infer::type_infer(&hir_program, &resolve_result.resolved, registry);
         let lower_result = crate::lower::lower_and_verify(
-            &program,
+            &hir_program,
             &resolve_result.resolved,
             &type_result.typed,
             registry,

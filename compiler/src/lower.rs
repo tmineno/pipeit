@@ -12,10 +12,14 @@
 
 use std::collections::HashMap;
 
-use crate::ast::*;
+use crate::ast::Span;
+use crate::hir::{
+    HirActorCall, HirPipeElem, HirPipeExpr, HirPipeSource, HirPipeline, HirProgram, HirTask,
+    HirTaskBody,
+};
 use crate::id::CallId;
 use crate::registry::{ActorMeta, PipitType, Registry, TokenCount};
-use crate::resolve::{CallResolution, DiagLevel, Diagnostic, ResolvedProgram};
+use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
 use crate::type_infer::{can_widen, TypedProgram};
 
 // ── Output types ────────────────────────────────────────────────────────────
@@ -48,8 +52,10 @@ pub struct LoweredProgram {
 /// A synthetic widening node inserted between two pipe stages.
 #[derive(Debug, Clone)]
 pub struct WideningNode {
-    /// Span of the target actor call (consumer side) — identifies the edge.
+    /// Span of the target actor call (consumer side) — retained for diagnostics.
     pub target_span: Span,
+    /// CallId of the target actor call — primary matching key.
+    pub target_call_id: CallId,
     /// Source type (produced by upstream actor).
     pub from_type: PipitType,
     /// Target type (expected by downstream actor).
@@ -90,12 +96,13 @@ impl Cert {
 /// Lower the typed program: insert widening nodes, build concrete actor map,
 /// and verify L1-L5 obligations.
 pub fn lower_and_verify(
-    program: &Program,
+    hir: &HirProgram,
     resolved: &ResolvedProgram,
     typed: &TypedProgram,
     registry: &Registry,
 ) -> LowerResult {
     let mut engine = LowerEngine {
+        hir,
         resolved,
         typed,
         registry,
@@ -105,10 +112,10 @@ pub fn lower_and_verify(
     };
 
     // Phase 1: Build concrete actor map and insert widening nodes
-    engine.lower_program(program);
+    engine.lower_program();
 
     // Phase 2: Verify L1-L5 obligations
-    let cert = engine.verify_obligations(program);
+    let cert = engine.verify_obligations();
 
     LowerResult {
         lowered: LoweredProgram {
@@ -124,6 +131,7 @@ pub fn lower_and_verify(
 // ── Lowering engine ─────────────────────────────────────────────────────────
 
 struct LowerEngine<'a> {
+    hir: &'a HirProgram,
     resolved: &'a ResolvedProgram,
     typed: &'a TypedProgram,
     registry: &'a Registry,
@@ -135,41 +143,39 @@ struct LowerEngine<'a> {
 impl<'a> LowerEngine<'a> {
     // ── Phase 1: Lowering ───────────────────────────────────────────────
 
-    fn lower_program(&mut self, program: &Program) {
-        for stmt in &program.statements {
-            if let StatementKind::Task(task) = &stmt.kind {
-                self.lower_task(task);
-            }
+    fn lower_program(&mut self) {
+        for task in &self.hir.tasks {
+            self.lower_task(task);
         }
     }
 
-    fn lower_task(&mut self, task: &TaskStmt) {
+    fn lower_task(&mut self, task: &HirTask) {
         match &task.body {
-            TaskBody::Pipeline(body) => self.lower_pipeline_body(body),
-            TaskBody::Modal(modal) => {
-                self.lower_pipeline_body(&modal.control.body);
-                for mode in &modal.modes {
-                    self.lower_pipeline_body(&mode.body);
+            HirTaskBody::Pipeline(pipeline) => self.lower_pipeline(pipeline),
+            HirTaskBody::Modal(modal) => {
+                self.lower_pipeline(&modal.control);
+                for (_name, mode_pipeline) in &modal.modes {
+                    self.lower_pipeline(mode_pipeline);
                 }
             }
         }
     }
 
-    fn lower_pipeline_body(&mut self, body: &PipelineBody) {
-        for pipe in &body.lines {
+    fn lower_pipeline(&mut self, pipeline: &HirPipeline) {
+        for pipe in &pipeline.pipes {
             self.lower_pipe_expr(pipe);
         }
     }
 
-    fn lower_pipe_expr(&mut self, pipe: &PipeExpr) {
+    fn lower_pipe_expr(&mut self, pipe: &HirPipeExpr) {
         // Collect actor calls
-        let mut calls: Vec<&ActorCall> = Vec::new();
+        let mut calls: Vec<&HirActorCall> = Vec::new();
 
-        if let PipeSource::ActorCall(call) = &pipe.source {
+        if let HirPipeSource::ActorCall(call) = &pipe.source {
             calls.push(call);
         }
         for elem in &pipe.elements {
-            if let PipeElem::ActorCall(call) = elem {
+            if let HirPipeElem::ActorCall(call) = elem {
                 calls.push(call);
             }
         }
@@ -179,13 +185,13 @@ impl<'a> LowerEngine<'a> {
             self.lower_actor_call(call);
         }
 
-        // Insert widening nodes for this pipe's widening points
+        // Insert widening nodes — match by CallId (handles define-expanded calls)
         for wp in &self.typed.widenings {
-            // Check if this widening point belongs to a call in this pipe
-            if calls.iter().any(|c| c.span == wp.target_span) {
+            if calls.iter().any(|c| c.call_id == wp.target_call_id) {
                 let synthetic_name = format!("_widen_{}_to_{}", wp.from_type, wp.to_type);
                 self.widening_nodes.push(WideningNode {
                     target_span: wp.target_span,
+                    target_call_id: wp.target_call_id,
                     from_type: wp.from_type,
                     to_type: wp.to_type,
                     synthetic_name,
@@ -194,13 +200,9 @@ impl<'a> LowerEngine<'a> {
         }
     }
 
-    fn lower_actor_call(&mut self, call: &ActorCall) {
-        let resolution = self.resolved.call_resolution_for(call.span);
-        if !matches!(resolution, Some(CallResolution::Actor)) {
-            return; // define call — skip
-        }
-
-        let call_id = self.resolved.call_id_for_span(call.span);
+    fn lower_actor_call(&mut self, call: &HirActorCall) {
+        // All HIR calls are actors (defines are expanded inline)
+        let call_id = call.call_id;
 
         // Check if type_infer provided a monomorphized meta
         if let Some(mono) = self.typed.mono_actors.get(&call_id) {
@@ -209,18 +211,18 @@ impl<'a> LowerEngine<'a> {
         }
 
         // Use registry meta directly (already concrete for non-polymorphic actors)
-        if let Some(meta) = self.registry.lookup(&call.name.name) {
+        if let Some(meta) = self.registry.lookup(&call.name) {
             self.concrete_actors.insert(call_id, meta.clone());
         }
     }
 
     // ── Phase 2: L1-L5 verification ─────────────────────────────────────
 
-    fn verify_obligations(&mut self, program: &Program) -> Cert {
-        let l1 = self.verify_l1_type_consistency(program);
+    fn verify_obligations(&mut self) -> Cert {
+        let l1 = self.verify_l1_type_consistency();
         let l2 = self.verify_l2_widening_safety();
         let l3 = self.verify_l3_rate_shape_preservation();
-        let l4 = self.verify_l4_monomorphization_soundness(program);
+        let l4 = self.verify_l4_monomorphization_soundness();
         let l5 = self.verify_l5_no_fallback_typing();
 
         Cert {
@@ -233,34 +235,32 @@ impl<'a> LowerEngine<'a> {
     }
 
     /// L1: Every edge has matching source/target types (after widening insertion).
-    fn verify_l1_type_consistency(&mut self, program: &Program) -> bool {
+    fn verify_l1_type_consistency(&mut self) -> bool {
         let mut ok = true;
 
-        for stmt in &program.statements {
-            if let StatementKind::Task(task) = &stmt.kind {
-                if !self.verify_l1_task(task) {
-                    ok = false;
-                }
+        for task in &self.hir.tasks {
+            if !self.verify_l1_task(task) {
+                ok = false;
             }
         }
 
         ok
     }
 
-    fn verify_l1_task(&mut self, task: &TaskStmt) -> bool {
+    fn verify_l1_task(&mut self, task: &HirTask) -> bool {
         let mut ok = true;
         match &task.body {
-            TaskBody::Pipeline(body) => {
-                if !self.verify_l1_pipeline_body(body) {
+            HirTaskBody::Pipeline(pipeline) => {
+                if !self.verify_l1_pipeline(pipeline) {
                     ok = false;
                 }
             }
-            TaskBody::Modal(modal) => {
-                if !self.verify_l1_pipeline_body(&modal.control.body) {
+            HirTaskBody::Modal(modal) => {
+                if !self.verify_l1_pipeline(&modal.control) {
                     ok = false;
                 }
-                for mode in &modal.modes {
-                    if !self.verify_l1_pipeline_body(&mode.body) {
+                for (_name, mode_pipeline) in &modal.modes {
+                    if !self.verify_l1_pipeline(mode_pipeline) {
                         ok = false;
                     }
                 }
@@ -269,9 +269,9 @@ impl<'a> LowerEngine<'a> {
         ok
     }
 
-    fn verify_l1_pipeline_body(&mut self, body: &PipelineBody) -> bool {
+    fn verify_l1_pipeline(&mut self, pipeline: &HirPipeline) -> bool {
         let mut ok = true;
-        for pipe in &body.lines {
+        for pipe in &pipeline.pipes {
             if !self.verify_l1_pipe(pipe) {
                 ok = false;
             }
@@ -279,15 +279,15 @@ impl<'a> LowerEngine<'a> {
         ok
     }
 
-    fn verify_l1_pipe(&mut self, pipe: &PipeExpr) -> bool {
+    fn verify_l1_pipe(&mut self, pipe: &HirPipeExpr) -> bool {
         let mut ok = true;
 
-        let mut calls: Vec<&ActorCall> = Vec::new();
-        if let PipeSource::ActorCall(call) = &pipe.source {
+        let mut calls: Vec<&HirActorCall> = Vec::new();
+        if let HirPipeSource::ActorCall(call) = &pipe.source {
             calls.push(call);
         }
         for elem in &pipe.elements {
-            if let PipeElem::ActorCall(call) = elem {
+            if let HirPipeElem::ActorCall(call) = elem {
                 calls.push(call);
             }
         }
@@ -309,25 +309,20 @@ impl<'a> LowerEngine<'a> {
                 continue;
             }
 
-            // Check if a widening node covers this edge
+            // Check if a widening node covers this edge (match by CallId)
             let has_widening = self
                 .widening_nodes
                 .iter()
-                .any(|w| w.target_span == tgt.span);
+                .any(|w| w.target_call_id == tgt.call_id);
 
             if has_widening {
-                // After widening insertion, the edge types should match:
-                // src -> widen(src_type, tgt_type) -> tgt
-                // The widening node's output is tgt_type, which matches tgt's input.
-                // The widening node's input is src_type, which matches src's output.
-                // So type consistency holds if the widening is valid (checked in L2).
                 continue;
             }
 
             if src_type != tgt_type {
                 self.diagnostics.push(Diagnostic {
                     level: DiagLevel::Error,
-                    span: tgt.span,
+                    span: tgt.call_span,
                     message: format!(
                         "lowering verification failed (L1 type consistency): edge type mismatch {} -> {}",
                         src_type, tgt_type
@@ -369,22 +364,11 @@ impl<'a> LowerEngine<'a> {
 
     /// L3: Widening nodes are 1:1 and do not alter token rate or shape.
     fn verify_l3_rate_shape_preservation(&mut self) -> bool {
-        // Widening nodes are synthetic identity actors with rate 1:1.
-        // By construction they are always 1:1 (IN(from, 1), OUT(to, 1)).
-        // We verify that the upstream and downstream shapes are compatible.
         let mut ok = true;
 
         for wn in &self.widening_nodes {
-            // Get the downstream actor's metadata to check shape
-            let tgt_call_id = self.resolved.call_ids.get(&wn.target_span);
-            if let Some(tgt_meta) = tgt_call_id.and_then(|id| self.concrete_actors.get(id)) {
-                // The widening node is 1:1 by construction.
-                // Verify the downstream actor's in_count is compatible.
-                // Widening nodes must not change rate — they are scalar 1:1.
+            if let Some(tgt_meta) = self.concrete_actors.get(&wn.target_call_id) {
                 let in_count = &tgt_meta.in_count;
-                // This is informational: widening nodes themselves are always 1:1,
-                // so L3 is satisfied by construction. But we verify the target
-                // hasn't been corrupted.
                 if let TokenCount::Literal(n) = in_count {
                     if *n == 0 {
                         self.diagnostics.push(Diagnostic {
@@ -405,67 +389,55 @@ impl<'a> LowerEngine<'a> {
     }
 
     /// L4: Each polymorphic call is rewritten to exactly one concrete instance.
-    fn verify_l4_monomorphization_soundness(&mut self, program: &Program) -> bool {
+    fn verify_l4_monomorphization_soundness(&mut self) -> bool {
         let mut ok = true;
 
-        self.verify_l4_walk_program(program, &mut ok);
+        for task in &self.hir.tasks {
+            self.verify_l4_walk_task(task, &mut ok);
+        }
 
         ok
     }
 
-    fn verify_l4_walk_program(&mut self, program: &Program, ok: &mut bool) {
-        for stmt in &program.statements {
-            if let StatementKind::Task(task) = &stmt.kind {
-                self.verify_l4_walk_task(task, ok);
-            }
-        }
-    }
-
-    fn verify_l4_walk_task(&mut self, task: &TaskStmt, ok: &mut bool) {
+    fn verify_l4_walk_task(&mut self, task: &HirTask, ok: &mut bool) {
         match &task.body {
-            TaskBody::Pipeline(body) => self.verify_l4_walk_body(body, ok),
-            TaskBody::Modal(modal) => {
-                self.verify_l4_walk_body(&modal.control.body, ok);
-                for mode in &modal.modes {
-                    self.verify_l4_walk_body(&mode.body, ok);
+            HirTaskBody::Pipeline(pipeline) => self.verify_l4_walk_pipeline(pipeline, ok),
+            HirTaskBody::Modal(modal) => {
+                self.verify_l4_walk_pipeline(&modal.control, ok);
+                for (_name, mode_pipeline) in &modal.modes {
+                    self.verify_l4_walk_pipeline(mode_pipeline, ok);
                 }
             }
         }
     }
 
-    fn verify_l4_walk_body(&mut self, body: &PipelineBody, ok: &mut bool) {
-        for pipe in &body.lines {
-            if let PipeSource::ActorCall(call) = &pipe.source {
+    fn verify_l4_walk_pipeline(&mut self, pipeline: &HirPipeline, ok: &mut bool) {
+        for pipe in &pipeline.pipes {
+            if let HirPipeSource::ActorCall(call) = &pipe.source {
                 self.verify_l4_call(call, ok);
             }
             for elem in &pipe.elements {
-                if let PipeElem::ActorCall(call) = elem {
+                if let HirPipeElem::ActorCall(call) = elem {
                     self.verify_l4_call(call, ok);
                 }
             }
         }
     }
 
-    fn verify_l4_call(&mut self, call: &ActorCall, ok: &mut bool) {
-        let resolution = self.resolved.call_resolution_for(call.span);
-        if !matches!(resolution, Some(CallResolution::Actor)) {
-            return;
-        }
-
-        // Check if the registry actor is polymorphic
-        if let Some(reg_meta) = self.registry.lookup(&call.name.name) {
+    fn verify_l4_call(&mut self, call: &HirActorCall, ok: &mut bool) {
+        // All HIR calls are actors — no CallResolution check needed
+        if let Some(reg_meta) = self.registry.lookup(&call.name) {
             if reg_meta.is_polymorphic() {
-                // Must have been monomorphized
-                let call_id = self.resolved.call_id_for_span(call.span);
+                let call_id = call.call_id;
                 if let Some(concrete) = self.concrete_actors.get(&call_id) {
                     if concrete.is_polymorphic() {
                         self.diagnostics.push(Diagnostic {
                             level: DiagLevel::Error,
-                            span: call.span,
+                            span: call.call_span,
                             message: format!(
                                 "lowering verification failed (L4 monomorphization soundness): \
                                  polymorphic actor '{}' not fully monomorphized",
-                                call.name.name
+                                call.name
                             ),
                             hint: Some("specify type arguments explicitly".to_string()),
                         });
@@ -474,11 +446,11 @@ impl<'a> LowerEngine<'a> {
                 } else {
                     self.diagnostics.push(Diagnostic {
                         level: DiagLevel::Error,
-                        span: call.span,
+                        span: call.call_span,
                         message: format!(
                             "lowering verification failed (L4 monomorphization soundness): \
                              polymorphic actor '{}' has no concrete instance",
-                            call.name.name
+                            call.name
                         ),
                         hint: Some("specify type arguments explicitly".to_string()),
                     });
@@ -497,6 +469,7 @@ impl<'a> LowerEngine<'a> {
                 .resolved
                 .call_spans
                 .get(call_id)
+                .or_else(|| self.hir.expanded_call_spans.get(call_id))
                 .copied()
                 .unwrap_or_else(|| {
                     use chumsky::span::Span as _;
@@ -535,17 +508,15 @@ impl<'a> LowerEngine<'a> {
 
     // ── Helpers ──────────────────────────────────────────────────────────
 
-    fn get_output_type(&self, call: &ActorCall) -> Option<PipitType> {
-        let call_id = self.resolved.call_id_for_span(call.span);
+    fn get_output_type(&self, call: &HirActorCall) -> Option<PipitType> {
         self.concrete_actors
-            .get(&call_id)
+            .get(&call.call_id)
             .and_then(|m| m.out_type.as_concrete())
     }
 
-    fn get_input_type(&self, call: &ActorCall) -> Option<PipitType> {
-        let call_id = self.resolved.call_id_for_span(call.span);
+    fn get_input_type(&self, call: &HirActorCall) -> Option<PipitType> {
         self.concrete_actors
-            .get(&call_id)
+            .get(&call.call_id)
             .and_then(|m| m.in_type.as_concrete())
     }
 }
@@ -560,17 +531,6 @@ mod tests {
 
     fn dummy_span() -> Span {
         Span::new((), 0..0)
-    }
-
-    /// Build call_ids / call_spans maps for a slice of (span, call_id) pairs.
-    fn make_call_maps(pairs: &[(Span, CallId)]) -> (HashMap<Span, CallId>, HashMap<CallId, Span>) {
-        let mut call_ids = HashMap::new();
-        let mut call_spans = HashMap::new();
-        for &(s, id) in pairs {
-            call_ids.insert(s, id);
-            call_spans.insert(id, s);
-        }
-        (call_ids, call_spans)
     }
 
     fn span(start: usize, end: usize) -> Span {
@@ -605,6 +565,122 @@ mod tests {
         }
     }
 
+    fn make_hir_actor_call(name: &str, call_id: CallId, call_span: Span) -> HirActorCall {
+        HirActorCall {
+            name: name.to_string(),
+            call_id,
+            call_span,
+            args: Vec::new(),
+            type_args: Vec::new(),
+            shape_constraint: None,
+        }
+    }
+
+    fn make_empty_hir() -> HirProgram {
+        HirProgram {
+            tasks: Vec::new(),
+            consts: Vec::new(),
+            params: Vec::new(),
+            set_directives: Vec::new(),
+            expanded_call_ids: HashMap::new(),
+            expanded_call_spans: HashMap::new(),
+            program_span: dummy_span(),
+        }
+    }
+
+    fn make_hir_with_pipe(calls: Vec<HirActorCall>) -> HirProgram {
+        use crate::hir::{HirPipeline, HirTask, HirTaskBody};
+        use crate::id::TaskId;
+
+        let source = calls.into_iter().next().unwrap();
+        let elements: Vec<HirPipeElem> = Vec::new();
+
+        // We'll build this properly for multi-call cases
+        HirProgram {
+            tasks: vec![HirTask {
+                name: "main".to_string(),
+                task_id: TaskId(0),
+                freq_hz: 48000.0,
+                freq_span: dummy_span(),
+                body: HirTaskBody::Pipeline(HirPipeline {
+                    pipes: vec![HirPipeExpr {
+                        source: HirPipeSource::ActorCall(source),
+                        elements,
+                        sink: None,
+                        span: span(0, 20),
+                    }],
+                    span: span(0, 20),
+                }),
+            }],
+            consts: Vec::new(),
+            params: Vec::new(),
+            set_directives: Vec::new(),
+            expanded_call_ids: HashMap::new(),
+            expanded_call_spans: HashMap::new(),
+            program_span: span(0, 20),
+        }
+    }
+
+    fn make_hir_two_calls(src_call: HirActorCall, sink_call: HirActorCall) -> HirProgram {
+        use crate::hir::{HirPipeline, HirTask, HirTaskBody};
+        use crate::id::TaskId;
+
+        HirProgram {
+            tasks: vec![HirTask {
+                name: "main".to_string(),
+                task_id: TaskId(0),
+                freq_hz: 48000.0,
+                freq_span: dummy_span(),
+                body: HirTaskBody::Pipeline(HirPipeline {
+                    pipes: vec![HirPipeExpr {
+                        source: HirPipeSource::ActorCall(src_call),
+                        elements: vec![HirPipeElem::ActorCall(sink_call)],
+                        sink: None,
+                        span: span(0, 20),
+                    }],
+                    span: span(0, 20),
+                }),
+            }],
+            consts: Vec::new(),
+            params: Vec::new(),
+            set_directives: Vec::new(),
+            expanded_call_ids: HashMap::new(),
+            expanded_call_spans: HashMap::new(),
+            program_span: span(0, 20),
+        }
+    }
+
+    fn make_resolved_for_calls(pairs: &[(Span, CallId)]) -> ResolvedProgram {
+        let mut call_ids = HashMap::new();
+        let mut call_spans = HashMap::new();
+        for &(s, id) in pairs {
+            call_ids.insert(s, id);
+            call_spans.insert(id, s);
+        }
+        ResolvedProgram {
+            consts: HashMap::new(),
+            params: HashMap::new(),
+            defines: HashMap::new(),
+            tasks: HashMap::new(),
+            buffers: HashMap::new(),
+            call_resolutions: HashMap::new(),
+            task_resolutions: HashMap::new(),
+            probes: Vec::new(),
+            call_ids,
+            call_spans,
+            def_ids: HashMap::new(),
+            task_ids: HashMap::new(),
+        }
+    }
+
+    fn make_empty_typed() -> TypedProgram {
+        TypedProgram {
+            type_assignments: HashMap::new(),
+            widenings: Vec::new(),
+            mono_actors: HashMap::new(),
+        }
+    }
+
     // ── L1 tests ────────────────────────────────────────────────────────
 
     #[test]
@@ -624,78 +700,16 @@ mod tests {
             make_concrete_meta("sink", PipitType::Float, PipitType::Void),
         );
 
-        let typed = TypedProgram {
-            type_assignments: HashMap::new(),
-            widenings: Vec::new(),
-            mono_actors: HashMap::new(),
-        };
-
-        let (call_ids, call_spans) = make_call_maps(&[(s1, c1), (s2, c2)]);
-        let resolved = ResolvedProgram {
-            consts: HashMap::new(),
-            params: HashMap::new(),
-            defines: HashMap::new(),
-            tasks: HashMap::new(),
-            buffers: HashMap::new(),
-            call_resolutions: {
-                let mut m = HashMap::new();
-                m.insert(c1, CallResolution::Actor);
-                m.insert(c2, CallResolution::Actor);
-                m
-            },
-            task_resolutions: HashMap::new(),
-            probes: Vec::new(),
-            call_ids,
-            call_spans,
-            def_ids: HashMap::new(),
-            task_ids: HashMap::new(),
-        };
-
-        let program = Program {
-            statements: vec![Statement {
-                kind: StatementKind::Task(TaskStmt {
-                    freq: 48000.0,
-                    freq_span: dummy_span(),
-                    name: Ident {
-                        name: "main".to_string(),
-                        span: dummy_span(),
-                    },
-                    body: TaskBody::Pipeline(PipelineBody {
-                        lines: vec![PipeExpr {
-                            source: PipeSource::ActorCall(ActorCall {
-                                name: Ident {
-                                    name: "src".to_string(),
-                                    span: s1,
-                                },
-                                type_args: Vec::new(),
-                                args: Vec::new(),
-                                shape_constraint: None,
-                                span: s1,
-                            }),
-                            elements: vec![PipeElem::ActorCall(ActorCall {
-                                name: Ident {
-                                    name: "sink".to_string(),
-                                    span: s2,
-                                },
-                                type_args: Vec::new(),
-                                args: Vec::new(),
-                                shape_constraint: None,
-                                span: s2,
-                            })],
-                            sink: None,
-                            span: span(0, 20),
-                        }],
-                        span: span(0, 20),
-                    }),
-                }),
-                span: span(0, 20),
-            }],
-            span: span(0, 20),
-        };
-
+        let typed = make_empty_typed();
+        let hir = make_hir_two_calls(
+            make_hir_actor_call("src", c1, s1),
+            make_hir_actor_call("sink", c2, s2),
+        );
+        let resolved = make_resolved_for_calls(&[(s1, c1), (s2, c2)]);
         let registry = Registry::empty();
 
         let mut engine = LowerEngine {
+            hir: &hir,
             resolved: &resolved,
             typed: &typed,
             registry: &registry,
@@ -704,7 +718,7 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        let cert = engine.verify_obligations(&program);
+        let cert = engine.verify_obligations();
         assert!(
             cert.l1_type_consistency,
             "L1 should pass for matching types"
@@ -729,78 +743,16 @@ mod tests {
             make_concrete_meta("sink", PipitType::Double, PipitType::Void),
         );
 
-        let typed = TypedProgram {
-            type_assignments: HashMap::new(),
-            widenings: Vec::new(),
-            mono_actors: HashMap::new(),
-        };
-
-        let (call_ids, call_spans) = make_call_maps(&[(s1, c1), (s2, c2)]);
-        let resolved = ResolvedProgram {
-            consts: HashMap::new(),
-            params: HashMap::new(),
-            defines: HashMap::new(),
-            tasks: HashMap::new(),
-            buffers: HashMap::new(),
-            call_resolutions: {
-                let mut m = HashMap::new();
-                m.insert(c1, CallResolution::Actor);
-                m.insert(c2, CallResolution::Actor);
-                m
-            },
-            task_resolutions: HashMap::new(),
-            probes: Vec::new(),
-            call_ids,
-            call_spans,
-            def_ids: HashMap::new(),
-            task_ids: HashMap::new(),
-        };
-
-        let program = Program {
-            statements: vec![Statement {
-                kind: StatementKind::Task(TaskStmt {
-                    freq: 48000.0,
-                    freq_span: dummy_span(),
-                    name: Ident {
-                        name: "main".to_string(),
-                        span: dummy_span(),
-                    },
-                    body: TaskBody::Pipeline(PipelineBody {
-                        lines: vec![PipeExpr {
-                            source: PipeSource::ActorCall(ActorCall {
-                                name: Ident {
-                                    name: "src".to_string(),
-                                    span: s1,
-                                },
-                                type_args: Vec::new(),
-                                args: Vec::new(),
-                                shape_constraint: None,
-                                span: s1,
-                            }),
-                            elements: vec![PipeElem::ActorCall(ActorCall {
-                                name: Ident {
-                                    name: "sink".to_string(),
-                                    span: s2,
-                                },
-                                type_args: Vec::new(),
-                                args: Vec::new(),
-                                shape_constraint: None,
-                                span: s2,
-                            })],
-                            sink: None,
-                            span: span(0, 20),
-                        }],
-                        span: span(0, 20),
-                    }),
-                }),
-                span: span(0, 20),
-            }],
-            span: span(0, 20),
-        };
-
+        let typed = make_empty_typed();
+        let hir = make_hir_two_calls(
+            make_hir_actor_call("src", c1, s1),
+            make_hir_actor_call("sink", c2, s2),
+        );
+        let resolved = make_resolved_for_calls(&[(s1, c1), (s2, c2)]);
         let registry = Registry::empty();
 
         let mut engine = LowerEngine {
+            hir: &hir,
             resolved: &resolved,
             typed: &typed,
             registry: &registry,
@@ -809,7 +761,7 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        let cert = engine.verify_obligations(&program);
+        let cert = engine.verify_obligations();
         assert!(
             !cert.l1_type_consistency,
             "L1 should fail for mismatched types"
@@ -834,86 +786,25 @@ mod tests {
             make_concrete_meta("sink", PipitType::Float, PipitType::Void),
         );
 
-        let typed = TypedProgram {
-            type_assignments: HashMap::new(),
-            widenings: Vec::new(),
-            mono_actors: HashMap::new(),
-        };
-
-        let (call_ids, call_spans) = make_call_maps(&[(s1, c1), (s2, c2)]);
-        let resolved = ResolvedProgram {
-            consts: HashMap::new(),
-            params: HashMap::new(),
-            defines: HashMap::new(),
-            tasks: HashMap::new(),
-            buffers: HashMap::new(),
-            call_resolutions: {
-                let mut m = HashMap::new();
-                m.insert(c1, CallResolution::Actor);
-                m.insert(c2, CallResolution::Actor);
-                m
-            },
-            task_resolutions: HashMap::new(),
-            probes: Vec::new(),
-            call_ids,
-            call_spans,
-            def_ids: HashMap::new(),
-            task_ids: HashMap::new(),
-        };
-
-        let program = Program {
-            statements: vec![Statement {
-                kind: StatementKind::Task(TaskStmt {
-                    freq: 48000.0,
-                    freq_span: dummy_span(),
-                    name: Ident {
-                        name: "main".to_string(),
-                        span: dummy_span(),
-                    },
-                    body: TaskBody::Pipeline(PipelineBody {
-                        lines: vec![PipeExpr {
-                            source: PipeSource::ActorCall(ActorCall {
-                                name: Ident {
-                                    name: "src".to_string(),
-                                    span: s1,
-                                },
-                                type_args: Vec::new(),
-                                args: Vec::new(),
-                                shape_constraint: None,
-                                span: s1,
-                            }),
-                            elements: vec![PipeElem::ActorCall(ActorCall {
-                                name: Ident {
-                                    name: "sink".to_string(),
-                                    span: s2,
-                                },
-                                type_args: Vec::new(),
-                                args: Vec::new(),
-                                shape_constraint: None,
-                                span: s2,
-                            })],
-                            sink: None,
-                            span: span(0, 20),
-                        }],
-                        span: span(0, 20),
-                    }),
-                }),
-                span: span(0, 20),
-            }],
-            span: span(0, 20),
-        };
-
+        let typed = make_empty_typed();
+        let hir = make_hir_two_calls(
+            make_hir_actor_call("src", c1, s1),
+            make_hir_actor_call("sink", c2, s2),
+        );
+        let resolved = make_resolved_for_calls(&[(s1, c1), (s2, c2)]);
         let registry = Registry::empty();
 
-        // Widening node covers the edge
+        // Widening node covers the edge (matched by CallId)
         let widening_nodes = vec![WideningNode {
             target_span: s2,
+            target_call_id: c2,
             from_type: PipitType::Int32,
             to_type: PipitType::Float,
             synthetic_name: "_widen_int32_to_float".to_string(),
         }];
 
         let mut engine = LowerEngine {
+            hir: &hir,
             resolved: &resolved,
             typed: &typed,
             registry: &registry,
@@ -922,7 +813,7 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        let cert = engine.verify_obligations(&program);
+        let cert = engine.verify_obligations();
         assert!(
             cert.l1_type_consistency,
             "L1 should pass when widening node covers the edge"
@@ -934,41 +825,23 @@ mod tests {
     #[test]
     fn l2_valid_widening_passes() {
         let s1 = span(0, 10);
+        let c1 = CallId(0);
         let concrete_actors = HashMap::new();
-        let typed = TypedProgram {
-            type_assignments: HashMap::new(),
-            widenings: Vec::new(),
-            mono_actors: HashMap::new(),
-        };
-        let resolved = ResolvedProgram {
-            consts: HashMap::new(),
-            params: HashMap::new(),
-            defines: HashMap::new(),
-            tasks: HashMap::new(),
-            buffers: HashMap::new(),
-            call_resolutions: HashMap::new(),
-            task_resolutions: HashMap::new(),
-            probes: Vec::new(),
-            call_ids: HashMap::new(),
-            call_spans: HashMap::new(),
-            def_ids: HashMap::new(),
-            task_ids: HashMap::new(),
-        };
+        let typed = make_empty_typed();
+        let hir = make_empty_hir();
+        let resolved = make_resolved_for_calls(&[]);
         let registry = Registry::empty();
 
         let widening_nodes = vec![WideningNode {
             target_span: s1,
+            target_call_id: c1,
             from_type: PipitType::Int32,
             to_type: PipitType::Float,
             synthetic_name: "_widen_int32_to_float".to_string(),
         }];
 
-        let empty_program = Program {
-            statements: Vec::new(),
-            span: dummy_span(),
-        };
-
         let mut engine = LowerEngine {
+            hir: &hir,
             resolved: &resolved,
             typed: &typed,
             registry: &registry,
@@ -977,48 +850,30 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        let cert = engine.verify_obligations(&empty_program);
+        let cert = engine.verify_obligations();
         assert!(cert.l2_widening_safety);
     }
 
     #[test]
     fn l2_cross_family_widening_fails() {
         let s1 = span(0, 10);
+        let c1 = CallId(0);
         let concrete_actors = HashMap::new();
-        let typed = TypedProgram {
-            type_assignments: HashMap::new(),
-            widenings: Vec::new(),
-            mono_actors: HashMap::new(),
-        };
-        let resolved = ResolvedProgram {
-            consts: HashMap::new(),
-            params: HashMap::new(),
-            defines: HashMap::new(),
-            tasks: HashMap::new(),
-            buffers: HashMap::new(),
-            call_resolutions: HashMap::new(),
-            task_resolutions: HashMap::new(),
-            probes: Vec::new(),
-            call_ids: HashMap::new(),
-            call_spans: HashMap::new(),
-            def_ids: HashMap::new(),
-            task_ids: HashMap::new(),
-        };
+        let typed = make_empty_typed();
+        let hir = make_empty_hir();
+        let resolved = make_resolved_for_calls(&[]);
         let registry = Registry::empty();
 
         let widening_nodes = vec![WideningNode {
             target_span: s1,
+            target_call_id: c1,
             from_type: PipitType::Float,
             to_type: PipitType::Cfloat,
             synthetic_name: "_widen_float_to_cfloat".to_string(),
         }];
 
-        let empty_program = Program {
-            statements: Vec::new(),
-            span: dummy_span(),
-        };
-
         let mut engine = LowerEngine {
+            hir: &hir,
             resolved: &resolved,
             typed: &typed,
             registry: &registry,
@@ -1027,7 +882,7 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        let cert = engine.verify_obligations(&empty_program);
+        let cert = engine.verify_obligations();
         assert!(!cert.l2_widening_safety);
         assert!(engine.diagnostics.iter().any(|d| d.message.contains("L2")));
     }
@@ -1045,69 +900,15 @@ mod tests {
             make_concrete_meta("scale", PipitType::Float, PipitType::Float),
         );
 
-        let typed = TypedProgram {
-            type_assignments: HashMap::new(),
-            widenings: Vec::new(),
-            mono_actors: HashMap::new(),
-        };
-
-        let (call_ids, call_spans) = make_call_maps(&[(s1, c1)]);
-        let resolved = ResolvedProgram {
-            consts: HashMap::new(),
-            params: HashMap::new(),
-            defines: HashMap::new(),
-            tasks: HashMap::new(),
-            buffers: HashMap::new(),
-            call_resolutions: {
-                let mut m = HashMap::new();
-                m.insert(c1, CallResolution::Actor);
-                m
-            },
-            task_resolutions: HashMap::new(),
-            probes: Vec::new(),
-            call_ids,
-            call_spans,
-            def_ids: HashMap::new(),
-            task_ids: HashMap::new(),
-        };
+        let typed = make_empty_typed();
+        let hir = make_hir_with_pipe(vec![make_hir_actor_call("scale", c1, s1)]);
+        let resolved = make_resolved_for_calls(&[(s1, c1)]);
 
         let mut registry = Registry::empty();
         registry.insert(make_polymorphic_meta("scale"));
 
-        let program = Program {
-            statements: vec![Statement {
-                kind: StatementKind::Task(TaskStmt {
-                    freq: 48000.0,
-                    freq_span: dummy_span(),
-                    name: Ident {
-                        name: "main".to_string(),
-                        span: dummy_span(),
-                    },
-                    body: TaskBody::Pipeline(PipelineBody {
-                        lines: vec![PipeExpr {
-                            source: PipeSource::ActorCall(ActorCall {
-                                name: Ident {
-                                    name: "scale".to_string(),
-                                    span: s1,
-                                },
-                                type_args: Vec::new(),
-                                args: Vec::new(),
-                                shape_constraint: None,
-                                span: s1,
-                            }),
-                            elements: Vec::new(),
-                            sink: None,
-                            span: s1,
-                        }],
-                        span: s1,
-                    }),
-                }),
-                span: s1,
-            }],
-            span: s1,
-        };
-
         let mut engine = LowerEngine {
+            hir: &hir,
             resolved: &resolved,
             typed: &typed,
             registry: &registry,
@@ -1116,7 +917,7 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        let cert = engine.verify_obligations(&program);
+        let cert = engine.verify_obligations();
         assert!(cert.l4_monomorphization_soundness);
     }
 
@@ -1129,69 +930,15 @@ mod tests {
         let mut concrete_actors = HashMap::new();
         concrete_actors.insert(c1, make_polymorphic_meta("scale"));
 
-        let typed = TypedProgram {
-            type_assignments: HashMap::new(),
-            widenings: Vec::new(),
-            mono_actors: HashMap::new(),
-        };
-
-        let (call_ids, call_spans) = make_call_maps(&[(s1, c1)]);
-        let resolved = ResolvedProgram {
-            consts: HashMap::new(),
-            params: HashMap::new(),
-            defines: HashMap::new(),
-            tasks: HashMap::new(),
-            buffers: HashMap::new(),
-            call_resolutions: {
-                let mut m = HashMap::new();
-                m.insert(c1, CallResolution::Actor);
-                m
-            },
-            task_resolutions: HashMap::new(),
-            probes: Vec::new(),
-            call_ids,
-            call_spans,
-            def_ids: HashMap::new(),
-            task_ids: HashMap::new(),
-        };
+        let typed = make_empty_typed();
+        let hir = make_hir_with_pipe(vec![make_hir_actor_call("scale", c1, s1)]);
+        let resolved = make_resolved_for_calls(&[(s1, c1)]);
 
         let mut registry = Registry::empty();
         registry.insert(make_polymorphic_meta("scale"));
 
-        let program = Program {
-            statements: vec![Statement {
-                kind: StatementKind::Task(TaskStmt {
-                    freq: 48000.0,
-                    freq_span: dummy_span(),
-                    name: Ident {
-                        name: "main".to_string(),
-                        span: dummy_span(),
-                    },
-                    body: TaskBody::Pipeline(PipelineBody {
-                        lines: vec![PipeExpr {
-                            source: PipeSource::ActorCall(ActorCall {
-                                name: Ident {
-                                    name: "scale".to_string(),
-                                    span: s1,
-                                },
-                                type_args: Vec::new(),
-                                args: Vec::new(),
-                                shape_constraint: None,
-                                span: s1,
-                            }),
-                            elements: Vec::new(),
-                            sink: None,
-                            span: s1,
-                        }],
-                        span: s1,
-                    }),
-                }),
-                span: s1,
-            }],
-            span: s1,
-        };
-
         let mut engine = LowerEngine {
+            hir: &hir,
             resolved: &resolved,
             typed: &typed,
             registry: &registry,
@@ -1200,7 +947,7 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        let cert = engine.verify_obligations(&program);
+        let cert = engine.verify_obligations();
         assert!(!cert.l4_monomorphization_soundness);
         assert!(engine.diagnostics.iter().any(|d| d.message.contains("L4")));
     }
@@ -1218,35 +965,13 @@ mod tests {
             make_concrete_meta("scale", PipitType::Float, PipitType::Float),
         );
 
-        let typed = TypedProgram {
-            type_assignments: HashMap::new(),
-            widenings: Vec::new(),
-            mono_actors: HashMap::new(),
-        };
-
-        let (call_ids, call_spans) = make_call_maps(&[(s1, c1)]);
-        let resolved = ResolvedProgram {
-            consts: HashMap::new(),
-            params: HashMap::new(),
-            defines: HashMap::new(),
-            tasks: HashMap::new(),
-            buffers: HashMap::new(),
-            call_resolutions: HashMap::new(),
-            task_resolutions: HashMap::new(),
-            probes: Vec::new(),
-            call_ids,
-            call_spans,
-            def_ids: HashMap::new(),
-            task_ids: HashMap::new(),
-        };
-
+        let typed = make_empty_typed();
+        let hir = make_empty_hir();
+        let resolved = make_resolved_for_calls(&[(s1, c1)]);
         let registry = Registry::empty();
-        let empty_program = Program {
-            statements: Vec::new(),
-            span: dummy_span(),
-        };
 
         let mut engine = LowerEngine {
+            hir: &hir,
             resolved: &resolved,
             typed: &typed,
             registry: &registry,
@@ -1255,7 +980,7 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        let cert = engine.verify_obligations(&empty_program);
+        let cert = engine.verify_obligations();
         assert!(cert.l5_no_fallback_typing);
     }
 
@@ -1267,35 +992,13 @@ mod tests {
         let mut concrete_actors = HashMap::new();
         concrete_actors.insert(c1, make_polymorphic_meta("scale")); // TypeParam, not concrete
 
-        let typed = TypedProgram {
-            type_assignments: HashMap::new(),
-            widenings: Vec::new(),
-            mono_actors: HashMap::new(),
-        };
-
-        let (call_ids, call_spans) = make_call_maps(&[(s1, c1)]);
-        let resolved = ResolvedProgram {
-            consts: HashMap::new(),
-            params: HashMap::new(),
-            defines: HashMap::new(),
-            tasks: HashMap::new(),
-            buffers: HashMap::new(),
-            call_resolutions: HashMap::new(),
-            task_resolutions: HashMap::new(),
-            probes: Vec::new(),
-            call_ids,
-            call_spans,
-            def_ids: HashMap::new(),
-            task_ids: HashMap::new(),
-        };
-
+        let typed = make_empty_typed();
+        let hir = make_empty_hir();
+        let resolved = make_resolved_for_calls(&[(s1, c1)]);
         let registry = Registry::empty();
-        let empty_program = Program {
-            statements: Vec::new(),
-            span: dummy_span(),
-        };
 
         let mut engine = LowerEngine {
+            hir: &hir,
             resolved: &resolved,
             typed: &typed,
             registry: &registry,
@@ -1304,7 +1007,7 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        let cert = engine.verify_obligations(&empty_program);
+        let cert = engine.verify_obligations();
         assert!(!cert.l5_no_fallback_typing);
         assert!(engine.diagnostics.iter().any(|d| d.message.contains("L5")));
     }
@@ -1341,6 +1044,7 @@ mod tests {
     fn widening_node_name_format() {
         let wn = WideningNode {
             target_span: span(10, 20),
+            target_call_id: CallId(0),
             from_type: PipitType::Int32,
             to_type: PipitType::Float,
             synthetic_name: format!("_widen_{}_to_{}", PipitType::Int32, PipitType::Float),
