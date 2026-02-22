@@ -1606,7 +1606,7 @@ mod tests {
             graph_result.diagnostics
         );
         let type_result =
-            crate::type_infer::type_infer(&program, &resolve_result.resolved, registry);
+            crate::type_infer::type_infer(&hir_program, &resolve_result.resolved, registry);
         let lower_result = crate::lower::lower_and_verify(
             &program,
             &resolve_result.resolved,
@@ -2350,9 +2350,16 @@ mod tests {
             resolve_result.diagnostics
         );
 
+        // Build HIR
+        let hir_program = crate::hir::build_hir(
+            &program,
+            &resolve_result.resolved,
+            &mut resolve_result.id_alloc,
+        );
+
         // Type inference
         let type_infer_result =
-            crate::type_infer::type_infer(&program, &resolve_result.resolved, registry);
+            crate::type_infer::type_infer(&hir_program, &resolve_result.resolved, registry);
         assert!(
             type_infer_result
                 .diagnostics
@@ -2378,12 +2385,6 @@ mod tests {
             lower_result.cert.all_pass(),
             "L1-L5 cert failed: {:?}",
             lower_result.cert
-        );
-
-        let hir_program = crate::hir::build_hir(
-            &program,
-            &resolve_result.resolved,
-            &mut resolve_result.id_alloc,
         );
         let graph_result =
             crate::graph::build_graph(&hir_program, &resolve_result.resolved, registry);

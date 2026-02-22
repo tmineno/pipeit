@@ -59,7 +59,12 @@ fn full_pipeline_cpp(source: &str, registry: &pcc::registry::Registry) -> String
         resolve_result.diagnostics
     );
 
-    let type_result = pcc::type_infer::type_infer(&program, &resolve_result.resolved, registry);
+    let hir = pcc::hir::build_hir(
+        &program,
+        &resolve_result.resolved,
+        &mut resolve_result.id_alloc,
+    );
+    let type_result = pcc::type_infer::type_infer(&hir, &resolve_result.resolved, registry);
     assert!(
         type_result
             .diagnostics

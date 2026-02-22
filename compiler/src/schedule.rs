@@ -511,7 +511,7 @@ mod tests {
             graph_result.diagnostics
         );
         let type_result =
-            crate::type_infer::type_infer(&program, &resolve_result.resolved, registry);
+            crate::type_infer::type_infer(&hir_program, &resolve_result.resolved, registry);
         let lower_result = crate::lower::lower_and_verify(
             &program,
             &resolve_result.resolved,
@@ -731,7 +731,7 @@ mod tests {
             graph_result.diagnostics
         );
         let type_result =
-            crate::type_infer::type_infer(&program, &resolve_result.resolved, registry);
+            crate::type_infer::type_infer(&hir_program, &resolve_result.resolved, registry);
         let lower_result = crate::lower::lower_and_verify(
             &program,
             &resolve_result.resolved,

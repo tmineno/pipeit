@@ -157,7 +157,7 @@ fn compile_full(source: &str, registry: &registry::Registry, opts: &codegen::Cod
     let graph_result = graph::build_graph(&hir_program, &resolve_result.resolved, registry);
     assert_no_errors("graph", &graph_result.diagnostics);
 
-    let type_result = type_infer::type_infer(ast, &resolve_result.resolved, registry);
+    let type_result = type_infer::type_infer(&hir_program, &resolve_result.resolved, registry);
     let lower_result =
         lower::lower_and_verify(ast, &resolve_result.resolved, &type_result.typed, registry);
     let thir = thir::build_thir_context(
@@ -243,7 +243,7 @@ fn bench_analyze_phase(c: &mut Criterion, source: &str, registry: &registry::Reg
             let mut rr = resolve::resolve(&ast, registry);
             let hir = hir::build_hir(&ast, &rr.resolved, &mut rr.id_alloc);
             let gr = graph::build_graph(&hir, &rr.resolved, registry);
-            let tr = type_infer::type_infer(&ast, &rr.resolved, registry);
+            let tr = type_infer::type_infer(&hir, &rr.resolved, registry);
             let lr = lower::lower_and_verify(&ast, &rr.resolved, &tr.typed, registry);
             (rr, hir, gr, tr, lr)
         },
@@ -273,7 +273,7 @@ fn bench_schedule_phase(c: &mut Criterion, source: &str, registry: &registry::Re
             let mut rr = resolve::resolve(&ast, registry);
             let hir = hir::build_hir(&ast, &rr.resolved, &mut rr.id_alloc);
             let gr = graph::build_graph(&hir, &rr.resolved, registry);
-            let tr = type_infer::type_infer(&ast, &rr.resolved, registry);
+            let tr = type_infer::type_infer(&hir, &rr.resolved, registry);
             let lr = lower::lower_and_verify(&ast, &rr.resolved, &tr.typed, registry);
             // Build ThirContext + analyze in setup (ThirContext rebuilt in run closure)
             let thir_setup = thir::build_thir_context(
@@ -323,7 +323,7 @@ fn bench_codegen_phase(
             let mut rr = resolve::resolve(&ast, registry);
             let hir = hir::build_hir(&ast, &rr.resolved, &mut rr.id_alloc);
             let gr = graph::build_graph(&hir, &rr.resolved, registry);
-            let tr = type_infer::type_infer(&ast, &rr.resolved, registry);
+            let tr = type_infer::type_infer(&hir, &rr.resolved, registry);
             let lr = lower::lower_and_verify(&ast, &rr.resolved, &tr.typed, registry);
             let thir_setup = thir::build_thir_context(
                 &hir,

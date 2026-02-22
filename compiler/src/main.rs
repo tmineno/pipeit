@@ -165,8 +165,7 @@ fn main() {
     }
 
     // ── Type inference & monomorphization ──
-    let type_infer_result =
-        pcc::type_infer::type_infer(&program, &resolve_result.resolved, &registry);
+    let type_infer_result = pcc::type_infer::type_infer(&hir, &resolve_result.resolved, &registry);
     let type_infer_has_errors =
         print_pipeline_diags(&cli.source, &source, &type_infer_result.diagnostics);
     if type_infer_has_errors {

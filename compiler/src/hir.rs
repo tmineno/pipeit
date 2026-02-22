@@ -428,10 +428,10 @@ impl<'a> HirBuilder<'a> {
     fn make_hir_actor_call(&mut self, call: &ActorCall, _depth: u32) -> HirActorCall {
         // Use the resolve-phase CallId if available; allocate fresh otherwise.
         //
-        // NOTE: CallId aliasing fix (fresh IDs per define expansion) is deferred
-        // to Step 2, when type_infer migrates to HIR. Until then, type_infer
-        // stores monomorphization results under resolve-phase CallIds — changing
-        // them here would break downstream lookup.
+        // NOTE: CallId aliasing fix (fresh IDs when depth > 0) is deferred to
+        // Step 3, when lower is also migrated to HIR. Until then, lower resolves
+        // CallIds via resolved.call_id_for_span(call.span) — changing IDs here
+        // would cause lower's type_instantiation lookup to miss.
         let call_id = if let Some(&id) = self.resolved.call_ids.get(&call.span) {
             id
         } else {
