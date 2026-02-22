@@ -125,9 +125,9 @@ format_si() {
 
 compute_staged_diff_id() {
     local diff_hash
-    diff_hash="$(git -C "$PROJECT_ROOT" diff --cached --binary -- . ':(exclude)doc/performance/*-characterize.md' | sha1sum | awk '{print $1}')"
+    diff_hash="$(git -C "$PROJECT_ROOT" diff --cached --binary -- . ':(exclude)doc/performance/*-bench.md' | sha1sum | awk '{print $1}')"
     if [ "$diff_hash" = "da39a3ee5e6b4b0d3255bfef95601890afd80709" ]; then
-        git -C "$PROJECT_ROOT" rev-parse --short HEAD
+        git -C "$PROJECT_ROOT" rev-parse --short=7 HEAD
     else
         echo "${diff_hash:0:12}"
     fi
@@ -258,17 +258,23 @@ if [ -z "$COMMIT_ID" ]; then
     if [ "$ID_SOURCE" = "staged-diff" ]; then
         COMMIT_ID="$(compute_staged_diff_id)"
     else
-        COMMIT_ID="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD)"
+        COMMIT_ID="$(git -C "$PROJECT_ROOT" rev-parse --short=7 HEAD)"
     fi
 fi
 
 mkdir -p "$REPORT_ROOT"
 
-REPORT_FILE="$REPORT_ROOT/${COMMIT_ID}-characterize.md"
-if [ -f "$REPORT_FILE" ] && [ "$SKIP_IF_EXISTS" = true ] && [ "$FORCE" = false ]; then
-    log "report already exists, skipping: $REPORT_FILE"
-    git -C "$PROJECT_ROOT" add "$REPORT_FILE"
-    exit 0
+REPORT_TIMESTAMP="$(date +%Y%m%dT%H%M%S)"
+REPORT_FILE="$REPORT_ROOT/${REPORT_TIMESTAMP}-${COMMIT_ID}-bench.md"
+
+# skip-if-exists: check for any existing report with the same commit ID
+if [ "$SKIP_IF_EXISTS" = true ] && [ "$FORCE" = false ]; then
+    existing="$(compgen -G "$REPORT_ROOT/*-${COMMIT_ID}-bench.md" 2>/dev/null | head -1 || true)"
+    if [ -n "$existing" ]; then
+        log "report already exists, skipping: $existing"
+        git -C "$PROJECT_ROOT" add "$existing"
+        exit 0
+    fi
 fi
 
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
@@ -438,13 +444,13 @@ add_metric "e2e.socket_1024_rx_samples_per_sec" \
 add_metric "e2e.socket_error_count" "$socket_error_count" "count"
 
 previous_report=""
-if compgen -G "$REPORT_ROOT/*-characterize.md" >/dev/null 2>&1; then
+if compgen -G "$REPORT_ROOT/*-bench.md" >/dev/null 2>&1; then
     while IFS= read -r candidate; do
         if [ "$candidate" != "$REPORT_FILE" ]; then
             previous_report="$candidate"
             break
         fi
-    done < <(ls -1t "$REPORT_ROOT"/*-characterize.md)
+    done < <(ls -1t "$REPORT_ROOT"/*-bench.md)
 fi
 
 declare -A prev_values
