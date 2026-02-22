@@ -19,9 +19,9 @@ use crate::ast::*;
 use crate::graph::*;
 use crate::id::CallId;
 use crate::lir::{
-    LirActorArg, LirActorFiring, LirBufferIo, LirConstValue, LirFiring, LirFiringGroup,
-    LirFiringKind, LirFusedChain, LirHoistedActor, LirProbeFiring, LirProgram, LirSubgraph,
-    LirTaskBody, LirTimerSpin,
+    LirActorArg, LirActorFiring, LirBufferIo, LirConstValue, LirCtrlSource, LirFiring,
+    LirFiringGroup, LirFiringKind, LirFusedChain, LirHoistedActor, LirModalBody, LirProbeFiring,
+    LirProgram, LirSubgraph, LirTaskBody, LirTimerSpin,
 };
 use crate::lower::LoweredProgram;
 use crate::program_query;
@@ -783,6 +783,39 @@ impl<'a> CodegenCtx<'a> {
                     indent,
                     tick_hoisted_actors,
                 );
+
+                // LIR path for modal dispatch
+                if let Some(lir) = self.lir {
+                    if let Some(lir_task) = lir.tasks.iter().find(|t| t.name == task_name) {
+                        if let LirTaskBody::Modal(modal) = &lir_task.body {
+                            self.emit_lir_ctrl_source_read(task_name, &modal.ctrl_source, indent);
+                            let _ = writeln!(
+                                self.out,
+                                "{}if (_active_mode != -1 && _ctrl != _active_mode) {{",
+                                indent
+                            );
+                            self.emit_lir_mode_feedback_resets(modal, &format!("{}    ", indent));
+                            let _ = writeln!(self.out, "{}}}", indent);
+                            let _ = writeln!(self.out, "{}_active_mode = _ctrl;", indent);
+
+                            let _ = writeln!(self.out, "{}switch (_ctrl) {{", indent);
+                            for (i, (_mode_name, mode_sg)) in modal.modes.iter().enumerate() {
+                                let _ = writeln!(self.out, "{}case {}: {{", indent, i);
+                                self.emit_lir_subgraph(
+                                    task_name,
+                                    mode_sg,
+                                    &format!("{}    ", indent),
+                                    tick_hoisted_actors,
+                                );
+                                let _ = writeln!(self.out, "{}    break;", indent);
+                                let _ = writeln!(self.out, "{}}}", indent);
+                            }
+                            let _ = writeln!(self.out, "{}default: break;", indent);
+                            let _ = writeln!(self.out, "{}}}", indent);
+                            return;
+                        }
+                    }
+                }
 
                 self.emit_ctrl_source_read(task_name, ctrl_sub, indent);
                 let _ = writeln!(
@@ -3717,6 +3750,74 @@ impl<'a> CodegenCtx<'a> {
         let _ = writeln!(self.out, "{}    fflush(_probe_output_file);", indent);
         let _ = writeln!(self.out, "{}}}", indent);
         let _ = writeln!(self.out, "{}#endif", indent);
+    }
+
+    /// Emit ctrl source read from LIR modal data.
+    fn emit_lir_ctrl_source_read(
+        &mut self,
+        task_name: &str,
+        ctrl_source: &LirCtrlSource,
+        indent: &str,
+    ) {
+        match ctrl_source {
+            LirCtrlSource::Param { name } => {
+                let _ = writeln!(
+                    self.out,
+                    "{}int32_t _ctrl = static_cast<int32_t>(_param_{}_val);",
+                    indent, name
+                );
+            }
+            LirCtrlSource::EdgeBuffer { var_name } => {
+                let _ = writeln!(self.out, "{}int32_t _ctrl = {};", indent, var_name);
+            }
+            LirCtrlSource::RingBuffer { name, reader_idx } => {
+                let _ = writeln!(self.out, "{}int32_t _ctrl_buf[1];", indent);
+                let _ = writeln!(
+                    self.out,
+                    "{}if (!_ringbuf_{}.read({}, _ctrl_buf, 1)) {{",
+                    indent, name, reader_idx
+                );
+                let _ = writeln!(
+                    self.out,
+                    "{}    std::fprintf(stderr, \"runtime error: task '{}' failed to read 1 token(s) from shared buffer '{}' for switch ctrl\\n\");",
+                    indent, task_name, name
+                );
+                let _ = writeln!(
+                    self.out,
+                    "{}    _exit_code.store(1, std::memory_order_release);",
+                    indent
+                );
+                let _ = writeln!(
+                    self.out,
+                    "{}    _stop.store(true, std::memory_order_release);",
+                    indent
+                );
+                let _ = writeln!(self.out, "{}    return;", indent);
+                let _ = writeln!(self.out, "{}}}", indent);
+                let _ = writeln!(self.out, "{}int32_t _ctrl = _ctrl_buf[0];", indent);
+            }
+        }
+    }
+
+    /// Emit mode feedback resets from LIR modal data.
+    fn emit_lir_mode_feedback_resets(&mut self, modal: &LirModalBody, indent: &str) {
+        for resets in &modal.mode_feedback_resets {
+            for reset in resets {
+                if reset.tokens <= 1 {
+                    let _ = writeln!(
+                        self.out,
+                        "{}{}[0] = {};",
+                        indent, reset.var_name, reset.init_val
+                    );
+                } else {
+                    let _ = writeln!(
+                        self.out,
+                        "{}for (int _fb_i = 0; _fb_i < {}; ++_fb_i) {}[_fb_i] = {};",
+                        indent, reset.tokens, reset.var_name, reset.init_val
+                    );
+                }
+            }
+        }
     }
 }
 
