@@ -261,6 +261,105 @@ pub struct LirProbe {
     pub name: String,
 }
 
+// ── Verification ─────────────────────────────────────────────────────────────
+
+/// Machine-checkable evidence for LIR postconditions (R1-R2).
+#[derive(Debug, Clone)]
+pub struct LirCert {
+    /// R1: Every scheduled task has a corresponding LIR task.
+    pub r1_all_tasks_present: bool,
+    /// R2: Every actor firing has a resolved (non-empty) C++ name.
+    pub r2_all_actors_resolved: bool,
+}
+
+impl crate::pass::StageCert for LirCert {
+    fn all_pass(&self) -> bool {
+        self.r1_all_tasks_present && self.r2_all_actors_resolved
+    }
+
+    fn obligations(&self) -> Vec<(&'static str, bool)> {
+        vec![
+            ("R1_all_tasks_present", self.r1_all_tasks_present),
+            ("R2_all_actors_resolved", self.r2_all_actors_resolved),
+        ]
+    }
+}
+
+/// Verify LIR postconditions.
+pub fn verify_lir(lir: &LirProgram, schedule: &ScheduledProgram) -> LirCert {
+    let r1 = verify_r1_all_tasks_present(lir, schedule);
+    let r2 = verify_r2_all_actors_resolved(lir);
+    LirCert {
+        r1_all_tasks_present: r1,
+        r2_all_actors_resolved: r2,
+    }
+}
+
+/// R1: Every key in `schedule.tasks` has a corresponding `LirTask`.
+fn verify_r1_all_tasks_present(lir: &LirProgram, schedule: &ScheduledProgram) -> bool {
+    schedule
+        .tasks
+        .keys()
+        .all(|name| lir.tasks.iter().any(|t| t.name == *name))
+}
+
+/// R2: Every `LirActorFiring` across the program has a non-empty `cpp_name`.
+fn verify_r2_all_actors_resolved(lir: &LirProgram) -> bool {
+    for task in &lir.tasks {
+        if !check_subgraph_actors(&task_subgraphs(task)) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Collect all subgraphs from a task body.
+fn task_subgraphs(task: &LirTask) -> Vec<&LirSubgraph> {
+    match &task.body {
+        LirTaskBody::Pipeline(sub) => vec![sub],
+        LirTaskBody::Modal(modal) => {
+            let mut subs = vec![&modal.control];
+            for (_, sub) in &modal.modes {
+                subs.push(sub);
+            }
+            subs
+        }
+    }
+}
+
+/// Check that all actor firings in the given subgraphs have non-empty cpp_name.
+fn check_subgraph_actors(subgraphs: &[&LirSubgraph]) -> bool {
+    for sub in subgraphs {
+        for group in &sub.firings {
+            match group {
+                LirFiringGroup::Single(firing) => {
+                    if !check_firing_actor(firing) {
+                        return false;
+                    }
+                }
+                LirFiringGroup::Fused(chain) => {
+                    for firing in &chain.body {
+                        if !check_firing_actor(firing) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Check a single firing: if it's an Actor, verify cpp_name is non-empty.
+fn check_firing_actor(firing: &LirFiring) -> bool {
+    if let LirFiringKind::Actor(actor) = &firing.kind {
+        if actor.cpp_name.is_empty() {
+            return false;
+        }
+    }
+    true
+}
+
 // ── Builder ────────────────────────────────────────────────────────────────
 
 /// Build a complete LIR program from upstream phase outputs.
@@ -2050,5 +2149,131 @@ mod tests {
         })];
         assert!(!is_actor_hoistable(&args, false));
         assert!(is_actor_hoistable(&args, true));
+    }
+
+    // ── verify_lir tests ────────────────────────────────────────────────
+
+    /// Build a full LIR + ScheduledProgram from source for verification.
+    fn build_lir_and_schedule(source: &str) -> (LirProgram, crate::schedule::ScheduledProgram) {
+        use std::path::PathBuf;
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let mut reg = crate::registry::Registry::new();
+        for header in &[
+            "runtime/libpipit/include/std_actors.h",
+            "runtime/libpipit/include/std_math.h",
+            "runtime/libpipit/include/std_sink.h",
+            "runtime/libpipit/include/std_source.h",
+            "examples/example_actors.h",
+        ] {
+            reg.load_header(&root.join(header))
+                .unwrap_or_else(|e| panic!("failed to load {header}: {e}"));
+        }
+        let parse_result = crate::parser::parse(source);
+        assert!(parse_result.errors.is_empty());
+        let program = parse_result.program.unwrap();
+        let mut resolve_result = crate::resolve::resolve(&program, &reg);
+        let hir = crate::hir::build_hir(
+            &program,
+            &resolve_result.resolved,
+            &mut resolve_result.id_alloc,
+        );
+        let graph_result = crate::graph::build_graph(&hir, &resolve_result.resolved, &reg);
+        let type_result = crate::type_infer::type_infer(&hir, &resolve_result.resolved, &reg);
+        let lower_result = crate::lower::lower_and_verify(
+            &hir,
+            &resolve_result.resolved,
+            &type_result.typed,
+            &reg,
+        );
+        let thir = crate::thir::build_thir_context(
+            &hir,
+            &resolve_result.resolved,
+            &type_result.typed,
+            &lower_result.lowered,
+            &reg,
+            &graph_result.graph,
+        );
+        let analysis = crate::analyze::analyze(&thir, &graph_result.graph);
+        let sched_result =
+            crate::schedule::schedule(&thir, &graph_result.graph, &analysis.analysis);
+        let lir = build_lir(
+            &thir,
+            &graph_result.graph,
+            &analysis.analysis,
+            &sched_result.schedule,
+        );
+        (lir, sched_result.schedule)
+    }
+
+    #[test]
+    fn verify_lir_passing() {
+        use crate::pass::StageCert;
+        let (lir, schedule) =
+            build_lir_and_schedule("clock 1kHz t {\n    constant(0.0) | stdout()\n}");
+        let cert = verify_lir(&lir, &schedule);
+        assert!(
+            cert.all_pass(),
+            "cert should pass: {:?}",
+            cert.obligations()
+        );
+    }
+
+    #[test]
+    fn verify_lir_r1_missing_task() {
+        let (lir, mut schedule) =
+            build_lir_and_schedule("clock 1kHz t {\n    constant(0.0) | stdout()\n}");
+        // Inject a phantom task into the schedule that has no LIR counterpart
+        schedule.tasks.insert(
+            "phantom".to_string(),
+            crate::schedule::TaskMeta {
+                schedule: crate::schedule::TaskSchedule::Pipeline(
+                    crate::schedule::SubgraphSchedule {
+                        firings: vec![],
+                        edge_buffers: std::collections::HashMap::new(),
+                    },
+                ),
+                k_factor: 1,
+                freq_hz: 1000.0,
+            },
+        );
+        let cert = verify_lir(&lir, &schedule);
+        assert!(!cert.r1_all_tasks_present, "R1 should fail");
+        assert!(cert.r2_all_actors_resolved, "R2 should still pass");
+    }
+
+    #[test]
+    fn verify_lir_r2_empty_cpp_name() {
+        let (mut lir, schedule) =
+            build_lir_and_schedule("clock 1kHz t {\n    constant(0.0) | stdout()\n}");
+        // Corrupt the first actor's cpp_name to empty
+        for task in &mut lir.tasks {
+            match &mut task.body {
+                LirTaskBody::Pipeline(sub) => {
+                    for group in &mut sub.firings {
+                        if let LirFiringGroup::Single(firing) = group {
+                            if let LirFiringKind::Actor(actor) = &mut firing.kind {
+                                actor.cpp_name = String::new();
+                                break;
+                            }
+                        }
+                        if let LirFiringGroup::Fused(chain) = group {
+                            for firing in &mut chain.body {
+                                if let LirFiringKind::Actor(actor) = &mut firing.kind {
+                                    actor.cpp_name = String::new();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                LirTaskBody::Modal(_) => {}
+            }
+        }
+        let cert = verify_lir(&lir, &schedule);
+        assert!(cert.r1_all_tasks_present, "R1 should still pass");
+        assert!(!cert.r2_all_actors_resolved, "R2 should fail");
     }
 }
