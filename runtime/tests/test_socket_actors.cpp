@@ -84,6 +84,9 @@ TEST(socket_write_sends_ppkt) {
     ASSERT_EQ(hdr.sample_rate_hz, 1000.0);
     ASSERT_EQ(hdr.iteration_index, 42);
     ASSERT_TRUE(hdr.flags & pipit::net::FLAG_FIRST_FRAME);
+    // Single-chunk frame: both FRAME_START and FRAME_END should be set
+    ASSERT_TRUE((hdr.flags & pipit::net::FLAG_FRAME_START) != 0);
+    ASSERT_TRUE((hdr.flags & pipit::net::FLAG_FRAME_END) != 0);
 
     // Validate payload
     float recv[4];
@@ -93,7 +96,7 @@ TEST(socket_write_sends_ppkt) {
     ASSERT_EQ(recv[2], 3.0f);
     ASSERT_EQ(recv[3], 4.0f);
 
-    // Second firing: FLAG_FIRST_FRAME should be cleared
+    // Second firing: FLAG_FIRST_FRAME should be cleared, frame flags still present
     pipit::detail::set_actor_iteration_index(43);
     rc = writer(samples, nullptr);
     ASSERT_EQ(rc, ACTOR_OK);
@@ -103,6 +106,8 @@ TEST(socket_write_sends_ppkt) {
     ASSERT_TRUE(n > 0);
     std::memcpy(&hdr, buf, sizeof(pipit::net::PpktHeader));
     ASSERT_TRUE((hdr.flags & pipit::net::FLAG_FIRST_FRAME) == 0);
+    ASSERT_TRUE((hdr.flags & pipit::net::FLAG_FRAME_START) != 0);
+    ASSERT_TRUE((hdr.flags & pipit::net::FLAG_FRAME_END) != 0);
     ASSERT_EQ(hdr.iteration_index, 43);
 }
 

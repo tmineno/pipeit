@@ -56,6 +56,7 @@ static uint16_t next_test_port() {
 
 // ── Helper: send a PPKT packet to localhost:port ─────────────────────────────
 
+/// Send a single-frame PPKT packet (both FRAME_START and FRAME_END set).
 static void send_ppkt(uint16_t port, uint16_t chan_id, const float *samples, uint32_t n,
                       double sample_rate_hz = 1000.0) {
     DatagramSender tx;
@@ -64,6 +65,7 @@ static void send_ppkt(uint16_t port, uint16_t chan_id, const float *samples, uin
     ASSERT_TRUE(tx.open(addr, strlen(addr)));
 
     PpktHeader hdr = ppkt_make_header(DTYPE_F32, chan_id);
+    hdr.flags = FLAG_FRAME_START | FLAG_FRAME_END;
     hdr.sample_count = n;
     hdr.payload_bytes = n * sizeof(float);
     hdr.sample_rate_hz = sample_rate_hz;
@@ -78,7 +80,7 @@ static void send_ppkt(uint16_t port, uint16_t chan_id, const float *samples, uin
     ASSERT_TRUE(tx.send(pkt, pkt_size));
 }
 
-/// Send a raw PPKT packet with arbitrary dtype payload.
+/// Send a raw PPKT packet with arbitrary dtype payload (single-frame).
 static void send_ppkt_raw(uint16_t port, uint16_t chan_id, DType dtype, const void *payload,
                           uint32_t sample_count, uint32_t payload_bytes,
                           double sample_rate_hz = 1000.0) {
@@ -88,6 +90,7 @@ static void send_ppkt_raw(uint16_t port, uint16_t chan_id, DType dtype, const vo
     ASSERT_TRUE(tx.open(addr, strlen(addr)));
 
     PpktHeader hdr = ppkt_make_header(dtype, chan_id);
+    hdr.flags = FLAG_FRAME_START | FLAG_FRAME_END;
     hdr.sample_count = sample_count;
     hdr.payload_bytes = payload_bytes;
     hdr.sample_rate_hz = sample_rate_hz;
@@ -98,6 +101,27 @@ static void send_ppkt_raw(uint16_t port, uint16_t chan_id, DType dtype, const vo
     uint8_t pkt[65536];
     std::memcpy(pkt, &hdr, sizeof(PpktHeader));
     std::memcpy(pkt + sizeof(PpktHeader), payload, payload_bytes);
+
+    ASSERT_TRUE(tx.send(pkt, pkt_size));
+}
+
+/// Send a PPKT chunk with full control over header fields.
+static void send_chunk(DatagramSender &tx, uint16_t chan_id, uint8_t flags, uint32_t sequence,
+                       uint64_t iteration_index, uint64_t timestamp_ns, const float *samples,
+                       uint32_t n, double sample_rate_hz = 1000.0) {
+    PpktHeader hdr = ppkt_make_header(DTYPE_F32, chan_id);
+    hdr.flags = flags;
+    hdr.sequence = sequence;
+    hdr.iteration_index = iteration_index;
+    hdr.timestamp_ns = timestamp_ns;
+    hdr.sample_count = n;
+    hdr.payload_bytes = n * sizeof(float);
+    hdr.sample_rate_hz = sample_rate_hz;
+
+    size_t pkt_size = sizeof(PpktHeader) + hdr.payload_bytes;
+    uint8_t pkt[65536];
+    std::memcpy(pkt, &hdr, sizeof(PpktHeader));
+    std::memcpy(pkt + sizeof(PpktHeader), samples, hdr.payload_bytes);
 
     ASSERT_TRUE(tx.send(pkt, pkt_size));
 }
@@ -438,6 +462,409 @@ TEST(receiver_clamps_samples_to_payload_bytes) {
     ASSERT_EQ(snaps[0].samples.size(), 2);
     ASSERT_EQ(snaps[0].samples[0], 111.0f);
     ASSERT_EQ(snaps[0].samples[1], -222.0f);
+
+    rx.stop();
+}
+
+// ── Strict frame integrity tests ─────────────────────────────────────────────
+
+TEST(frame_complete_single_chunk_accepted) {
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(1024);
+    ASSERT_TRUE(rx.start(port));
+    usleep(5000);
+
+    float samples[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    send_ppkt(port, 0, samples, 4);
+
+    usleep(10000);
+
+    auto snaps = rx.snapshot(100);
+    ASSERT_EQ(snaps.size(), 1);
+    ASSERT_EQ(snaps[0].samples.size(), 4);
+    ASSERT_EQ(snaps[0].stats.accepted_frames, 1);
+    ASSERT_EQ(snaps[0].stats.dropped_frames, 0);
+
+    rx.stop();
+}
+
+TEST(frame_complete_multi_chunk_accepted) {
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(1024);
+    ASSERT_TRUE(rx.start(port));
+    usleep(5000);
+
+    DatagramSender tx;
+    char addr[32];
+    snprintf(addr, sizeof(addr), "localhost:%u", port);
+    ASSERT_TRUE(tx.open(addr, strlen(addr)));
+
+    uint64_t ts = pipit_now_ns();
+
+    // 3-chunk frame: [1,2], [3,4], [5,6]
+    float c1[2] = {1.0f, 2.0f};
+    float c2[2] = {3.0f, 4.0f};
+    float c3[2] = {5.0f, 6.0f};
+
+    send_chunk(tx, 0, FLAG_FRAME_START, 0, 0, ts, c1, 2);
+    usleep(500);
+    send_chunk(tx, 0, 0, 1, 2, ts, c2, 2);
+    usleep(500);
+    send_chunk(tx, 0, FLAG_FRAME_END, 2, 4, ts, c3, 2);
+
+    usleep(10000);
+
+    auto snaps = rx.snapshot(100);
+    ASSERT_EQ(snaps.size(), 1);
+    ASSERT_EQ(snaps[0].samples.size(), 6);
+    ASSERT_EQ(snaps[0].samples[0], 1.0f);
+    ASSERT_EQ(snaps[0].samples[5], 6.0f);
+    ASSERT_EQ(snaps[0].stats.accepted_frames, 1);
+    ASSERT_EQ(snaps[0].stats.dropped_frames, 0);
+
+    rx.stop();
+}
+
+TEST(frame_dropped_missing_middle_chunk) {
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(1024);
+    ASSERT_TRUE(rx.start(port));
+    usleep(5000);
+
+    DatagramSender tx;
+    char addr[32];
+    snprintf(addr, sizeof(addr), "localhost:%u", port);
+    ASSERT_TRUE(tx.open(addr, strlen(addr)));
+
+    uint64_t ts = pipit_now_ns();
+
+    // Send start chunk (seq=0), skip middle (seq=1), send end chunk (seq=2)
+    float c1[2] = {1.0f, 2.0f};
+    float c3[2] = {5.0f, 6.0f};
+
+    send_chunk(tx, 0, FLAG_FRAME_START, 0, 0, ts, c1, 2);
+    usleep(500);
+    // Skip seq=1
+    send_chunk(tx, 0, FLAG_FRAME_END, 2, 4, ts, c3, 2);
+
+    usleep(10000);
+
+    auto snaps = rx.snapshot(100);
+    ASSERT_EQ(snaps.size(), 1);
+    ASSERT_EQ(snaps[0].samples.size(), 0); // nothing committed
+    ASSERT_EQ(snaps[0].stats.accepted_frames, 0);
+    ASSERT_EQ(snaps[0].stats.dropped_frames, 1);
+    ASSERT_EQ(snaps[0].stats.drop_seq_gap, 1);
+
+    rx.stop();
+}
+
+TEST(frame_dropped_missing_end) {
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(1024);
+    ASSERT_TRUE(rx.start(port));
+    usleep(5000);
+
+    DatagramSender tx;
+    char addr[32];
+    snprintf(addr, sizeof(addr), "localhost:%u", port);
+    ASSERT_TRUE(tx.open(addr, strlen(addr)));
+
+    uint64_t ts1 = 100000;
+    uint64_t ts2 = 200000;
+
+    // First frame: start but no end
+    float c1[2] = {1.0f, 2.0f};
+    send_chunk(tx, 0, FLAG_FRAME_START, 0, 0, ts1, c1, 2);
+    usleep(500);
+
+    // Second frame starts → first frame dropped (boundary)
+    float c2[2] = {3.0f, 4.0f};
+    send_chunk(tx, 0, FLAG_FRAME_START | FLAG_FRAME_END, 1, 0, ts2, c2, 2);
+
+    usleep(10000);
+
+    auto snaps = rx.snapshot(100);
+    ASSERT_EQ(snaps.size(), 1);
+    // Only second frame committed
+    ASSERT_EQ(snaps[0].samples.size(), 2);
+    ASSERT_EQ(snaps[0].samples[0], 3.0f);
+    ASSERT_EQ(snaps[0].stats.accepted_frames, 1);
+    ASSERT_EQ(snaps[0].stats.dropped_frames, 1);
+    ASSERT_EQ(snaps[0].stats.drop_boundary, 1);
+
+    rx.stop();
+}
+
+TEST(frame_dropped_end_without_start) {
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(1024);
+    ASSERT_TRUE(rx.start(port));
+    usleep(5000);
+
+    DatagramSender tx;
+    char addr[32];
+    snprintf(addr, sizeof(addr), "localhost:%u", port);
+    ASSERT_TRUE(tx.open(addr, strlen(addr)));
+
+    // Send end chunk without preceding start
+    float c1[2] = {1.0f, 2.0f};
+    send_chunk(tx, 0, FLAG_FRAME_END, 0, 0, 100000, c1, 2);
+
+    usleep(10000);
+
+    auto snaps = rx.snapshot(100);
+    ASSERT_EQ(snaps.size(), 1);
+    ASSERT_EQ(snaps[0].samples.size(), 0);
+    ASSERT_EQ(snaps[0].stats.dropped_frames, 1);
+    ASSERT_EQ(snaps[0].stats.drop_boundary, 1);
+
+    rx.stop();
+}
+
+TEST(frame_dropped_metadata_mismatch) {
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(1024);
+    ASSERT_TRUE(rx.start(port));
+    usleep(5000);
+
+    DatagramSender tx;
+    char addr[32];
+    snprintf(addr, sizeof(addr), "localhost:%u", port);
+    ASSERT_TRUE(tx.open(addr, strlen(addr)));
+
+    uint64_t ts = 100000;
+
+    // Start with sample_rate=1000
+    float c1[2] = {1.0f, 2.0f};
+    send_chunk(tx, 0, FLAG_FRAME_START, 0, 0, ts, c1, 2, 1000.0);
+    usleep(500);
+
+    // End with sample_rate=2000 → metadata mismatch
+    float c2[2] = {3.0f, 4.0f};
+    send_chunk(tx, 0, FLAG_FRAME_END, 1, 2, ts, c2, 2, 2000.0);
+
+    usleep(10000);
+
+    auto snaps = rx.snapshot(100);
+    ASSERT_EQ(snaps.size(), 1);
+    ASSERT_EQ(snaps[0].samples.size(), 0);
+    ASSERT_EQ(snaps[0].stats.dropped_frames, 1);
+    ASSERT_EQ(snaps[0].stats.drop_meta_mismatch, 1);
+
+    rx.stop();
+}
+
+TEST(frame_dropped_iteration_gap) {
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(1024);
+    ASSERT_TRUE(rx.start(port));
+    usleep(5000);
+
+    DatagramSender tx;
+    char addr[32];
+    snprintf(addr, sizeof(addr), "localhost:%u", port);
+    ASSERT_TRUE(tx.open(addr, strlen(addr)));
+
+    uint64_t ts = 100000;
+
+    // Start: 2 samples at iter=0 → next expected iter=2
+    float c1[2] = {1.0f, 2.0f};
+    send_chunk(tx, 0, FLAG_FRAME_START, 0, 0, ts, c1, 2);
+    usleep(500);
+
+    // End: sequence correct (1), but iteration_index=5 instead of expected 2
+    float c2[2] = {3.0f, 4.0f};
+    send_chunk(tx, 0, FLAG_FRAME_END, 1, 5, ts, c2, 2);
+
+    usleep(10000);
+
+    auto snaps = rx.snapshot(100);
+    ASSERT_EQ(snaps.size(), 1);
+    ASSERT_EQ(snaps[0].samples.size(), 0);
+    ASSERT_EQ(snaps[0].stats.dropped_frames, 1);
+    ASSERT_EQ(snaps[0].stats.drop_iter_gap, 1);
+
+    rx.stop();
+}
+
+TEST(frame_recovery_after_drop) {
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(1024);
+    ASSERT_TRUE(rx.start(port));
+    usleep(5000);
+
+    DatagramSender tx;
+    char addr[32];
+    snprintf(addr, sizeof(addr), "localhost:%u", port);
+    ASSERT_TRUE(tx.open(addr, strlen(addr)));
+
+    uint64_t ts1 = 100000;
+    uint64_t ts2 = 200000;
+
+    // First frame: start chunk, then skip to next frame (triggers boundary drop)
+    float bad[2] = {99.0f, 99.0f};
+    send_chunk(tx, 0, FLAG_FRAME_START, 0, 0, ts1, bad, 2);
+    usleep(500);
+
+    // Second frame: clean single-chunk frame
+    float good[3] = {10.0f, 20.0f, 30.0f};
+    send_chunk(tx, 0, FLAG_FRAME_START | FLAG_FRAME_END, 1, 0, ts2, good, 3);
+
+    usleep(10000);
+
+    auto snaps = rx.snapshot(100);
+    ASSERT_EQ(snaps.size(), 1);
+    // Only good frame committed
+    ASSERT_EQ(snaps[0].samples.size(), 3);
+    ASSERT_EQ(snaps[0].samples[0], 10.0f);
+    ASSERT_EQ(snaps[0].samples[1], 20.0f);
+    ASSERT_EQ(snaps[0].samples[2], 30.0f);
+    ASSERT_EQ(snaps[0].stats.accepted_frames, 1);
+    ASSERT_EQ(snaps[0].stats.dropped_frames, 1);
+
+    rx.stop();
+}
+
+// ── E2E pipeline tests (simulates socket_write → PpktReceiver) ──────────────
+
+TEST(e2e_single_sample_firings) {
+    // Simulates socket_write with N=1 (e.g. sine | socket_write at 10MHz)
+    // Multiple single-sample firings should all arrive phase-continuous.
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(1024);
+    ASSERT_TRUE(rx.start(port));
+    usleep(5000);
+
+    DatagramSender tx;
+    char addr[32];
+    snprintf(addr, sizeof(addr), "localhost:%u", port);
+    ASSERT_TRUE(tx.open(addr, strlen(addr)));
+
+    PpktHeader hdr = ppkt_make_header(DTYPE_F32, 0);
+    hdr.sample_rate_hz = 48000.0;
+    hdr.iteration_index = 0;
+
+    constexpr int NUM_FIRINGS = 100;
+    for (int i = 0; i < NUM_FIRINGS; i++) {
+        hdr.flags = (i == 0) ? FLAG_FIRST_FRAME : static_cast<uint8_t>(0);
+        hdr.timestamp_ns = 1000 + i;
+        hdr.iteration_index = static_cast<uint64_t>(i);
+
+        float sample = static_cast<float>(i);
+        ppkt_send_chunked(tx, hdr, &sample, 1);
+        usleep(200);
+    }
+
+    usleep(20000);
+
+    auto snaps = rx.snapshot(1024);
+    ASSERT_EQ(snaps.size(), 1);
+    ASSERT_EQ(snaps[0].samples.size(), NUM_FIRINGS);
+    ASSERT_EQ(snaps[0].stats.accepted_frames, NUM_FIRINGS);
+    ASSERT_EQ(snaps[0].stats.dropped_frames, 0);
+
+    // Verify phase continuity: all samples in order
+    for (int i = 0; i < NUM_FIRINGS; i++) {
+        ASSERT_EQ(snaps[0].samples[i], static_cast<float>(i));
+    }
+
+    rx.stop();
+}
+
+TEST(e2e_multi_sample_firings) {
+    // Simulates socket_write with N=4 (4 samples per firing, fits in one chunk)
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(4096);
+    ASSERT_TRUE(rx.start(port));
+    usleep(5000);
+
+    DatagramSender tx;
+    char addr[32];
+    snprintf(addr, sizeof(addr), "localhost:%u", port);
+    ASSERT_TRUE(tx.open(addr, strlen(addr)));
+
+    PpktHeader hdr = ppkt_make_header(DTYPE_F32, 0);
+    hdr.sample_rate_hz = 1000.0;
+
+    constexpr int NUM_FIRINGS = 50;
+    constexpr int SAMPLES_PER_FIRING = 4;
+
+    for (int f = 0; f < NUM_FIRINGS; f++) {
+        hdr.flags = (f == 0) ? FLAG_FIRST_FRAME : static_cast<uint8_t>(0);
+        hdr.timestamp_ns = 1000 + f;
+        hdr.iteration_index = static_cast<uint64_t>(f * SAMPLES_PER_FIRING);
+
+        float samples[SAMPLES_PER_FIRING];
+        for (int s = 0; s < SAMPLES_PER_FIRING; s++) {
+            samples[s] = static_cast<float>(f * SAMPLES_PER_FIRING + s);
+        }
+        ppkt_send_chunked(tx, hdr, samples, SAMPLES_PER_FIRING);
+        usleep(200);
+    }
+
+    usleep(20000);
+
+    auto snaps = rx.snapshot(4096);
+    ASSERT_EQ(snaps.size(), 1);
+    size_t expected_total = NUM_FIRINGS * SAMPLES_PER_FIRING;
+    ASSERT_EQ(snaps[0].samples.size(), expected_total);
+    ASSERT_EQ(snaps[0].stats.accepted_frames, NUM_FIRINGS);
+    ASSERT_EQ(snaps[0].stats.dropped_frames, 0);
+
+    for (size_t i = 0; i < expected_total; i++) {
+        ASSERT_EQ(snaps[0].samples[i], static_cast<float>(i));
+    }
+
+    rx.stop();
+}
+
+TEST(e2e_chunked_firings) {
+    // Simulates socket_write with N=20 and tiny MTU → 3 chunks per firing
+    // Verifies multi-chunk frames across multiple firings.
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(4096);
+    ASSERT_TRUE(rx.start(port));
+    usleep(5000);
+
+    DatagramSender tx;
+    char addr[32];
+    snprintf(addr, sizeof(addr), "localhost:%u", port);
+    ASSERT_TRUE(tx.open(addr, strlen(addr)));
+
+    PpktHeader hdr = ppkt_make_header(DTYPE_F32, 0);
+    hdr.sample_rate_hz = 1000.0;
+
+    constexpr int NUM_FIRINGS = 10;
+    constexpr int SAMPLES_PER_FIRING = 20;
+    // MTU = 48 + 32 = 80 bytes → max 8 f32 per chunk → 3 chunks per firing
+    constexpr size_t TINY_MTU = sizeof(PpktHeader) + 32;
+
+    for (int f = 0; f < NUM_FIRINGS; f++) {
+        hdr.flags = (f == 0) ? FLAG_FIRST_FRAME : static_cast<uint8_t>(0);
+        hdr.timestamp_ns = 1000 + f;
+        hdr.iteration_index = static_cast<uint64_t>(f * SAMPLES_PER_FIRING);
+
+        float samples[SAMPLES_PER_FIRING];
+        for (int s = 0; s < SAMPLES_PER_FIRING; s++) {
+            samples[s] = static_cast<float>(f * SAMPLES_PER_FIRING + s);
+        }
+        ppkt_send_chunked(tx, hdr, samples, SAMPLES_PER_FIRING, TINY_MTU);
+        usleep(1000); // more time for multi-chunk to arrive
+    }
+
+    usleep(30000);
+
+    auto snaps = rx.snapshot(4096);
+    ASSERT_EQ(snaps.size(), 1);
+    size_t expected_total = NUM_FIRINGS * SAMPLES_PER_FIRING;
+    ASSERT_EQ(snaps[0].samples.size(), expected_total);
+    ASSERT_EQ(snaps[0].stats.accepted_frames, NUM_FIRINGS);
+    ASSERT_EQ(snaps[0].stats.dropped_frames, 0);
+
+    for (size_t i = 0; i < expected_total; i++) {
+        ASSERT_EQ(snaps[0].samples[i], static_cast<float>(i));
+    }
 
     rx.stop();
 }

@@ -154,10 +154,23 @@ static float plot_height_for_channels(size_t channel_count) {
 
 static void render_channel_plot(const pipscope::ChannelSnapshot &channel, bool auto_y,
                                 float plot_height) {
-    char label[128];
-    snprintf(label, sizeof(label), "Channel %u  |  %.0f Hz  |  %lu pkts", channel.chan_id,
-             channel.sample_rate_hz, static_cast<unsigned long>(channel.packet_count));
+    char label[256];
+    snprintf(label, sizeof(label),
+             "Channel %u  |  %.0f Hz  |  %lu pkts  |  frames: %lu ok / %lu dropped",
+             channel.chan_id, channel.sample_rate_hz,
+             static_cast<unsigned long>(channel.packet_count),
+             static_cast<unsigned long>(channel.stats.accepted_frames),
+             static_cast<unsigned long>(channel.stats.dropped_frames));
     ImGui::Text("%s", label);
+
+    if (channel.stats.dropped_frames > 0) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "(seq:%lu iter:%lu bnd:%lu meta:%lu)",
+                           static_cast<unsigned long>(channel.stats.drop_seq_gap),
+                           static_cast<unsigned long>(channel.stats.drop_iter_gap),
+                           static_cast<unsigned long>(channel.stats.drop_boundary),
+                           static_cast<unsigned long>(channel.stats.drop_meta_mismatch));
+    }
 
     char plot_id[32];
     snprintf(plot_id, sizeof(plot_id), "##ch%u", channel.chan_id);

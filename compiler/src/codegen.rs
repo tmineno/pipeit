@@ -445,7 +445,8 @@ impl<'a> CodegenCtx<'a> {
             &meta.schedule,
             "        ",
         );
-        let indent = self.emit_task_iteration_setup(task_name, task_graph, meta.k_factor);
+        let indent =
+            self.emit_task_iteration_setup(task_name, task_graph, meta.k_factor, &meta.schedule);
         self.emit_task_schedule_dispatch(
             task_name,
             task_graph,
@@ -596,25 +597,65 @@ impl<'a> CodegenCtx<'a> {
         policy
     }
 
+    /// Compute the iteration stride for a task: total samples produced per PASS cycle.
+    ///
+    /// For pipeline tasks, this is the first actor's `out_rate × repetition_count`.
+    /// Falls back to 1 for modal tasks or when rates are unavailable.
+    fn iteration_stride(&self, task_graph: &TaskGraph, schedule: &TaskSchedule) -> u32 {
+        let (sub, sched) = match (task_graph, schedule) {
+            (TaskGraph::Pipeline(sub), TaskSchedule::Pipeline(sched)) => (sub, sched),
+            _ => return 1,
+        };
+        for firing in &sched.firings {
+            let node = match find_node(sub, firing.node_id) {
+                Some(n) => n,
+                None => continue,
+            };
+            if let NodeKind::Actor { .. } = &node.kind {
+                if let Some(rates) = self.analysis.node_port_rates.get(&node.id) {
+                    if let Some(r) = rates.out_rate {
+                        if r > 0 {
+                            return r * firing.repetition_count;
+                        }
+                    }
+                }
+            }
+        }
+        1
+    }
+
     fn emit_task_iteration_setup(
         &mut self,
         task_name: &str,
         task_graph: &TaskGraph,
         k_factor: u32,
+        schedule: &TaskSchedule,
     ) -> &'static str {
+        let stride = self.iteration_stride(task_graph, schedule);
+        let iter_advance = if stride <= 1 {
+            "_iter_idx++".to_string()
+        } else {
+            format!("_iter_idx += {}", stride)
+        };
         if k_factor > 1 {
             let _ = writeln!(
                 self.out,
                 "        for (int _k = 0; _k < {}; ++_k) {{",
                 k_factor
             );
-            self.out
-                .push_str("            pipit::detail::set_actor_iteration_index(_iter_idx++);\n");
+            let _ = writeln!(
+                self.out,
+                "            pipit::detail::set_actor_iteration_index({});",
+                iter_advance
+            );
             self.emit_param_reads(task_name, task_graph, "            ");
             "            "
         } else {
-            self.out
-                .push_str("        pipit::detail::set_actor_iteration_index(_iter_idx++);\n");
+            let _ = writeln!(
+                self.out,
+                "        pipit::detail::set_actor_iteration_index({});",
+                iter_advance
+            );
             self.emit_param_reads(task_name, task_graph, "        ");
             "        "
         }
@@ -3514,6 +3555,33 @@ mod tests {
         assert!(
             pos_const < pos_stdout,
             "constant must fire before stdout within K-loop"
+        );
+    }
+
+    #[test]
+    fn iteration_stride_block_size() {
+        let reg = test_registry();
+        // sine[256] produces 256 samples per firing → stride = 256
+        let cpp = codegen_ok(
+            "clock 1kHz t { sine<float>(100.0, 1.0)[256] | stdout() }",
+            &reg,
+        );
+        assert!(
+            cpp.contains("_iter_idx += 256"),
+            "should advance iteration index by block size 256: {}",
+            cpp
+        );
+    }
+
+    #[test]
+    fn iteration_stride_unit_block() {
+        // When block size is 1 (default), stride should be 1 → _iter_idx++
+        let reg = test_registry();
+        let cpp = codegen_ok("clock 1kHz t { constant(0.0) | stdout() }", &reg);
+        assert!(
+            cpp.contains("_iter_idx++"),
+            "unit block should use _iter_idx++: {}",
+            cpp
         );
     }
 
