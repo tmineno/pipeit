@@ -157,6 +157,110 @@ pub struct HirSetDirective {
     pub span: Span,
 }
 
+// ── HIR Verification ────────────────────────────────────────────────────────
+
+use std::collections::HashSet;
+
+/// Machine-checkable evidence for HIR postconditions (H1-H3).
+#[derive(Debug, Clone)]
+pub struct HirCert {
+    /// H1: No define calls remain after expansion.
+    pub h1_no_defines_remain: bool,
+    /// H2: All CallIds across the HIR tree are distinct (no aliasing).
+    pub h2_call_ids_unique: bool,
+    /// H3: Every HirTask has a valid TaskId in resolved.task_ids.
+    pub h3_tasks_have_ids: bool,
+}
+
+impl crate::pass::StageCert for HirCert {
+    fn all_pass(&self) -> bool {
+        self.h1_no_defines_remain && self.h2_call_ids_unique && self.h3_tasks_have_ids
+    }
+
+    fn obligations(&self) -> Vec<(&'static str, bool)> {
+        vec![
+            ("H1_no_defines_remain", self.h1_no_defines_remain),
+            ("H2_call_ids_unique", self.h2_call_ids_unique),
+            ("H3_tasks_have_ids", self.h3_tasks_have_ids),
+        ]
+    }
+}
+
+/// Verify HIR postconditions after build_hir completes.
+///
+/// Returns a pure HirCert — no diagnostics produced. The pipeline runner
+/// synthesizes error diagnostics from failed obligations.
+pub fn verify_hir(hir: &HirProgram, resolved: &ResolvedProgram) -> HirCert {
+    let h1 = verify_h1_no_defines(hir, resolved);
+    let h2 = verify_h2_call_ids_unique(hir);
+    let h3 = verify_h3_tasks_have_ids(hir, resolved);
+    HirCert {
+        h1_no_defines_remain: h1,
+        h2_call_ids_unique: h2,
+        h3_tasks_have_ids: h3,
+    }
+}
+
+/// H1: No actor call in the HIR tree references a define name.
+fn verify_h1_no_defines(hir: &HirProgram, resolved: &ResolvedProgram) -> bool {
+    let mut ok = true;
+    for task in &hir.tasks {
+        for_each_actor_call_in_task(task, &mut |call| {
+            if resolved.defines.contains_key(&call.name) {
+                ok = false;
+            }
+        });
+    }
+    ok
+}
+
+/// H2: All CallIds across the HIR tree are distinct.
+fn verify_h2_call_ids_unique(hir: &HirProgram) -> bool {
+    let mut seen = HashSet::new();
+    let mut ok = true;
+    for task in &hir.tasks {
+        for_each_actor_call_in_task(task, &mut |call| {
+            if !seen.insert(call.call_id) {
+                ok = false;
+            }
+        });
+    }
+    ok
+}
+
+/// H3: Every HirTask has a TaskId present in resolved.task_ids.
+fn verify_h3_tasks_have_ids(hir: &HirProgram, resolved: &ResolvedProgram) -> bool {
+    hir.tasks
+        .iter()
+        .all(|t| resolved.task_ids.contains_key(&t.name))
+}
+
+/// Walk all actor calls in a task body.
+fn for_each_actor_call_in_task(task: &HirTask, f: &mut impl FnMut(&HirActorCall)) {
+    match &task.body {
+        HirTaskBody::Pipeline(pipeline) => for_each_actor_call_in_pipeline(pipeline, f),
+        HirTaskBody::Modal(modal) => {
+            for_each_actor_call_in_pipeline(&modal.control, f);
+            for (_, mode_pipeline) in &modal.modes {
+                for_each_actor_call_in_pipeline(mode_pipeline, f);
+            }
+        }
+    }
+}
+
+fn for_each_actor_call_in_pipeline(pipeline: &HirPipeline, f: &mut impl FnMut(&HirActorCall)) {
+    for pipe in &pipeline.pipes {
+        if let HirPipeSource::ActorCall(call) = &pipe.source {
+            f(call);
+        }
+        for elem in &pipe.elements {
+            if let HirPipeElem::ActorCall(call) = elem {
+                f(call);
+            }
+        }
+    }
+}
+
 // ── Builder ─────────────────────────────────────────────────────────────────
 
 use crate::ast::{
@@ -565,6 +669,8 @@ fn substitute_arg(arg: &Arg, arg_map: &HashMap<String, Arg>) -> Arg {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chumsky::span::Span as _;
+
     use crate::parser;
     use crate::resolve;
 
@@ -709,5 +815,112 @@ mod tests {
         if let HirTaskBody::Pipeline(ref pipeline) = hir.tasks[0].body {
             check_no_defines(pipeline);
         }
+    }
+
+    // ── verify_hir tests ──────────────────────────────────────────────
+
+    #[test]
+    fn verify_hir_passing() {
+        let source = r#"
+            set freq = 48kHz
+            clock 48kHz main {
+                constant(1.0) | stdout()
+            }
+        "#;
+        let registry = crate::registry::Registry::empty();
+        let (hir, resolved) = build_hir_from_source(source, &registry);
+        let cert = verify_hir(&hir, &resolved);
+        assert!(crate::pass::StageCert::all_pass(&cert), "cert: {:?}", cert);
+    }
+
+    #[test]
+    fn verify_hir_h1_define_leak() {
+        // Use a source with a define, verify normal expansion passes H1
+        let source = "define amplify(g) {\n  scale(g)\n}\nclock 48kHz main {\n  constant(1.0) | amplify(2.0) | stdout()\n}\n";
+        let registry = crate::registry::Registry::empty();
+        let (mut hir, resolved) = build_hir_from_source(source, &registry);
+
+        // Normal build_hir expands defines, so H1 passes
+        assert!(verify_hir(&hir, &resolved).h1_no_defines_remain);
+
+        // Manually inject a call with a define name to simulate a bug
+        if let HirTaskBody::Pipeline(ref mut pipeline) = hir.tasks[0].body {
+            if let Some(pipe) = pipeline.pipes.first_mut() {
+                pipe.elements.push(HirPipeElem::ActorCall(HirActorCall {
+                    name: "amplify".to_string(),
+                    call_id: CallId(9999),
+                    call_span: crate::ast::Span::new((), 0..0),
+                    args: Vec::new(),
+                    type_args: Vec::new(),
+                    shape_constraint: None,
+                }));
+            }
+        }
+        assert!(!verify_hir(&hir, &resolved).h1_no_defines_remain);
+    }
+
+    #[test]
+    fn verify_hir_h2_duplicate_call_id() {
+        let source = r#"
+            set freq = 48kHz
+            clock 48kHz main {
+                constant(1.0) | stdout()
+            }
+        "#;
+        let registry = crate::registry::Registry::empty();
+        let (mut hir, resolved) = build_hir_from_source(source, &registry);
+
+        // Normal build passes
+        assert!(verify_hir(&hir, &resolved).h2_call_ids_unique);
+
+        // Inject a duplicate CallId
+        if let HirTaskBody::Pipeline(ref mut pipeline) = hir.tasks[0].body {
+            if let Some(pipe) = pipeline.pipes.first_mut() {
+                // Get the first call's ID
+                let existing_id = if let HirPipeSource::ActorCall(ref call) = pipe.source {
+                    call.call_id
+                } else {
+                    CallId(0)
+                };
+                // Add another call with the same ID
+                pipe.elements.push(HirPipeElem::ActorCall(HirActorCall {
+                    name: "dup".to_string(),
+                    call_id: existing_id,
+                    call_span: crate::ast::Span::new((), 0..0),
+                    args: Vec::new(),
+                    type_args: Vec::new(),
+                    shape_constraint: None,
+                }));
+            }
+        }
+        assert!(!verify_hir(&hir, &resolved).h2_call_ids_unique);
+    }
+
+    #[test]
+    fn verify_hir_h3_missing_task_id() {
+        let source = r#"
+            set freq = 48kHz
+            clock 48kHz main {
+                constant(1.0) | stdout()
+            }
+        "#;
+        let registry = crate::registry::Registry::empty();
+        let (mut hir, resolved) = build_hir_from_source(source, &registry);
+
+        // Normal build passes
+        assert!(verify_hir(&hir, &resolved).h3_tasks_have_ids);
+
+        // Add a task with a name not in resolved.task_ids
+        hir.tasks.push(HirTask {
+            name: "ghost_task".to_string(),
+            task_id: crate::id::TaskId(9999),
+            freq_hz: 1000.0,
+            freq_span: crate::ast::Span::new((), 0..0),
+            body: HirTaskBody::Pipeline(HirPipeline {
+                pipes: Vec::new(),
+                span: crate::ast::Span::new((), 0..0),
+            }),
+        });
+        assert!(!verify_hir(&hir, &resolved).h3_tasks_have_ids);
     }
 }
