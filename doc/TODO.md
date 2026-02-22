@@ -196,27 +196,15 @@
 
 **Goal**: Improve PDL ergonomics based on real usage experience. Design-first approach.
 
-> **Note**: Type inference, polymorphism, and safe widening have been moved to v0.3.0 and are specified in lang-spec §3.3–§3.5 and pcc-spec §9.2. This milestone now covers remaining language evolution items.
-
-- [ ] **Explicit type annotations for const/param** (future ergonomics):
-  - [ ] Support syntax: `const x: int32 = 42`, `param gain: double = 2.5`
-  - [ ] Type checking for array elements: `[1, 2.0]` → error (mixed types)
-
-- [ ] **Better type error messages**:
-  - [ ] Show expected vs actual types in context
-  - [ ] Suggest conversion actors with exact syntax
-  - [ ] Trace type through pipeline
-  - [ ] Highlight problematic pipe operator in source
-
-- [ ] **DSL survey and experience report**:
-  - [ ] Survey type systems in similar DSLs (GNU Radio, Faust, StreamIt)
-  - [ ] Collect real-world examples and pain points from v0.3.0 usage
+- [ ] (blank)
 
 ---
 
-## v0.4.x - Ecosystem & Quality of Life
+## v0.5.x - Ecosystem & Quality of Life
 
 **Goal**: Make Pipit easier to use and deploy in real projects.
+
+> **Status**: Deferred. All unchecked (`- [ ]`) items in this `v0.5.x` section are deferred.
 
 ### Standard Actor Library Expansion (migrated from former v0.3.0)
 
@@ -397,8 +385,8 @@
 - **New pipeline**: `parse → resolve → type_infer → lower_verify → graph → analyze → schedule → codegen`
 - **ADR numbering**: ADR-015 = spec alignment (from review/spec), ADR-016 = polymorphism & safe widening, ADR-017 = analysis-owned node port-rate resolution
 - **v0.3.2** applies v0.3.0 polymorphism to 11 std actors; begins modular header split (`std_math.h`)
-- **v0.4.x** now includes former v0.3.0 stdlib expansion backlog
-- **v0.4.0** covers remaining language evolution after v0.3.0 type system work
-- **v0.5.0+** deferred until core is stable and well-characterized
+- **v0.5.x** now includes former v0.3.0 stdlib expansion backlog
+- **v0.4.0** is intentionally left blank
+- **v0.5.x** open items are currently deferred
 - Performance characterization should inform optimization priorities (measure before optimizing)
 - Spec files renamed to versioned names (`pipit-lang-spec-v0.3.0.md`, `pcc-spec-v0.3.0.md`); `v0.2.0` specs are frozen from tag `v0.2.2`

@@ -21,11 +21,10 @@ Pipit は、共有メモリ上に SDF (Synchronous Dataflow) セマンティク�
 
 ### 1.3 ツールチェイン
 
-Pipit のソースファイル (`.pdl`) は、アクターメタデータマニフェスト (`actors.meta.json`) とともに専用コンパイラ `pcc` に入力され、C++ コードへ変換された後に `libpipit` とリンクして実行形式を生成する。マニフェストは `ACTOR` 宣言から actor-meta 生成ステップで作成されるか、`pcc` 実行時に自動生成される。
+Pipit のソースファイル (`.pdl`) は、専用コンパイラ `pcc` に入力され、C++ コードへ変換された後に `libpipit` とリンクして実行形式を生成する。アクターメタデータは `--actor-meta` で `actors.meta.json` を直接指定でき、未指定時は `-I` / `--include` / `--actor-path` で与えたヘッダを `pcc` が直接スキャンして取得する。
 
 ```
-source.pdl + actors.h
-  → actor-meta step → actors.meta.json
+source.pdl + (actors.meta.json or actors.h)
   → pcc → source_gen.cpp
   → g++/clang++ → executable
 ```
@@ -44,7 +43,7 @@ source.pdl + actors.h
 | **共有バッファ** | タスク間でデータを受け渡す非同期 FIFO。共有メモリプール上にリングバッファとして静的配置される |
 | **タップ** | パイプライン内のフォークノード。データをコピーして複数の下流に分配する |
 | **プローブ** | 非侵入的な観測点。リリースビルドではゼロコストで除去される |
-| **アクターマニフェスト** | `ACTOR` 宣言から生成されるメタデータファイル（`actors.meta.json`）。`pcc` が型・ポート・パラメータ情報を取得する一次入力 |
+| **アクターマニフェスト** | `ACTOR` 宣言由来のメタデータファイル（`actors.meta.json`）。`--actor-meta` 指定時に `pcc` が読み込む |
 
 ---
 
@@ -136,7 +135,7 @@ set  const  param  define  clock  mode  control  switch  default  delay
 
 ### 3.1 概要
 
-Pipit の型情報は、`ACTOR` 宣言から生成されたアクターマニフェスト (`actors.meta.json`) から取得される。`pcc` はマニフェストに含まれる `IN`/`OUT`/`PARAM`/`RUNTIME_PARAM` 情報を参照し、パイプライン接続の型整合性を静的に検証する。v0.3.0 以降、アクター呼び出しは以下の 2 形式を許容する。
+Pipit の型情報は、`--actor-meta` で指定されたマニフェスト、または `-I` / `--include` / `--actor-path` からのヘッダスキャンで取得されるアクターメタデータから構築される。`pcc` は `IN`/`OUT`/`PARAM`/`RUNTIME_PARAM` 情報を参照し、パイプライン接続の型整合性を静的に検証する。v0.3.0 以降、アクター呼び出しは以下の 2 形式を許容する。
 
 - 明示型引数付き: `actor<float>(...)`
 - 型引数省略: `actor(...)`（制約解決で一意に定まる場合のみ）
@@ -271,7 +270,7 @@ ACTOR(scale, IN(T, N), OUT(T, N), PARAM(T, gain) PARAM(int, N)) {
 }
 ```
 
-actor-meta 生成ステップは `template <typename T> ACTOR(scale, ...)` パターンを認識し、`T` が型パラメータであることをマニフェストへ記録する。モノモーフ化時に `pcc` は PDL の使用箇所から具体型を解決し、`IN(T, N)` → `IN(float, N)` 等の型代入を行う。C++ コンパイラは生成コード中の `actor_scale<float>` を通常のテンプレートインスタンス化として処理する。
+`pcc` は `template <typename T> ACTOR(scale, ...)` パターンを認識し、`T` を型パラメータとして扱う。モノモーフ化時に `pcc` は PDL の使用箇所から具体型を解決し、`IN(T, N)` → `IN(float, N)` 等の型代入を行う。C++ コンパイラは生成コード中の `actor_scale<float>` を通常のテンプレートインスタンス化として処理する。
 
 PDL 側では明示型引数または推論によって呼び出す。
 
@@ -287,9 +286,9 @@ clock 1kHz t {
 `ACTOR` マクロは以下を生成する。
 
 1. **ファンクタクラス**: `IN`/`OUT` インターフェースを持つ `noexcept` な `operator()` を備えるクラス
-2. **宣言情報**: `IN`/`OUT`/`PARAM`/`RUNTIME_PARAM` 記述。actor-meta 生成ステップがこれを `actors.meta.json` に変換する
+2. **宣言情報**: `IN`/`OUT`/`PARAM`/`RUNTIME_PARAM` 記述。`pcc` は `--actor-meta` の JSON、またはヘッダの直接スキャンから同等情報を取得する
 
-`pcc` は C++ の完全な構文解析を行わず、アクターマニフェストを一次入力として扱う。`-I`/`--actor-path` のみが与えられた場合は、実装は actor-meta 生成ステップを呼び出して同等のマニフェストを得てもよい（MAY）。
+`pcc` は C++ の完全な構文解析を行わず、ヘッダ中の `ACTOR` 宣言をテキストスキャンしてメタデータを構築する。`--actor-meta` 指定時は JSON マニフェストを優先入力として扱う。
 
 #### ファンクタ内で使用可能なシンボル
 
@@ -789,7 +788,7 @@ clock 10MHz rx { adc(0) | demod(256) -> bits }
 
 #### 制約
 
-- 引数はコンパイル時定数のみ（`param` による実行時値は不可）
+- 引数は `arg` 文法に従う（`value` / `$param` / `:tap` / `IDENT`）
 - 再帰的定義は禁止
 - `define` ブロック内でタップを定義できるが、そのスコープは展開先のタスク内に限定される
 

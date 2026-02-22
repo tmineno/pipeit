@@ -45,14 +45,6 @@ struct Cli {
     #[arg(long)]
     actor_meta: Option<PathBuf>,
 
-    /// Cache directory for generated manifests
-    #[arg(long, default_value = ".pcc-cache")]
-    meta_cache_dir: PathBuf,
-
-    /// Disable manifest cache
-    #[arg(long)]
-    no_meta_cache: bool,
-
     /// Output stage
     #[arg(long, value_enum, default_value_t = EmitStage::Exe)]
     emit: EmitStage,

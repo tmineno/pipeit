@@ -1856,7 +1856,28 @@ impl<'a> AnalyzeCtx<'a> {
             };
             let ctrl_buffer_name = match &modal.switch.source {
                 SwitchSource::Buffer(ident) => &ident.name,
-                SwitchSource::Param(_) => continue, // param-based ctrl: no buffer type check
+                SwitchSource::Param(ident) => {
+                    let Some(param_entry) = self.resolved.params.get(&ident.name) else {
+                        // Undefined param is already reported by resolve.
+                        continue;
+                    };
+                    let inferred = match &self.program.statements[param_entry.stmt_index].kind {
+                        StatementKind::Param(p) => infer_param_type(&p.value),
+                        _ => None,
+                    };
+                    if inferred != Some(ParamType::Int) {
+                        self.error_with_hint(
+                            ident.span,
+                            format!(
+                                "switch param '${}' in task '{}' has non-int32 default; \
+                                 switch ctrl must be int32",
+                                ident.name, task.name.name
+                            ),
+                            "use an integer default, e.g. `param sel = 0`".to_string(),
+                        );
+                    }
+                    continue;
+                }
             };
             let control_sub = match self.graph.tasks.get(&task.name.name) {
                 Some(TaskGraph::Modal { control, .. }) => control,
@@ -2933,6 +2954,60 @@ ACTOR(float_src, IN(void, 0), OUT(float, 1), PARAM(float, value)) {
         assert!(
             errors.iter().any(|d| d.message.contains("int32")),
             "should error about ctrl not being int32: {:#?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn switch_param_ctrl_type_int32_ok() {
+        let reg = test_registry();
+        let result = analyze_source(
+            concat!(
+                "param sel = 1\n",
+                "clock 1kHz t {\n",
+                "    mode a {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode b {\n        constant(0.0) | stdout()\n    }\n",
+                "    switch($sel, a, b)\n",
+                "}",
+            ),
+            &reg,
+        );
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "switch($param,...) with int param should pass: {:#?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn switch_param_ctrl_type_not_int32_error() {
+        let reg = test_registry();
+        let result = analyze_source(
+            concat!(
+                "param sel = 0.5\n",
+                "clock 1kHz t {\n",
+                "    mode a {\n        constant(0.0) | stdout()\n    }\n",
+                "    mode b {\n        constant(0.0) | stdout()\n    }\n",
+                "    switch($sel, a, b)\n",
+                "}",
+            ),
+            &reg,
+        );
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(
+            errors
+                .iter()
+                .any(|d| d.message.contains("switch param '$sel'") && d.message.contains("int32")),
+            "should error when switch($param,...) default is non-int: {:#?}",
             errors
         );
     }
