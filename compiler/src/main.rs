@@ -300,14 +300,9 @@ fn main() {
         &schedule_result.schedule,
     );
     let codegen_result = pcc::codegen::codegen_from_lir(
-        &program,
-        &resolve_result.resolved,
         &graph_result.graph,
-        &analysis_result.analysis,
         &schedule_result.schedule,
-        &registry,
         &codegen_options,
-        Some(&lower_result.lowered),
         &lir,
     );
 

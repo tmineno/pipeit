@@ -180,17 +180,8 @@ fn compile_full(source: &str, registry: &registry::Registry, opts: &codegen::Cod
         &analysis_result.analysis,
         &schedule_result.schedule,
     );
-    let generated = codegen::codegen_from_lir(
-        ast,
-        &resolve_result.resolved,
-        &graph_result.graph,
-        &analysis_result.analysis,
-        &schedule_result.schedule,
-        registry,
-        opts,
-        None,
-        &lir,
-    );
+    let generated =
+        codegen::codegen_from_lir(&graph_result.graph, &schedule_result.schedule, opts, &lir);
 
     black_box(generated);
 }
@@ -348,7 +339,7 @@ fn bench_codegen_phase(
             let lir_setup = lir::build_lir(&thir_setup, &gr.graph, &ar.analysis, &sr.schedule);
             (ast, rr, gr, ar, sr, hir, tr, lr, lir_setup)
         },
-        |(ast, rr, gr, ar, sr, hir, tr, lr, _lir_setup)| {
+        |(_ast, rr, gr, ar, sr, hir, tr, lr, _lir_setup)| {
             assert_no_errors("resolve", &rr.diagnostics);
             assert_no_errors("graph", &gr.diagnostics);
             assert_no_errors("analyze", &ar.diagnostics);
@@ -364,14 +355,9 @@ fn bench_codegen_phase(
             );
             let lir = lir::build_lir(&thir, &gr.graph, &ar.analysis, &sr.schedule);
             let result = codegen::codegen_from_lir(
-                black_box(&ast),
-                black_box(&rr.resolved),
                 black_box(&gr.graph),
-                black_box(&ar.analysis),
                 black_box(&sr.schedule),
-                registry,
                 opts,
-                None,
                 black_box(&lir),
             );
             black_box(&result);
