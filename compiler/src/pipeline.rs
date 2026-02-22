@@ -20,7 +20,7 @@ use crate::hir::HirProgram;
 use crate::id::IdAllocator;
 use crate::lir::LirProgram;
 use crate::lower::{Cert, LoweredProgram};
-use crate::pass::{descriptor, required_passes, PassId};
+use crate::pass::{descriptor, required_passes, PassId, StageCert};
 use crate::registry::Registry;
 use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
 use crate::schedule::ScheduledProgram;
@@ -240,7 +240,35 @@ pub fn run_pipeline(
                 );
                 let elapsed = t.elapsed();
                 state.upstream.hir = Some(hir);
-                finish_pass_no_diags(PassId::BuildHir, elapsed, verbose, &mut on_pass_complete);
+                // Verify HIR postconditions (H1-H3)
+                let hir_cert = crate::hir::verify_hir(
+                    state.upstream.hir.as_ref().unwrap(),
+                    state.upstream.resolved.as_ref().unwrap(),
+                );
+                if !hir_cert.all_pass() {
+                    let failed: Vec<_> = hir_cert
+                        .obligations()
+                        .iter()
+                        .filter(|(_, ok)| !ok)
+                        .map(|(name, _)| *name)
+                        .collect();
+                    let diags = vec![Diagnostic {
+                        level: DiagLevel::Error,
+                        message: format!("HIR verification failed: {}", failed.join(", ")),
+                        span: state.upstream.hir.as_ref().unwrap().program_span,
+                        hint: None,
+                    }];
+                    finish_pass(
+                        state,
+                        PassId::BuildHir,
+                        diags,
+                        elapsed,
+                        verbose,
+                        &mut on_pass_complete,
+                    )?;
+                } else {
+                    finish_pass_no_diags(PassId::BuildHir, elapsed, verbose, &mut on_pass_complete);
+                }
             }
             PassId::TypeInfer => {
                 let t = Instant::now();
@@ -363,8 +391,30 @@ fn run_thir_and_downstream(
             state.downstream.analysis.as_ref().unwrap(),
         );
         let elapsed = t.elapsed();
-        let diags = result.diagnostics;
+        let mut diags = result.diagnostics;
         state.downstream.schedule = Some(result.schedule);
+        // Verify schedule postconditions (S1-S2) — before finish_pass_core
+        // so cert failure diagnostics go through callback
+        let task_names: Vec<String> = thir.hir.tasks.iter().map(|t| t.name.clone()).collect();
+        let sched_cert = crate::schedule::verify_schedule(
+            state.downstream.schedule.as_ref().unwrap(),
+            state.upstream.graph.as_ref().unwrap(),
+            &task_names,
+        );
+        if !sched_cert.all_pass() {
+            let failed: Vec<_> = sched_cert
+                .obligations()
+                .iter()
+                .filter(|(_, ok)| !ok)
+                .map(|(name, _)| *name)
+                .collect();
+            diags.push(Diagnostic {
+                level: DiagLevel::Error,
+                message: format!("schedule verification failed: {}", failed.join(", ")),
+                span: thir.hir.program_span,
+                hint: None,
+            });
+        }
         finish_pass_core(
             &mut state.diagnostics,
             &mut state.has_error,
@@ -385,7 +435,36 @@ fn run_thir_and_downstream(
             state.downstream.schedule.as_ref().unwrap(),
         ));
         let elapsed = t.elapsed();
-        finish_pass_no_diags(PassId::BuildLir, elapsed, verbose, on_pass_complete);
+        // Verify LIR postconditions (R1-R2)
+        let lir_cert = crate::lir::verify_lir(
+            state.downstream.lir.as_ref().unwrap(),
+            state.downstream.schedule.as_ref().unwrap(),
+        );
+        if !lir_cert.all_pass() {
+            let failed: Vec<_> = lir_cert
+                .obligations()
+                .iter()
+                .filter(|(_, ok)| !ok)
+                .map(|(name, _)| *name)
+                .collect();
+            let diags = vec![Diagnostic {
+                level: DiagLevel::Error,
+                message: format!("LIR verification failed: {}", failed.join(", ")),
+                span: thir.hir.program_span,
+                hint: None,
+            }];
+            finish_pass_core(
+                &mut state.diagnostics,
+                &mut state.has_error,
+                PassId::BuildLir,
+                diags,
+                elapsed,
+                verbose,
+                on_pass_complete,
+            )?;
+        } else {
+            finish_pass_no_diags(PassId::BuildLir, elapsed, verbose, on_pass_complete);
+        }
     }
     // thir drops here — upstream borrows released
 
