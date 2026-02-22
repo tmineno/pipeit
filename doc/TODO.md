@@ -191,13 +191,17 @@
 - [x] Update all callers (main, tests, bench) and snapshots
 - [x] Regression tests: define polymorphism in two contexts, explicit type args, expanded calls in lower
 
-### Phase 3: Pass Manager + Artifact/Caching Layer
+### Phase 3: Pass Manager + Minimal Evaluation
 
-- [ ] Implement pass registry with declared inputs, outputs, invariants, and invalidation keys
-- [ ] Compute minimal pass subset for each `--emit` target (avoid unnecessary full pipeline execution)
-- [ ] Add artifact hashing and reusable cache for heavy phases (registry/type/analysis/schedule artifacts)
-- [ ] Integrate manifest/header provenance into cache keys and diagnostics
-- [ ] Keep deterministic ordering and reproducible outputs across machines/CI
+- [x] Implement pass registry with declared inputs, outputs, invariants, and invalidation keys (`pass.rs`: `PassId`, `ArtifactId`, `PassDescriptor`, dependency resolution)
+- [x] Compute minimal pass subset for each `--emit` target via `required_passes(terminal)` topological walk
+- [x] Pipeline orchestration module (`pipeline.rs`): `CompilationState` with borrow-split artifacts, `run_pipeline()` with `on_pass_complete` callback
+- [x] Migrate `main.rs` to delegate pass execution to `run_pipeline()` (parse + `--emit ast` remain outside runner)
+- [x] Keep deterministic ordering and reproducible outputs (all 7 snapshots byte-identical)
+- [x] Provenance type stubs (`Provenance` struct) for future cache-key use
+- [ ] Implement deterministic `invalidation_key` hashing (deferred to Phase 3b)
+- [ ] Add artifact hashing and reusable cache for heavy phases (deferred to Phase 3c)
+- [ ] Integrate manifest/header provenance into cache keys and diagnostics (type stubs placed; implementation deferred to Phase 3b/3c)
 
 ### Phase 4: Verification Framework Generalization
 
@@ -486,6 +490,8 @@
 - **New modules (Phase 2b)**: `lir.rs` (LIR types + builder: `build_lir(thir, graph, analysis, schedule) -> LirProgram`)
 - **ADR-025**: LIR backend IR design (self-contained backend IR, structured data over pre-formatted strings, ThirContext-based builder)
 - **v0.4.0 Phase 2c** complete — `type_infer` and `lower` migrated from raw AST to HIR; define body recursion eliminated (~70 LOC); widening matching upgraded from span-based to CallId-based; CallId aliasing fixed for define expansions; param type resolution bug fixed for define-expanded calls; 519 tests passing
+- **v0.4.0 Phase 3** (partial) — pass registry (`pass.rs`: 9 PassIds, 11 ArtifactIds, dependency resolution), pipeline orchestration (`pipeline.rs`: borrow-split `CompilationState`, `run_pipeline()` with `on_pass_complete` callback), `main.rs` migrated to `run_pipeline()` (parse/`--emit ast` remain outside runner); `--emit graph-dot` now skips type_infer/lower; 526 tests passing, byte-identical C++ output. Invalidation hashing and caching deferred to Phase 3b/3c.
+- **New modules (Phase 3)**: `pass.rs` (pass descriptors + dependency resolution), `pipeline.rs` (compilation state + pass orchestration + provenance stubs)
 - **v0.5.x** open items are currently deferred
 - Performance characterization should inform optimization priorities (measure before optimizing)
 - Spec files renamed to versioned names (`pipit-lang-spec-v0.3.0.md`, `pcc-spec-v0.3.0.md`); `v0.2.0` specs are frozen from tag `v0.2.2`
