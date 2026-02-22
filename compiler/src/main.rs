@@ -148,6 +148,22 @@ fn main() {
         );
     }
 
+    // ── HIR normalization ──
+    let hir = pcc::hir::build_hir(
+        &program,
+        &resolve_result.resolved,
+        &mut resolve_result.id_alloc,
+    );
+
+    if cli.verbose {
+        eprintln!(
+            "pcc: HIR normalized, {} tasks, {} consts, {} params",
+            hir.tasks.len(),
+            hir.consts.len(),
+            hir.params.len(),
+        );
+    }
+
     // ── Type inference & monomorphization ──
     let type_infer_result =
         pcc::type_infer::type_infer(&program, &resolve_result.resolved, &registry);
@@ -187,22 +203,6 @@ fn main() {
             "pcc: lowering complete, {} concrete actors, {} widening nodes, L1-L5 pass",
             lower_result.lowered.concrete_actors.len(),
             lower_result.lowered.widening_nodes.len(),
-        );
-    }
-
-    // ── HIR normalization ──
-    let hir = pcc::hir::build_hir(
-        &program,
-        &resolve_result.resolved,
-        &mut resolve_result.id_alloc,
-    );
-
-    if cli.verbose {
-        eprintln!(
-            "pcc: HIR normalized, {} tasks, {} consts, {} params",
-            hir.tasks.len(),
-            hir.consts.len(),
-            hir.params.len(),
         );
     }
 
