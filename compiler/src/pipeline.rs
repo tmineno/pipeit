@@ -1,0 +1,415 @@
+// pipeline.rs — Compilation state and pass orchestration
+//
+// Holds all pass artifacts in a borrow-split struct (upstream/downstream)
+// and runs the minimal set of passes for a given terminal PassId.
+//
+// Preconditions: Program and Registry must be set before calling run_pipeline.
+// Postconditions: all artifacts for required passes are populated, or has_error is set.
+// Failure modes: any pass emitting error-level diagnostics.
+// Side effects: calls on_pass_complete callback after each pass for immediate display.
+//
+// See ADR-020 for design rationale.
+
+use std::time::Instant;
+
+use crate::analyze::AnalyzedProgram;
+use crate::ast::Program;
+use crate::codegen::{CodegenOptions, GeneratedCode};
+use crate::graph::ProgramGraph;
+use crate::hir::HirProgram;
+use crate::id::IdAllocator;
+use crate::lir::LirProgram;
+use crate::lower::{Cert, LoweredProgram};
+use crate::pass::{descriptor, required_passes, PassId};
+use crate::registry::Registry;
+use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
+use crate::schedule::ScheduledProgram;
+use crate::type_infer::TypedProgram;
+
+// ── Artifact storage ───────────────────────────────────────────────────────
+
+/// Artifacts that ThirContext borrows — set before the thir-block.
+pub struct UpstreamArtifacts {
+    pub registry: Registry,
+    pub program: Program,
+    pub resolved: Option<ResolvedProgram>,
+    pub id_alloc: Option<IdAllocator>,
+    pub hir: Option<HirProgram>,
+    pub typed: Option<TypedProgram>,
+    pub lowered: Option<LoweredProgram>,
+    pub cert: Option<Cert>,
+    pub graph: Option<ProgramGraph>,
+}
+
+/// Artifacts set while ThirContext is alive — separate struct for borrow safety.
+pub struct DownstreamArtifacts {
+    pub analysis: Option<AnalyzedProgram>,
+    pub schedule: Option<ScheduledProgram>,
+    pub lir: Option<LirProgram>,
+    pub generated: Option<GeneratedCode>,
+}
+
+/// Provenance metadata for future cache-key use.
+/// Fields are NOT computed in this phase — struct is defined for API stability.
+/// Actual hash computation deferred to Phase 3b when caching is implemented.
+pub struct Provenance {
+    pub source_hash: [u8; 32],
+    pub registry_fingerprint: [u8; 32],
+    pub compiler_version: &'static str,
+}
+
+/// Holds all compilation artifacts and accumulated diagnostics.
+pub struct CompilationState {
+    pub upstream: UpstreamArtifacts,
+    pub downstream: DownstreamArtifacts,
+    pub diagnostics: Vec<Diagnostic>,
+    pub has_error: bool,
+    pub provenance: Option<Provenance>,
+}
+
+impl CompilationState {
+    pub fn new(program: Program, registry: Registry) -> Self {
+        Self {
+            upstream: UpstreamArtifacts {
+                registry,
+                program,
+                resolved: None,
+                id_alloc: None,
+                hir: None,
+                typed: None,
+                lowered: None,
+                cert: None,
+                graph: None,
+            },
+            downstream: DownstreamArtifacts {
+                analysis: None,
+                schedule: None,
+                lir: None,
+                generated: None,
+            },
+            diagnostics: Vec::new(),
+            has_error: false,
+            provenance: None,
+        }
+    }
+}
+
+// ── Error type ─────────────────────────────────────────────────────────────
+
+/// Pipeline execution failed due to error-level diagnostics in a pass.
+/// The specific diagnostics are available in `CompilationState.diagnostics`.
+#[derive(Debug)]
+pub struct PipelineError {
+    /// The pass that produced the error.
+    pub failing_pass: PassId,
+}
+
+// ── Helper: check diagnostics for errors ───────────────────────────────────
+
+fn has_error_diags(diags: &[Diagnostic]) -> bool {
+    diags.iter().any(|d| d.level == DiagLevel::Error)
+}
+
+/// Per-pass post-processing: callback, accumulate, verbose, error check.
+/// Takes split borrows to avoid conflicting with ThirContext borrows on upstream.
+/// Returns Err(()) if error diagnostics found.
+fn finish_pass_core(
+    all_diags: &mut Vec<Diagnostic>,
+    has_error: &mut bool,
+    pass_id: PassId,
+    diags: Vec<Diagnostic>,
+    elapsed: std::time::Duration,
+    verbose: bool,
+    on_pass_complete: &mut impl FnMut(PassId, &[Diagnostic]),
+) -> Result<(), PipelineError> {
+    on_pass_complete(pass_id, &diags);
+    let is_err = has_error_diags(&diags);
+    all_diags.extend(diags);
+    if verbose {
+        eprintln!(
+            "pcc: {} complete, {:.1}ms",
+            descriptor(pass_id).name,
+            elapsed.as_secs_f64() * 1000.0
+        );
+    }
+    if is_err {
+        *has_error = true;
+        return Err(PipelineError {
+            failing_pass: pass_id,
+        });
+    }
+    Ok(())
+}
+
+/// Convenience wrapper for finish_pass_core with full CompilationState access.
+fn finish_pass(
+    state: &mut CompilationState,
+    pass_id: PassId,
+    diags: Vec<Diagnostic>,
+    elapsed: std::time::Duration,
+    verbose: bool,
+    on_pass_complete: &mut impl FnMut(PassId, &[Diagnostic]),
+) -> Result<(), PipelineError> {
+    finish_pass_core(
+        &mut state.diagnostics,
+        &mut state.has_error,
+        pass_id,
+        diags,
+        elapsed,
+        verbose,
+        on_pass_complete,
+    )
+}
+
+/// Per-pass post-processing for passes that produce no diagnostics.
+fn finish_pass_no_diags(
+    pass_id: PassId,
+    elapsed: std::time::Duration,
+    verbose: bool,
+    on_pass_complete: &mut impl FnMut(PassId, &[Diagnostic]),
+) {
+    on_pass_complete(pass_id, &[]);
+    if verbose {
+        eprintln!(
+            "pcc: {} complete, {:.1}ms",
+            descriptor(pass_id).name,
+            elapsed.as_secs_f64() * 1000.0
+        );
+    }
+}
+
+// ── Pipeline runner ────────────────────────────────────────────────────────
+
+/// Run the minimal set of passes to produce `terminal`.
+///
+/// Per-pass sequence: execute → on_pass_complete(callback) → verbose → error check.
+///
+/// Preconditions: `state.upstream.program` and `state.upstream.registry` are set.
+/// Postconditions: artifacts for all passes in `required_passes(terminal)` are populated,
+///   or `state.has_error` is true.
+/// Failure modes: any pass producing error-level diagnostics; lower cert failure.
+/// Side effects: calls `on_pass_complete` after each pass for immediate diagnostic display.
+pub fn run_pipeline(
+    state: &mut CompilationState,
+    terminal: PassId,
+    codegen_options: &CodegenOptions,
+    verbose: bool,
+    mut on_pass_complete: impl FnMut(PassId, &[Diagnostic]),
+) -> Result<(), PipelineError> {
+    let passes = required_passes(terminal);
+
+    for &pass_id in &passes {
+        // ThirContext-dependent passes run in a scoped block
+        if matches!(
+            pass_id,
+            PassId::Analyze | PassId::Schedule | PassId::BuildLir | PassId::Codegen
+        ) {
+            return run_thir_and_downstream(
+                state,
+                &passes,
+                codegen_options,
+                verbose,
+                &mut on_pass_complete,
+            );
+        }
+
+        match pass_id {
+            PassId::Resolve => {
+                let t = Instant::now();
+                let result =
+                    crate::resolve::resolve(&state.upstream.program, &state.upstream.registry);
+                let elapsed = t.elapsed();
+                let diags = result.diagnostics;
+                state.upstream.resolved = Some(result.resolved);
+                state.upstream.id_alloc = Some(result.id_alloc);
+                finish_pass(
+                    state,
+                    PassId::Resolve,
+                    diags,
+                    elapsed,
+                    verbose,
+                    &mut on_pass_complete,
+                )?;
+            }
+            PassId::BuildHir => {
+                let t = Instant::now();
+                let hir = crate::hir::build_hir(
+                    &state.upstream.program,
+                    state.upstream.resolved.as_ref().unwrap(),
+                    state.upstream.id_alloc.as_mut().unwrap(),
+                );
+                let elapsed = t.elapsed();
+                state.upstream.hir = Some(hir);
+                finish_pass_no_diags(PassId::BuildHir, elapsed, verbose, &mut on_pass_complete);
+            }
+            PassId::TypeInfer => {
+                let t = Instant::now();
+                let result = crate::type_infer::type_infer(
+                    state.upstream.hir.as_ref().unwrap(),
+                    state.upstream.resolved.as_ref().unwrap(),
+                    &state.upstream.registry,
+                );
+                let elapsed = t.elapsed();
+                let diags = result.diagnostics;
+                state.upstream.typed = Some(result.typed);
+                finish_pass(
+                    state,
+                    PassId::TypeInfer,
+                    diags,
+                    elapsed,
+                    verbose,
+                    &mut on_pass_complete,
+                )?;
+            }
+            PassId::Lower => {
+                let t = Instant::now();
+                let result = crate::lower::lower_and_verify(
+                    state.upstream.hir.as_ref().unwrap(),
+                    state.upstream.resolved.as_ref().unwrap(),
+                    state.upstream.typed.as_ref().unwrap(),
+                    &state.upstream.registry,
+                );
+                let elapsed = t.elapsed();
+                let mut diags = result.diagnostics;
+                if !result.cert.all_pass() {
+                    diags.push(Diagnostic {
+                        level: DiagLevel::Error,
+                        message: "lowering verification failed (L1-L5 obligations not met)"
+                            .to_string(),
+                        span: state.upstream.hir.as_ref().unwrap().program_span,
+                        hint: None,
+                    });
+                }
+                state.upstream.cert = Some(result.cert);
+                state.upstream.lowered = Some(result.lowered);
+                finish_pass(
+                    state,
+                    PassId::Lower,
+                    diags,
+                    elapsed,
+                    verbose,
+                    &mut on_pass_complete,
+                )?;
+            }
+            PassId::BuildGraph => {
+                let t = Instant::now();
+                let result = crate::graph::build_graph(
+                    state.upstream.hir.as_ref().unwrap(),
+                    state.upstream.resolved.as_ref().unwrap(),
+                    &state.upstream.registry,
+                );
+                let elapsed = t.elapsed();
+                let diags = result.diagnostics;
+                state.upstream.graph = Some(result.graph);
+                finish_pass(
+                    state,
+                    PassId::BuildGraph,
+                    diags,
+                    elapsed,
+                    verbose,
+                    &mut on_pass_complete,
+                )?;
+            }
+            // ThirContext-dependent passes handled by run_thir_and_downstream
+            PassId::Analyze | PassId::Schedule | PassId::BuildLir | PassId::Codegen => {
+                unreachable!()
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── ThirContext scoped block ───────────────────────────────────────────────
+
+fn run_thir_and_downstream(
+    state: &mut CompilationState,
+    passes: &[PassId],
+    codegen_options: &CodegenOptions,
+    verbose: bool,
+    on_pass_complete: &mut impl FnMut(PassId, &[Diagnostic]),
+) -> Result<(), PipelineError> {
+    // Build ThirContext — borrows from upstream (immutable).
+    let thir = crate::thir::build_thir_context(
+        state.upstream.hir.as_ref().unwrap(),
+        state.upstream.resolved.as_ref().unwrap(),
+        state.upstream.typed.as_ref().unwrap(),
+        state.upstream.lowered.as_ref().unwrap(),
+        &state.upstream.registry,
+        state.upstream.graph.as_ref().unwrap(),
+    );
+
+    if passes.contains(&PassId::Analyze) {
+        let t = Instant::now();
+        let result = crate::analyze::analyze(&thir, state.upstream.graph.as_ref().unwrap());
+        let elapsed = t.elapsed();
+        let diags = result.diagnostics;
+        state.downstream.analysis = Some(result.analysis);
+        finish_pass_core(
+            &mut state.diagnostics,
+            &mut state.has_error,
+            PassId::Analyze,
+            diags,
+            elapsed,
+            verbose,
+            on_pass_complete,
+        )?;
+    }
+
+    if passes.contains(&PassId::Schedule) {
+        let t = Instant::now();
+        let result = crate::schedule::schedule(
+            &thir,
+            state.upstream.graph.as_ref().unwrap(),
+            state.downstream.analysis.as_ref().unwrap(),
+        );
+        let elapsed = t.elapsed();
+        let diags = result.diagnostics;
+        state.downstream.schedule = Some(result.schedule);
+        finish_pass_core(
+            &mut state.diagnostics,
+            &mut state.has_error,
+            PassId::Schedule,
+            diags,
+            elapsed,
+            verbose,
+            on_pass_complete,
+        )?;
+    }
+
+    if passes.contains(&PassId::BuildLir) {
+        let t = Instant::now();
+        state.downstream.lir = Some(crate::lir::build_lir(
+            &thir,
+            state.upstream.graph.as_ref().unwrap(),
+            state.downstream.analysis.as_ref().unwrap(),
+            state.downstream.schedule.as_ref().unwrap(),
+        ));
+        let elapsed = t.elapsed();
+        finish_pass_no_diags(PassId::BuildLir, elapsed, verbose, on_pass_complete);
+    }
+    // thir drops here — upstream borrows released
+
+    if passes.contains(&PassId::Codegen) {
+        let t = Instant::now();
+        let result = crate::codegen::codegen_from_lir(
+            state.upstream.graph.as_ref().unwrap(),
+            state.downstream.schedule.as_ref().unwrap(),
+            codegen_options,
+            state.downstream.lir.as_ref().unwrap(),
+        );
+        let elapsed = t.elapsed();
+        let diags = result.diagnostics;
+        state.downstream.generated = Some(result.generated);
+        finish_pass_core(
+            &mut state.diagnostics,
+            &mut state.has_error,
+            PassId::Codegen,
+            diags,
+            elapsed,
+            verbose,
+            on_pass_complete,
+        )?;
+    }
+
+    Ok(())
+}

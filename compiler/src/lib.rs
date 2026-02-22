@@ -15,6 +15,7 @@ pub mod lir;
 pub mod lower;
 pub mod parser;
 pub mod pass;
+pub mod pipeline;
 pub mod program_query;
 pub mod registry;
 pub mod resolve;
