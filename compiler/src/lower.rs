@@ -1051,4 +1051,61 @@ mod tests {
         };
         assert_eq!(wn.synthetic_name, "_widen_int32_to_float");
     }
+
+    // ── Regression tests for Phase 2c ──────────────────────────────────
+
+    fn lower_source(source: &str) -> LowerResult {
+        use crate::registry::Registry;
+        use crate::resolve::DiagLevel;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let mut registry = Registry::new();
+        registry
+            .load_header(&root.join("runtime/libpipit/include/std_actors.h"))
+            .expect("load std_actors.h");
+        registry
+            .load_header(&root.join("runtime/libpipit/include/std_math.h"))
+            .expect("load std_math.h");
+        let parse_result = crate::parser::parse(source);
+        assert!(
+            parse_result.errors.is_empty(),
+            "parse errors: {:?}",
+            parse_result.errors
+        );
+        let program = parse_result.program.expect("parse failed");
+        let mut rr = crate::resolve::resolve(&program, &registry);
+        assert!(
+            rr.diagnostics.iter().all(|d| d.level != DiagLevel::Error),
+            "resolve errors: {:#?}",
+            rr.diagnostics
+        );
+        let hir = crate::hir::build_hir(&program, &rr.resolved, &mut rr.id_alloc);
+        let tr = crate::type_infer::type_infer(&hir, &rr.resolved, &registry);
+        lower_and_verify(&hir, &rr.resolved, &tr.typed, &registry)
+    }
+
+    #[test]
+    fn define_expanded_calls_lowered() {
+        // Define-expanded actor calls are visible to lower (all HIR calls are actors).
+        // Verifies that concrete_actors is populated for expanded calls.
+        let result = lower_source(
+            r#"
+            define amplify() { mul(2.0) }
+            clock 1kHz t { constant(0.0) | amplify() | stdout() }
+            "#,
+        );
+        assert!(
+            result.cert.all_pass(),
+            "cert should pass, diagnostics: {:#?}",
+            result.diagnostics
+        );
+        // concrete_actors should include the mul from inside the define
+        assert!(
+            result.lowered.concrete_actors.len() >= 3,
+            "expected at least 3 concrete actors (constant, mul, stdout), got {}",
+            result.lowered.concrete_actors.len()
+        );
+    }
 }

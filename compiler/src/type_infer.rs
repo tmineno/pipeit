@@ -923,4 +923,50 @@ mod tests {
         assert_eq!(parse_type_name("cfloat"), Some(PipitType::Cfloat));
         assert_eq!(parse_type_name("unknown"), None);
     }
+
+    // ── Regression tests for Phase 2c ──────────────────────────────────
+
+    #[test]
+    fn define_poly_two_contexts() {
+        // Same polymorphic define expanded in float and double contexts.
+        // Verifies CallId aliasing fix: each expansion gets a fresh CallId,
+        // so monomorphization doesn't collide.
+        let result = infer_source(
+            r#"
+            define amplify() { mul(1.0) }
+            clock 1kHz a { constant<float>(0.0) | amplify() | stdout() }
+            clock 1kHz b { constant<double>(0.0) | amplify() | stdout() }
+            "#,
+        );
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(errors.is_empty(), "unexpected errors: {errors:#?}");
+        assert!(
+            result.typed.mono_actors.len() >= 2,
+            "expected at least 2 monomorphized actors, got {}",
+            result.typed.mono_actors.len()
+        );
+    }
+
+    #[test]
+    fn explicit_type_args_resolve_correctly() {
+        // Verifies that explicit type_args (with preserved spans from HIR) resolve
+        // correctly through the type inference pipeline.
+        let result =
+            infer_source("clock 1kHz t { constant<float>(0.0) | mul<float>(1.0) | stdout() }");
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(errors.is_empty(), "unexpected errors: {errors:#?}");
+        // Both constant and mul should be monomorphized to float
+        assert!(
+            result.typed.mono_actors.len() >= 2,
+            "expected at least 2 monomorphized actors"
+        );
+    }
 }
