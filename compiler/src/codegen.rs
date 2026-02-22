@@ -85,6 +85,39 @@ pub fn codegen_with_lowered(
     ctx.build_result()
 }
 
+/// Generate C++ code from a pre-built LIR program.
+///
+/// This is the preferred entry point: all type/rate/dimension resolution has
+/// already been performed by the LIR builder, so codegen is syntax-directed.
+/// The upstream phase outputs (graph, analysis, schedule) are still required
+/// for task iteration structure; a future refactor will eliminate those.
+#[allow(clippy::too_many_arguments)]
+pub fn codegen_from_lir(
+    program: &Program,
+    resolved: &ResolvedProgram,
+    graph: &ProgramGraph,
+    analysis: &AnalyzedProgram,
+    schedule: &ScheduledProgram,
+    registry: &Registry,
+    options: &CodegenOptions,
+    lowered: Option<&LoweredProgram>,
+    lir: &LirProgram,
+) -> CodegenResult {
+    let mut ctx = CodegenCtx::new(
+        program,
+        resolved,
+        graph,
+        analysis,
+        schedule,
+        registry,
+        options,
+        lowered,
+        Some(lir),
+    );
+    ctx.emit_all();
+    ctx.build_result()
+}
+
 // ── Internal context ────────────────────────────────────────────────────────
 
 struct CodegenCtx<'a> {
@@ -3883,7 +3916,7 @@ fn format_lir_actor_arg(arg: &LirActorArg) -> String {
     match arg {
         LirActorArg::Literal(s) => s.clone(),
         LirActorArg::ParamRef(name) => format!("_param_{}_val", name),
-        LirActorArg::ConstScalar(name) => format!("_const_{}", name),
+        LirActorArg::ConstScalar(literal) => literal.clone(),
         LirActorArg::ConstSpan { name, len } => {
             format!("std::span<const float>(_const_{}, {})", name, len)
         }
