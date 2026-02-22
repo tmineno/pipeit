@@ -1985,6 +1985,24 @@ impl<'a> CodegenCtx<'a> {
     // ── Runtime param reads ─────────────────────────────────────────────
 
     fn emit_param_reads(&mut self, task_name: &str, task_graph: &TaskGraph, indent: &str) {
+        if let Some(lir) = self.lir {
+            if let Some(lir_task) = lir.tasks.iter().find(|t| t.name == task_name) {
+                for param in &lir_task.used_params {
+                    let _ = writeln!(
+                        self.out,
+                        "{}_param_{}_read.store(_param_{}_write.load(std::memory_order_acquire), std::memory_order_release);",
+                        indent, param.name, param.name
+                    );
+                    let _ = writeln!(
+                        self.out,
+                        "{}{} _param_{}_val = _param_{}_read.load(std::memory_order_acquire);",
+                        indent, param.cpp_type, param.name, param.name
+                    );
+                }
+            }
+            return;
+        }
+
         let mut used_params: HashSet<String> = HashSet::new();
         self.collect_used_params(task_name, task_graph, &mut used_params);
 
@@ -2064,38 +2082,69 @@ impl<'a> CodegenCtx<'a> {
         self.out.push('\n');
 
         // Launch task threads
-        let mut task_names: Vec<&String> = self.schedule.tasks.keys().collect();
-        task_names.sort();
-        for (i, name) in task_names.iter().enumerate() {
-            let _ = writeln!(self.out, "    std::thread _t{}(task_{});", i, name);
-        }
-        // Release all task threads (synchronized timer start)
-        self.out
-            .push_str("    _start.store(true, std::memory_order_release);\n");
-        self.out.push('\n');
-
-        // Wait for stop signal (duration or SIGINT)
-        self.emit_duration_wait();
-
-        // Join all threads
-        for i in 0..task_names.len() {
-            let _ = writeln!(self.out, "    _t{}.join();", i);
-        }
-        self.out.push('\n');
-
-        if task_names.len() > 1 {
-            let _ = writeln!(
-                self.out,
-                "    if (_threads > 0 && _threads < {}) {{",
-                task_names.len()
-            );
-            let _ = writeln!(
-                self.out,
-                "        std::fprintf(stderr, \"startup warning: --threads is advisory (requested=%d, tasks={})\\\\n\", _threads);",
-                task_names.len()
-            );
-            self.out.push_str("    }\n");
+        if let Some(lir) = self.lir {
+            for (i, task) in lir.tasks.iter().enumerate() {
+                let _ = writeln!(self.out, "    std::thread _t{}(task_{});", i, task.name);
+            }
+            self.out
+                .push_str("    _start.store(true, std::memory_order_release);\n");
             self.out.push('\n');
+
+            self.emit_duration_wait();
+
+            for i in 0..lir.tasks.len() {
+                let _ = writeln!(self.out, "    _t{}.join();", i);
+            }
+            self.out.push('\n');
+
+            if lir.tasks.len() > 1 {
+                let _ = writeln!(
+                    self.out,
+                    "    if (_threads > 0 && _threads < {}) {{",
+                    lir.tasks.len()
+                );
+                let _ = writeln!(
+                    self.out,
+                    "        std::fprintf(stderr, \"startup warning: --threads is advisory (requested=%d, tasks={})\\\\n\", _threads);",
+                    lir.tasks.len()
+                );
+                self.out.push_str("    }\n");
+                self.out.push('\n');
+            }
+        } else {
+            let mut task_names: Vec<&String> = self.schedule.tasks.keys().collect();
+            task_names.sort();
+            for (i, name) in task_names.iter().enumerate() {
+                let _ = writeln!(self.out, "    std::thread _t{}(task_{});", i, name);
+            }
+            // Release all task threads (synchronized timer start)
+            self.out
+                .push_str("    _start.store(true, std::memory_order_release);\n");
+            self.out.push('\n');
+
+            // Wait for stop signal (duration or SIGINT)
+            self.emit_duration_wait();
+
+            // Join all threads
+            for i in 0..task_names.len() {
+                let _ = writeln!(self.out, "    _t{}.join();", i);
+            }
+            self.out.push('\n');
+
+            if task_names.len() > 1 {
+                let _ = writeln!(
+                    self.out,
+                    "    if (_threads > 0 && _threads < {}) {{",
+                    task_names.len()
+                );
+                let _ = writeln!(
+                    self.out,
+                    "        std::fprintf(stderr, \"startup warning: --threads is advisory (requested=%d, tasks={})\\\\n\", _threads);",
+                    task_names.len()
+                );
+                self.out.push_str("    }\n");
+                self.out.push('\n');
+            }
         }
 
         // Stats output
@@ -2224,41 +2273,64 @@ impl<'a> CodegenCtx<'a> {
         self.out
             .push_str("            auto val = arg.substr(eq + 1);\n");
 
-        let mut first = true;
-        let mut param_names: Vec<&String> = self.resolved.params.keys().collect();
-        param_names.sort();
-        for param_name in param_names {
-            let entry = &self.resolved.params[param_name];
-            let keyword = if first { "if" } else { "else if" };
-            first = false;
-            let stmt = &self.program.statements[entry.stmt_index];
-            let converter = if let StatementKind::Param(p) = &stmt.kind {
-                match self.param_cpp_type(param_name, &p.value) {
-                    "int" => "std::stoi",
-                    "double" => "std::stod",
-                    _ => "std::stof",
-                }
+        if let Some(lir) = self.lir {
+            for (i, p) in lir.params.iter().enumerate() {
+                let keyword = if i == 0 { "if" } else { "else if" };
+                let _ = writeln!(
+                    self.out,
+                    "            {} (name == \"{}\") _param_{}_write.store({}(val), std::memory_order_release);",
+                    keyword, p.name, p.name, p.cli_converter
+                );
+            }
+            if lir.params.is_empty() {
+                self.out.push_str(
+                    "            std::fprintf(stderr, \"startup error: --param is unsupported (no runtime params)\\\\n\");\n",
+                );
+                self.out.push_str("            return 2;\n");
             } else {
-                "std::stof"
-            };
-            let _ = writeln!(
-                self.out,
-                "            {} (name == \"{}\") _param_{}_write.store({}(val), std::memory_order_release);",
-                keyword, param_name, param_name, converter
-            );
-        }
-
-        if self.resolved.params.is_empty() {
-            self.out.push_str(
-                "            std::fprintf(stderr, \"startup error: --param is unsupported (no runtime params)\\\\n\");\n",
-            );
-            self.out.push_str("            return 2;\n");
+                self.out.push_str("            else {\n");
+                self.out
+                    .push_str("                std::fprintf(stderr, \"startup error: unknown param '%s'\\\\n\", name.c_str());\n");
+                self.out.push_str("                return 2;\n");
+                self.out.push_str("            }\n");
+            }
         } else {
-            self.out.push_str("            else {\n");
-            self.out
-                .push_str("                std::fprintf(stderr, \"startup error: unknown param '%s'\\\\n\", name.c_str());\n");
-            self.out.push_str("                return 2;\n");
-            self.out.push_str("            }\n");
+            let mut first = true;
+            let mut param_names: Vec<&String> = self.resolved.params.keys().collect();
+            param_names.sort();
+            for param_name in param_names {
+                let entry = &self.resolved.params[param_name];
+                let keyword = if first { "if" } else { "else if" };
+                first = false;
+                let stmt = &self.program.statements[entry.stmt_index];
+                let converter = if let StatementKind::Param(p) = &stmt.kind {
+                    match self.param_cpp_type(param_name, &p.value) {
+                        "int" => "std::stoi",
+                        "double" => "std::stod",
+                        _ => "std::stof",
+                    }
+                } else {
+                    "std::stof"
+                };
+                let _ = writeln!(
+                    self.out,
+                    "            {} (name == \"{}\") _param_{}_write.store({}(val), std::memory_order_release);",
+                    keyword, param_name, param_name, converter
+                );
+            }
+
+            if self.resolved.params.is_empty() {
+                self.out.push_str(
+                    "            std::fprintf(stderr, \"startup error: --param is unsupported (no runtime params)\\\\n\");\n",
+                );
+                self.out.push_str("            return 2;\n");
+            } else {
+                self.out.push_str("            else {\n");
+                self.out
+                    .push_str("                std::fprintf(stderr, \"startup error: unknown param '%s'\\\\n\", name.c_str());\n");
+                self.out.push_str("                return 2;\n");
+                self.out.push_str("            }\n");
+            }
         }
 
         self.out.push_str("            continue;\n");
@@ -2338,6 +2410,59 @@ impl<'a> CodegenCtx<'a> {
     }
 
     fn emit_probe_initialization(&mut self) {
+        if let Some(lir) = self.lir {
+            if self.options.release || lir.probes.is_empty() {
+                return;
+            }
+
+            self.out.push_str("    // Probe initialization\n");
+            self.out.push_str("    #ifndef NDEBUG\n");
+            self.out.push_str(
+                "    if (!_enabled_probes.empty() || _probe_output != \"/dev/stderr\") {\n",
+            );
+
+            self.out
+                .push_str("        std::unordered_set<std::string> _valid_probes = {");
+            for (i, probe) in lir.probes.iter().enumerate() {
+                if i > 0 {
+                    self.out.push_str(", ");
+                }
+                let _ = write!(self.out, "\"{}\"", probe.name);
+            }
+            self.out.push_str("};\n");
+
+            self.out
+                .push_str("        for (const auto& name : _enabled_probes) {\n");
+            self.out
+                .push_str("            if (_valid_probes.find(name) == _valid_probes.end()) {\n");
+            self.out.push_str("                std::fprintf(stderr, \"startup error: unknown probe '%s'\\\\n\", name.c_str());\n");
+            self.out.push_str("                return 2;\n");
+            self.out.push_str("            }\n");
+
+            for probe in &lir.probes {
+                let _ = writeln!(
+                    self.out,
+                    "            if (name == \"{}\") _probe_{}_enabled = true;",
+                    probe.name, probe.name
+                );
+            }
+
+            self.out.push_str("        }\n");
+            self.out.push_str(
+                "        _probe_output_file = std::fopen(_probe_output.c_str(), \"w\");\n",
+            );
+            self.out.push_str("        if (!_probe_output_file) {\n");
+            self.out.push_str("                std::fprintf(stderr, \"startup error: failed to open probe output file '%s': %s\\\\n\",\n");
+            self.out.push_str(
+                "                            _probe_output.c_str(), std::strerror(errno));\n",
+            );
+            self.out.push_str("                return 2;\n");
+            self.out.push_str("        }\n");
+            self.out.push_str("    }\n");
+            self.out.push_str("    #endif\n\n");
+            return;
+        }
+
         // Only emit probe initialization in debug builds
         if self.options.release || self.resolved.probes.is_empty() {
             return;
