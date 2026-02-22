@@ -133,7 +133,13 @@ fn full_pipeline_cpp(source: &str, registry: &pcc::registry::Registry) -> String
         release: false,
         include_paths: vec![],
     };
-    let codegen_result = pcc::codegen::codegen_with_lowered(
+    let lir = pcc::lir::build_lir(
+        &thir,
+        &graph_result.graph,
+        &analysis_result.analysis,
+        &schedule_result.schedule,
+    );
+    let codegen_result = pcc::codegen::codegen_from_lir(
         &program,
         &resolve_result.resolved,
         &graph_result.graph,
@@ -142,6 +148,7 @@ fn full_pipeline_cpp(source: &str, registry: &pcc::registry::Registry) -> String
         registry,
         &opts,
         Some(&lower_result.lowered),
+        &lir,
     );
     assert!(
         codegen_result
