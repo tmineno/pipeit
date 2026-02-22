@@ -136,7 +136,7 @@
 
 - Compiler core footprint (`main/resolve/type_infer/lower/graph/analyze/schedule/codegen/registry/dim_resolve/subgraph_index`): **16,986 LOC**
 - Major hotspot files: `codegen.rs` (4,152 LOC), `analyze.rs` (3,264 LOC), `registry.rs` (1,683 LOC), `graph.rs` (1,738 LOC), `resolve.rs` (1,562 LOC)
-- Structural drift to resolve: `graph/analyze/schedule` still consume AST+resolved while `codegen` additionally consumes lowered typed artifacts
+- Structural drift resolved: all semantic phases (`type_infer/lower/graph/analyze/schedule/codegen`) now consume HIR/ThirContext/LIR — no direct AST consumption remains
 
 ### Phase 0: Spec/ADR Contract Freeze (Design Gate)
 
@@ -146,21 +146,50 @@
 - [x] Add ADR: diagnostics data model (`code`, primary/secondary spans, cause chain, machine-readable payload) (`doc/adr/022-unified-diagnostics-model-with-cause-chain.md`)
 - [x] Backward-compatibility decision gate: keep v0.3 language/CLI behavior unless marked as explicit breaking change (`doc/adr/023-v040-backward-compatibility-gate.md`, `doc/spec/pcc-spec-v0.4.0.md`)
 
-### Phase 1: Mechanical Foundations (No Behavior Change)
+### Phase 1: Mechanical Foundations (No Behavior Change) ✅
 
-- [ ] Introduce stable IDs for calls/nodes/definitions and thread them through resolve/type/lower/graph/analyze/schedule/codegen
-- [ ] Remove span-as-primary-key usage from semantic tables (`HashMap<Span, ...>` -> stable-ID keyed maps)
-- [ ] Centralize graph traversal helpers (`subgraphs`, node/edge lookup, back-edge detection) to remove duplicated local implementations
-- [ ] Add shared program query helpers for `set`/task lookups currently duplicated across phases
 - [x] Lock behavior with snapshot tests to guarantee byte-equivalent output before semantic changes (insta snapshots for 7 examples, codegen determinism fix)
+- [x] Centralize graph traversal helpers (`subgraphs`, node/edge lookup, back-edge detection) to remove duplicated local implementations (`subgraph_index.rs` + `GraphQueryCtx`)
+- [x] Add shared program query helpers for `set`/task lookups currently duplicated across phases (`program_query.rs`)
+- [x] Introduce stable IDs (`CallId`/`DefId`/`TaskId`) for calls/nodes/definitions and thread them through resolve/type/lower/graph/analyze/schedule/codegen (`id.rs`)
+- [x] Remove span-as-primary-key usage from semantic tables (`HashMap<Span, ...>` → `HashMap<CallId, ...>` for all 5 semantic maps)
 
 ### Phase 2: IR Unification (Behavior Change, Diff Locked)
 
-- [ ] Introduce HIR normalization pass (define expansion strategy, modal normalization, tap/buffer explicitness)
-- [ ] Extend current lowering output into THIR that is complete enough for graph/analyze/schedule (monomorphized actors + explicit widening + shape/rate constraints)
-- [ ] Migrate `graph`, `analyze`, and `schedule` to consume THIR instead of rebuilding semantics from AST+resolve
-- [ ] Introduce LIR for backend consumption (finalized schedule, buffer layout, concrete actor instantiations, conversion nodes)
-- [ ] Restrict backend to syntax-directed emission from LIR (no fallback type/rate/dim inference in codegen)
+#### Phase 2a: HIR + ThirContext + Consumer Migration ✅
+
+- [x] Introduce HIR normalization pass (`hir.rs`): define expansion, modal normalization, tap/buffer explicitness; AST+resolved → `HirProgram`
+- [x] Build ThirContext wrapper (`thir.rs`): unified query API over HIR + resolved + typed + lowered + registry + precomputed metadata
+- [x] Migrate `graph` to consume `HirProgram` (remove ~200 LOC define inlining + arg substitution)
+- [x] Migrate `analyze` and `schedule` to consume `ThirContext` instead of `&Program` + `&ResolvedProgram`
+- [x] Migrate dim-resolution queries into ThirContext methods (resolve_port_rate, infer_dim_param_from_span_args, span_arg_length_for_dim)
+- [x] Update pipeline driver (`main.rs`) and all test/bench callers; all 500+ tests passing with byte-identical C++ output
+
+#### Phase 2b: LIR Introduction + Codegen Migration ✅
+
+- [x] Fix ThirContext `overrun_policy` default ("stop" → "drop") to match codegen behavior
+- [x] ADR-025: LIR backend IR design decisions
+- [x] Introduce LIR types (`lir.rs`): `LirProgram`, tasks, firings, actor args, edge buffers, modal/ctrl, directives
+- [x] Implement LIR builder: `build_lir(thir, graph, analysis, schedule) -> LirProgram` (no `&Program` needed)
+- [x] Migrate codegen globals: const/param/buffer/stats/directives read from LIR
+- [x] Migrate codegen task structure: param reads, CLI parsing, probe init, thread launch from LIR
+- [x] Migrate codegen firing emissions: actor calls, fork, probe, buffer I/O, fusion from LIR
+- [x] Migrate codegen modal/ctrl: ctrl source read, mode dispatch, feedback resets from LIR
+- [x] Add `codegen_from_lir()` public API
+- [x] Fix LIR edge cases: probe parenthesization, buffer I/O retry naming, param type inference alignment, loop suppression for passthrough/block-transfer nodes, CLI param ordering
+- [x] Switch pipeline driver (`main.rs`), snapshot tests, and bench to route through `codegen_from_lir`
+- [x] Remove old inline-resolution code paths from codegen: `codegen.rs` 5,106 → 2,630 LOC (48.5% reduction); `codegen_from_lir()` signature narrowed from 9 to 4 params (`graph`, `schedule`, `options`, `lir`)
+
+#### Phase 2c: Type Infer + Lower Migration ✅
+
+- [x] Preserve type_args spans in `HirActorCall` (`Vec<String>` → `Vec<(String, Span)>`)
+- [x] Reorder pipeline: `build_hir` before `type_infer` and `lower`
+- [x] Migrate `type_infer` to consume `&HirProgram` — remove define body recursion (~70 LOC), add `target_call_id: CallId` to `WideningPoint`
+- [x] Migrate `lower` to consume `&HirProgram` — remove `CallResolution::Define` filtering, match widenings by `CallId` instead of span
+- [x] Fix CallId aliasing: fresh CallIds per define expansion (depth > 0)
+- [x] Fix param type resolution for define-expanded calls (concrete_actors now includes expanded calls)
+- [x] Update all callers (main, tests, bench) and snapshots
+- [x] Regression tests: define polymorphism in two contexts, explicit type args, expanded calls in lower
 
 ### Phase 3: Pass Manager + Artifact/Caching Layer
 
@@ -216,7 +245,7 @@
 - [ ] Pass manager resolves all `--emit` modes with minimal-pass evaluation
 - [ ] Duplicate helper/inference logic is removed from per-phase local implementations
 - [ ] Compiler core footprint reduced by >=25% from baseline (16,986 LOC) without feature regressions
-- [ ] `codegen.rs` footprint reduced by >=20% from baseline (4,152 LOC) via backend/runtime split
+- [x] `codegen.rs` footprint reduced by 48.5% from baseline (5,106 → 2,630 LOC) via LIR introduction — exceeds >=20% target
 - [ ] No correctness regressions; no statistically significant compiler KPI regressions vs v0.3.4 baseline
 - [ ] Any breaking behavior is explicitly versioned and documented in spec + ADR
 
@@ -441,13 +470,22 @@
 - **v0.2.2a** Spec/runtime alignment merged from `review/spec`; strict types and modal state fixes establish foundation for Phase 2
 - **v0.3.0** Complete — polymorphism, type inference, monomorphization, lowering verification (L1-L5), template codegen; 458 tests passing
 - **New modules**: `type_infer.rs` (constraint-based type inference), `lower.rs` (typed lowering + L1-L5 verification)
-- **New pipeline**: `parse → resolve → type_infer → lower_verify → graph → analyze → schedule → codegen`
+- **Pipeline (post Phase 2c)**: `parse → resolve → build_hir → type_infer(HIR) → lower(HIR) → graph(HIR) → ThirContext → analyze → schedule → LIR → codegen`
 - **ADR numbering**: ADR-015 = spec alignment (from review/spec), ADR-016 = polymorphism & safe widening, ADR-017 = analysis-owned node port-rate resolution
 - **v0.4.0 Phase 0 ADRs**: ADR-020 (pass manager/artifact model), ADR-021 (stable semantic IDs), ADR-022 (diagnostics model), ADR-023 (backward-compatibility gate)
 - **v0.3.2** applies v0.3.0 polymorphism to 11 std actors; begins modular header split (`std_math.h`)
 - **v0.5.x** now includes former v0.3.0 stdlib expansion backlog
 - **pre-v0.4.0 open items** were moved to `v0.5.x` backlog (`Deferred Backlog from v0.3.x`)
 - **v0.4.0** now tracks the compiler architecture rebuild (IR unification, pass manager, diagnostics/verification, backend/runtime boundary refactor)
+- **v0.4.0 Phase 1** complete — snapshot safety net (7 insta tests), centralized graph/program helpers, stable semantic IDs (`CallId`/`DefId`/`TaskId`), span-key removal; all output byte-equivalent
+- **New modules (Phase 1)**: `id.rs` (stable IDs + allocator), `program_query.rs` (shared set-directive helpers)
+- **v0.4.0 Phase 2a** complete — HIR normalization (define expansion), ThirContext unified query wrapper, graph/analyze/schedule migrated off raw AST; all 500+ tests passing, byte-identical C++ output
+- **New modules (Phase 2a)**: `hir.rs` (HIR types + AST→HIR builder with define expansion), `thir.rs` (ThirContext wrapper + precomputed metadata + dim-resolution queries)
+- **ADR-024**: THIR-first IR unification strategy (HIR-first define expansion, ThirContext wrapper pattern, sub-phase ordering)
+- **v0.4.0 Phase 2b** complete — LIR backend IR (`lir.rs`, ~2,050 LOC) pre-resolves all types/rates/dimensions/buffer metadata/actor params; codegen is now syntax-directed (reads LIR, no inference); `codegen.rs` reduced from 5,106 → 2,630 LOC (48.5%); `codegen_from_lir(graph, schedule, options, lir)` is the sole entry point; all 516 tests passing, byte-identical C++ output
+- **New modules (Phase 2b)**: `lir.rs` (LIR types + builder: `build_lir(thir, graph, analysis, schedule) -> LirProgram`)
+- **ADR-025**: LIR backend IR design (self-contained backend IR, structured data over pre-formatted strings, ThirContext-based builder)
+- **v0.4.0 Phase 2c** complete — `type_infer` and `lower` migrated from raw AST to HIR; define body recursion eliminated (~70 LOC); widening matching upgraded from span-based to CallId-based; CallId aliasing fixed for define expansions; param type resolution bug fixed for define-expanded calls; 519 tests passing
 - **v0.5.x** open items are currently deferred
 - Performance characterization should inform optimization priorities (measure before optimizing)
 - Spec files renamed to versioned names (`pipit-lang-spec-v0.3.0.md`, `pcc-spec-v0.3.0.md`); `v0.2.0` specs are frozen from tag `v0.2.2`
