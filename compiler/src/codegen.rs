@@ -406,22 +406,27 @@ impl<'a> CodegenCtx<'a> {
     ///
     /// For pipeline tasks, this is the first actor's `out_rate × repetition_count`.
     /// Falls back to 1 for modal tasks or when rates are unavailable.
-    fn iteration_stride(&self, task_graph: &TaskGraph, schedule: &TaskSchedule) -> u32 {
-        let (sub, sched) = match (task_graph, schedule) {
-            (TaskGraph::Pipeline(sub), TaskSchedule::Pipeline(sched)) => (sub, sched),
+    fn iteration_stride(&self, task_name: &str) -> u32 {
+        let lir_task = match self.lir.tasks.iter().find(|t| t.name == task_name) {
+            Some(t) => t,
+            None => return 1,
+        };
+        let sub = match &lir_task.body {
+            LirTaskBody::Pipeline(sub) => sub,
             _ => return 1,
         };
-        for firing in &sched.firings {
-            let node = match find_node(sub, firing.node_id) {
-                Some(n) => n,
-                None => continue,
+        for group in &sub.firings {
+            let firing = match group {
+                LirFiringGroup::Single(f) => f,
+                LirFiringGroup::Fused(chain) => match chain.body.first() {
+                    Some(f) => f,
+                    None => continue,
+                },
             };
-            if let NodeKind::Actor { .. } = &node.kind {
-                if let Some(rates) = self.analysis.node_port_rates.get(&node.id) {
-                    if let Some(r) = rates.out_rate {
-                        if r > 0 {
-                            return r * firing.repetition_count;
-                        }
+            if let LirFiringKind::Actor(actor) = &firing.kind {
+                if let Some(r) = actor.out_rate {
+                    if r > 0 {
+                        return r * firing.repetition;
                     }
                 }
             }
@@ -434,9 +439,9 @@ impl<'a> CodegenCtx<'a> {
         task_name: &str,
         task_graph: &TaskGraph,
         k_factor: u32,
-        schedule: &TaskSchedule,
+        _schedule: &TaskSchedule,
     ) -> &'static str {
-        let stride = self.iteration_stride(task_graph, schedule);
+        let stride = self.iteration_stride(task_name);
         let iter_advance = if stride <= 1 {
             "_iter_idx++".to_string()
         } else {

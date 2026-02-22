@@ -41,7 +41,7 @@ void task_analyzer() {
         auto _actor_3 = Actor_stdout<float>{};
         auto _actor_5 = Actor_mag{64};
         auto _actor_6 = Actor_stdout<float>{};
-        pipit::detail::set_actor_iteration_index(_iter_idx++);
+        pipit::detail::set_actor_iteration_index(_iter_idx += 192);
         static float _e0_1[192];
         static float _e2_3[64];
         static cfloat _e4_5[192];

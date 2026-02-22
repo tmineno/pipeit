@@ -22,7 +22,7 @@ param amp  = 0.8
 # Block size 256 batches samples into ~1KB packets instead of
 # sending one sample per packet (which overwhelms UDP at 10MHz).
 clock 1000MHz sender {
-    sine<float>($freq, $amp)[] | socket_write("localhost:9100", 0)
+    sine<float>($freq, $amp) | socket_write("localhost:9100", 0)
 }
 
 # Receive samples from another process and print them

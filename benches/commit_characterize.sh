@@ -72,7 +72,10 @@ format_si() {
     awk -v x="$value" -v plus="$show_plus" '
         function absv(v) { return (v < 0) ? -v : v }
         function trim_zeros(s) {
-            sub(/\.?0+$/, "", s)
+            if (index(s, ".") > 0) {
+                sub(/0+$/, "", s)
+                sub(/\.$/, "", s)
+            }
             return s
         }
         BEGIN {

@@ -51,7 +51,7 @@ void task_capture() {
         auto _actor_5 = Actor_fir<float>{std::span<const float>(_const_coeff, 5), 5};
         auto _actor_9 = Actor_stdout<float>{};
         for (int _k = 0; _k < 1000; ++_k) {
-            pipit::detail::set_actor_iteration_index(_iter_idx++);
+            pipit::detail::set_actor_iteration_index(_iter_idx += 1280);
             _param_gain_read.store(_param_gain_write.load(std::memory_order_acquire), std::memory_order_release);
             float _param_gain_val = _param_gain_read.load(std::memory_order_acquire);
             static float _e0_1[1280];

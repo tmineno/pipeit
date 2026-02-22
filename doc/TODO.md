@@ -203,6 +203,18 @@
 - [ ] Add artifact hashing and reusable cache for heavy phases (deferred to Phase 3c)
 - [ ] Integrate manifest/header provenance into cache keys and diagnostics (type stubs placed; implementation deferred to Phase 3b/3c)
 
+#### Compile Latency Recovery (observed regression post-Phase 2)
+
+> **Baseline**: `7248b44` (v0.3.4, pre-refactor) → `e758c03` (post-Phase 2c merge)
+> Regression: simple +14.7%, multitask +31.9%, complex +36.8%, modal +47.7%
+> Root cause: added IR construction passes (HIR → THIR → LIR) before codegen.
+
+- [ ] Profile per-phase time breakdown (`build_hir`, `build_thir`, `build_lir`, `codegen`) to locate dominant cost
+- [ ] Reduce allocation/clone overhead in LIR builder (`build_lir` constructs full deep copies of actor args, edge buffers, firing metadata)
+- [ ] Evaluate lazy/on-demand LIR field population — skip pre-resolving fields codegen never reads
+- [ ] Audit ThirContext precomputed metadata cost — `precompute_metadata()` may duplicate work already available in analysis
+- [ ] Re-measure after each optimization; target: per-scenario latency within 10% of `7248b44` baseline
+
 ### Phase 4: Verification Framework Generalization ✅
 
 - [x] Generalize lower-only `Cert` model into stage-scoped verification framework (`StageCert` trait in `pass.rs`)

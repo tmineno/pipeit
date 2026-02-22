@@ -189,7 +189,7 @@ void task_capture() {
         auto _actor_21 = Actor_fir<float>{std::span<const float>(_const_lp_coeff, 5), 5};
         auto _actor_10 = Actor_delay<float>{1, 0};
         for (int _k = 0; _k < 1000; ++_k) {
-            pipit::detail::set_actor_iteration_index(_iter_idx++);
+            pipit::detail::set_actor_iteration_index(_iter_idx += 1280);
             _param_agc_gain_read.store(_param_agc_gain_write.load(std::memory_order_acquire), std::memory_order_release);
             float _param_agc_gain_val = _param_agc_gain_read.load(std::memory_order_acquire);
             static float _e0_1[1280];
