@@ -4,9 +4,9 @@
 // Per-task topological sort of actors in dependency order, with each actor
 // firing repetition_vector[node] times per PASS cycle.
 //
-// Preconditions: `program` is a parsed AST; `resolved` passed name resolution;
+// Preconditions: `thir` is a ThirContext wrapping HIR + resolved/typed/lowered;
 //                `graph` is a valid ProgramGraph with detected cycles;
-//                `analysis` has computed repetition vectors; `registry` has actor metadata.
+//                `analysis` has computed repetition vectors.
 // Postconditions: returns `ScheduleResult` with per-task schedules, K factors,
 //                 and intra-task buffer sizes.
 // Failure modes: unsortable subgraphs produce `Diagnostic` entries.
@@ -20,8 +20,8 @@ use chumsky::span::Span as _;
 use crate::analyze::AnalyzedProgram;
 use crate::ast::*;
 use crate::graph::*;
-use crate::registry::Registry;
-use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
+use crate::resolve::{DiagLevel, Diagnostic};
+use crate::thir::ThirContext;
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -75,17 +75,133 @@ pub struct ScheduledProgram {
     pub tasks: HashMap<String, TaskMeta>,
 }
 
+// ── Verification ─────────────────────────────────────────────────────────────
+
+/// Machine-checkable evidence for schedule postconditions (S1-S2).
+#[derive(Debug, Clone)]
+pub struct ScheduleCert {
+    /// S1: Every HIR task has a corresponding schedule entry.
+    pub s1_all_tasks_scheduled: bool,
+    /// S2: Every subgraph node appears exactly once in the firing order.
+    pub s2_all_nodes_fired: bool,
+}
+
+impl crate::pass::StageCert for ScheduleCert {
+    fn all_pass(&self) -> bool {
+        self.s1_all_tasks_scheduled && self.s2_all_nodes_fired
+    }
+
+    fn obligations(&self) -> Vec<(&'static str, bool)> {
+        vec![
+            ("S1_all_tasks_scheduled", self.s1_all_tasks_scheduled),
+            ("S2_all_nodes_fired", self.s2_all_nodes_fired),
+        ]
+    }
+}
+
+/// Verify schedule postconditions.
+///
+/// `task_names` is the list of task names from `hir.tasks` (extracted before
+/// entering the thir borrow scope to avoid lifetime conflicts).
+pub fn verify_schedule(
+    schedule: &ScheduledProgram,
+    graph: &ProgramGraph,
+    task_names: &[String],
+) -> ScheduleCert {
+    let s1 = verify_s1_all_tasks_scheduled(schedule, task_names);
+    let s2 = verify_s2_all_nodes_fired(schedule, graph);
+    ScheduleCert {
+        s1_all_tasks_scheduled: s1,
+        s2_all_nodes_fired: s2,
+    }
+}
+
+/// S1: Every HIR task name has a corresponding entry in the schedule.
+fn verify_s1_all_tasks_scheduled(schedule: &ScheduledProgram, task_names: &[String]) -> bool {
+    task_names
+        .iter()
+        .all(|name| schedule.tasks.contains_key(name))
+}
+
+/// S2: For each scheduled task, every graph node appears exactly once in firings.
+///
+/// Three conditions checked per subgraph pair:
+/// (a) firings.len() == graph_nodes.len()
+/// (b) no duplicate node_ids in firings (HashSet insert returns false → duplicate)
+/// (c) every graph node is present in the firing set
+fn verify_s2_all_nodes_fired(schedule: &ScheduledProgram, graph: &ProgramGraph) -> bool {
+    for (task_name, task_meta) in &schedule.tasks {
+        let task_graph = match graph.tasks.get(task_name) {
+            Some(g) => g,
+            None => return false, // scheduled task not in graph — unexpected
+        };
+
+        match (&task_meta.schedule, task_graph) {
+            (TaskSchedule::Pipeline(sched), TaskGraph::Pipeline(sub)) => {
+                if !check_subgraph_coverage(sched, sub) {
+                    return false;
+                }
+            }
+            (
+                TaskSchedule::Modal {
+                    control: ctrl_sched,
+                    modes: mode_scheds,
+                },
+                TaskGraph::Modal {
+                    control: ctrl_graph,
+                    modes: mode_graphs,
+                },
+            ) => {
+                if !check_subgraph_coverage(ctrl_sched, ctrl_graph) {
+                    return false;
+                }
+                for (mode_name, mode_sched) in mode_scheds {
+                    let mode_graph = match mode_graphs.iter().find(|(n, _)| n == mode_name) {
+                        Some((_, g)) => g,
+                        None => return false,
+                    };
+                    if !check_subgraph_coverage(mode_sched, mode_graph) {
+                        return false;
+                    }
+                }
+            }
+            _ => return false, // Pipeline/Modal mismatch
+        }
+    }
+    true
+}
+
+/// Check that a subgraph schedule covers every node exactly once.
+fn check_subgraph_coverage(sched: &SubgraphSchedule, sub: &Subgraph) -> bool {
+    // (a) Length equality
+    if sched.firings.len() != sub.nodes.len() {
+        return false;
+    }
+    // (b) No duplicates in firings
+    let mut seen = HashSet::with_capacity(sched.firings.len());
+    for entry in &sched.firings {
+        if !seen.insert(entry.node_id) {
+            return false; // duplicate
+        }
+    }
+    // (c) Every graph node is present
+    for node in &sub.nodes {
+        if !seen.contains(&node.id) {
+            return false;
+        }
+    }
+    true
+}
+
 // ── Public entry point ──────────────────────────────────────────────────────
 
 /// Generate PASS schedules for all tasks in a program.
 pub fn schedule(
-    program: &Program,
-    resolved: &ResolvedProgram,
+    thir: &ThirContext,
     graph: &ProgramGraph,
     analysis: &AnalyzedProgram,
-    registry: &Registry,
 ) -> ScheduleResult {
-    let mut ctx = ScheduleCtx::new(program, resolved, graph, analysis, registry);
+    let mut ctx = ScheduleCtx::new(thir, graph, analysis);
     ctx.schedule_all_tasks();
     ctx.build_result()
 }
@@ -93,7 +209,7 @@ pub fn schedule(
 // ── Internal context ────────────────────────────────────────────────────────
 
 struct ScheduleCtx<'a> {
-    program: &'a Program,
+    thir: &'a ThirContext<'a>,
     graph: &'a ProgramGraph,
     analysis: &'a AnalyzedProgram,
     diagnostics: Vec<Diagnostic>,
@@ -102,14 +218,12 @@ struct ScheduleCtx<'a> {
 
 impl<'a> ScheduleCtx<'a> {
     fn new(
-        program: &'a Program,
-        _resolved: &'a ResolvedProgram,
+        thir: &'a ThirContext<'a>,
         graph: &'a ProgramGraph,
         analysis: &'a AnalyzedProgram,
-        _registry: &'a Registry,
     ) -> Self {
         ScheduleCtx {
-            program,
+            thir,
             graph,
             analysis,
             diagnostics: Vec::new(),
@@ -144,36 +258,15 @@ impl<'a> ScheduleCtx<'a> {
         }
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────
-
-    /// Read a `set` directive with a `Freq` value (e.g., `set tick_rate = 1kHz`).
-    fn get_set_freq(&self, name: &str) -> Option<f64> {
-        for stmt in &self.program.statements {
-            if let StatementKind::Set(set) = &stmt.kind {
-                if set.name.name == name {
-                    if let SetValue::Freq(f, _) = &set.value {
-                        return Some(*f);
-                    }
-                }
-            }
-        }
-        None
-    }
-
     // ── Task scheduling ─────────────────────────────────────────────────
 
     fn schedule_all_tasks(&mut self) {
-        for stmt in &self.program.statements {
-            if let StatementKind::Task(task) = &stmt.kind {
-                self.schedule_task(task);
-            }
+        for hir_task in &self.thir.hir.tasks {
+            self.schedule_task(&hir_task.name, hir_task.freq_hz, hir_task.freq_span);
         }
     }
 
-    fn schedule_task(&mut self, task: &TaskStmt) {
-        let task_name = &task.name.name;
-        let freq_hz = task.freq;
-
+    fn schedule_task(&mut self, task_name: &str, freq_hz: f64, freq_span: Span) {
         let task_graph = match self.graph.tasks.get(task_name) {
             Some(g) => g,
             None => return,
@@ -220,7 +313,7 @@ impl<'a> ScheduleCtx<'a> {
             }
         };
 
-        let tick_rate_hz = self.get_set_freq("tick_rate").unwrap_or(10_000.0);
+        let tick_rate_hz = self.thir.tick_rate_hz;
         let k = compute_k_factor(freq_hz, tick_rate_hz);
 
         // Rate guardrails (ADR-014): warn when effective timer rate is unsustainable
@@ -228,7 +321,7 @@ impl<'a> ScheduleCtx<'a> {
         let period_ns = 1_000_000_000.0 / timer_hz;
         if period_ns < 10_000.0 {
             self.warning(
-                task.freq_span,
+                freq_span,
                 format!(
                     "effective tick period is {:.0}ns ({:.0}Hz); \
                      most OS schedulers cannot sustain rates above ~100kHz reliably",
@@ -348,37 +441,8 @@ impl<'a> ScheduleCtx<'a> {
 
     // ── Back-edge identification ────────────────────────────────────────
 
-    /// Identify feedback back-edges to remove for topological sort.
-    /// For each detected cycle, the outgoing edge from the delay actor is a
-    /// back-edge (delay provides initial tokens, breaking the dependency).
     fn identify_back_edges(&self, sub: &Subgraph) -> HashSet<(NodeId, NodeId)> {
-        let mut back_edges = HashSet::new();
-        let node_ids: HashSet<u32> = sub.nodes.iter().map(|n| n.id.0).collect();
-
-        for cycle in &self.graph.cycles {
-            // Only process cycles belonging to this subgraph
-            if !cycle.iter().all(|id| node_ids.contains(&id.0)) {
-                continue;
-            }
-
-            // Find the delay actor; its outgoing cycle edge is the back-edge
-            for (i, &nid) in cycle.iter().enumerate() {
-                if let Some(node) = find_node(sub, nid) {
-                    if matches!(&node.kind, NodeKind::Actor { name, .. } if name == "delay") {
-                        let next_nid = cycle[(i + 1) % cycle.len()];
-                        if sub
-                            .edges
-                            .iter()
-                            .any(|e| e.source == nid && e.target == next_nid)
-                        {
-                            back_edges.insert((nid, next_nid));
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-        back_edges
+        crate::subgraph_index::identify_back_edges(sub, &self.graph.cycles)
     }
 
     // ── Intra-task buffer sizing ────────────────────────────────────────
@@ -431,9 +495,7 @@ impl<'a> ScheduleCtx<'a> {
 
 // ── Free helpers ────────────────────────────────────────────────────────────
 
-fn find_node(sub: &Subgraph, id: NodeId) -> Option<&Node> {
-    sub.nodes.iter().find(|n| n.id == id)
-}
+use crate::subgraph_index::find_node;
 
 /// K factor: iterations per tick (compile-time heuristic).
 /// K = ceil(freq / tick_rate). Default tick_rate = 1 MHz.
@@ -542,7 +604,7 @@ mod tests {
             parse_result.errors
         );
         let program = parse_result.program.expect("parse failed");
-        let resolve_result = resolve::resolve(&program, registry);
+        let mut resolve_result = resolve::resolve(&program, registry);
         assert!(
             resolve_result
                 .diagnostics
@@ -551,7 +613,13 @@ mod tests {
             "resolve errors: {:#?}",
             resolve_result.diagnostics
         );
-        let graph_result = crate::graph::build_graph(&program, &resolve_result.resolved, registry);
+        let hir_program = crate::hir::build_hir(
+            &program,
+            &resolve_result.resolved,
+            &mut resolve_result.id_alloc,
+        );
+        let graph_result =
+            crate::graph::build_graph(&hir_program, &resolve_result.resolved, registry);
         assert!(
             graph_result
                 .diagnostics
@@ -560,12 +628,23 @@ mod tests {
             "graph errors: {:#?}",
             graph_result.diagnostics
         );
-        let analysis_result = crate::analyze::analyze(
-            &program,
+        let type_result =
+            crate::type_infer::type_infer(&hir_program, &resolve_result.resolved, registry);
+        let lower_result = crate::lower::lower_and_verify(
+            &hir_program,
             &resolve_result.resolved,
-            &graph_result.graph,
+            &type_result.typed,
             registry,
         );
+        let thir = crate::thir::build_thir_context(
+            &hir_program,
+            &resolve_result.resolved,
+            &type_result.typed,
+            &lower_result.lowered,
+            registry,
+            &graph_result.graph,
+        );
+        let analysis_result = crate::analyze::analyze(&thir, &graph_result.graph);
         assert!(
             analysis_result
                 .diagnostics
@@ -574,13 +653,7 @@ mod tests {
             "analysis errors: {:#?}",
             analysis_result.diagnostics
         );
-        schedule(
-            &program,
-            &resolve_result.resolved,
-            &graph_result.graph,
-            &analysis_result.analysis,
-            registry,
-        )
+        schedule(&thir, &graph_result.graph, &analysis_result.analysis)
     }
 
     fn schedule_ok(source: &str, registry: &Registry) -> ScheduleResult {
@@ -751,7 +824,7 @@ mod tests {
             parse_result.errors
         );
         let program = parse_result.program.expect("parse failed");
-        let resolve_result = resolve::resolve(&program, registry);
+        let mut resolve_result = resolve::resolve(&program, registry);
         assert!(
             resolve_result
                 .diagnostics
@@ -760,7 +833,13 @@ mod tests {
             "resolve errors: {:#?}",
             resolve_result.diagnostics
         );
-        let graph_result = crate::graph::build_graph(&program, &resolve_result.resolved, registry);
+        let hir_program = crate::hir::build_hir(
+            &program,
+            &resolve_result.resolved,
+            &mut resolve_result.id_alloc,
+        );
+        let graph_result =
+            crate::graph::build_graph(&hir_program, &resolve_result.resolved, registry);
         assert!(
             graph_result
                 .diagnostics
@@ -769,20 +848,25 @@ mod tests {
             "graph errors: {:#?}",
             graph_result.diagnostics
         );
-        let analysis_result = crate::analyze::analyze(
-            &program,
+        let type_result =
+            crate::type_infer::type_infer(&hir_program, &resolve_result.resolved, registry);
+        let lower_result = crate::lower::lower_and_verify(
+            &hir_program,
             &resolve_result.resolved,
-            &graph_result.graph,
+            &type_result.typed,
             registry,
         );
-        // Skip analysis error assertion — allow cycle-without-delay errors through
-        schedule(
-            &program,
+        let thir = crate::thir::build_thir_context(
+            &hir_program,
             &resolve_result.resolved,
-            &graph_result.graph,
-            &analysis_result.analysis,
+            &type_result.typed,
+            &lower_result.lowered,
             registry,
-        )
+            &graph_result.graph,
+        );
+        let analysis_result = crate::analyze::analyze(&thir, &graph_result.graph);
+        // Skip analysis error assertion — allow cycle-without-delay errors through
+        schedule(&thir, &graph_result.graph, &analysis_result.analysis)
     }
 
     #[test]
@@ -1141,5 +1225,115 @@ mod tests {
             "batched high-freq should not warn: {:?}",
             warnings
         );
+    }
+
+    // ── verify_schedule tests ───────────────────────────────────────────
+
+    /// Helper: build schedule and graph from source for verification tests.
+    fn build_schedule_and_graph(
+        source: &str,
+        registry: &Registry,
+    ) -> (ScheduleResult, crate::graph::GraphResult, Vec<String>) {
+        let parse_result = crate::parser::parse(source);
+        assert!(
+            parse_result.errors.is_empty(),
+            "parse errors: {:?}",
+            parse_result.errors
+        );
+        let program = parse_result.program.expect("parse failed");
+        let mut resolve_result = resolve::resolve(&program, registry);
+        assert!(
+            resolve_result
+                .diagnostics
+                .iter()
+                .all(|d| d.level != DiagLevel::Error),
+            "resolve errors: {:#?}",
+            resolve_result.diagnostics
+        );
+        let hir_program = crate::hir::build_hir(
+            &program,
+            &resolve_result.resolved,
+            &mut resolve_result.id_alloc,
+        );
+        let task_names: Vec<String> = hir_program.tasks.iter().map(|t| t.name.clone()).collect();
+        let graph_result =
+            crate::graph::build_graph(&hir_program, &resolve_result.resolved, registry);
+        assert!(
+            graph_result
+                .diagnostics
+                .iter()
+                .all(|d| d.level != DiagLevel::Error),
+            "graph errors: {:#?}",
+            graph_result.diagnostics
+        );
+        let type_result =
+            crate::type_infer::type_infer(&hir_program, &resolve_result.resolved, registry);
+        let lower_result = crate::lower::lower_and_verify(
+            &hir_program,
+            &resolve_result.resolved,
+            &type_result.typed,
+            registry,
+        );
+        let thir = crate::thir::build_thir_context(
+            &hir_program,
+            &resolve_result.resolved,
+            &type_result.typed,
+            &lower_result.lowered,
+            registry,
+            &graph_result.graph,
+        );
+        let analysis_result = crate::analyze::analyze(&thir, &graph_result.graph);
+        assert!(
+            analysis_result
+                .diagnostics
+                .iter()
+                .all(|d| d.level != DiagLevel::Error),
+            "analysis errors: {:#?}",
+            analysis_result.diagnostics
+        );
+        let sched_result = schedule(&thir, &graph_result.graph, &analysis_result.analysis);
+        (sched_result, graph_result, task_names)
+    }
+
+    #[test]
+    fn verify_schedule_passing() {
+        use crate::pass::StageCert;
+        let reg = test_registry();
+        let (sched_result, graph_result, task_names) =
+            build_schedule_and_graph("clock 1kHz t {\n    constant(0.0) | stdout()\n}", &reg);
+        let cert = verify_schedule(&sched_result.schedule, &graph_result.graph, &task_names);
+        assert!(
+            cert.all_pass(),
+            "cert should pass: {:?}",
+            cert.obligations()
+        );
+    }
+
+    #[test]
+    fn verify_schedule_s1_missing_task() {
+        let reg = test_registry();
+        let (sched_result, graph_result, _) =
+            build_schedule_and_graph("clock 1kHz t {\n    constant(0.0) | stdout()\n}", &reg);
+        // Inject an extra task name that doesn't exist in schedule
+        let task_names = vec!["t".to_string(), "nonexistent".to_string()];
+        let cert = verify_schedule(&sched_result.schedule, &graph_result.graph, &task_names);
+        assert!(!cert.s1_all_tasks_scheduled, "S1 should fail");
+        assert!(cert.s2_all_nodes_fired, "S2 should still pass");
+    }
+
+    #[test]
+    fn verify_schedule_s2_missing_node() {
+        let reg = test_registry();
+        let (mut sched_result, graph_result, task_names) =
+            build_schedule_and_graph("clock 1kHz t {\n    constant(0.0) | stdout()\n}", &reg);
+        // Remove a firing from the schedule to simulate missing node
+        if let Some(meta) = sched_result.schedule.tasks.get_mut("t") {
+            if let TaskSchedule::Pipeline(ref mut sched) = meta.schedule {
+                sched.firings.pop(); // remove last firing
+            }
+        }
+        let cert = verify_schedule(&sched_result.schedule, &graph_result.graph, &task_names);
+        assert!(cert.s1_all_tasks_scheduled, "S1 should still pass");
+        assert!(!cert.s2_all_nodes_fired, "S2 should fail");
     }
 }

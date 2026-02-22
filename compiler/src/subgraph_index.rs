@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::graph::{Edge, Node, NodeId, ProgramGraph, Subgraph, TaskGraph};
+use crate::graph::{Edge, Node, NodeId, NodeKind, ProgramGraph, Subgraph, TaskGraph};
 
 #[derive(Debug, Clone, Default)]
 pub struct SubgraphIndex {
@@ -108,14 +108,109 @@ where
     F: FnMut(&Subgraph),
 {
     for task_graph in graph.tasks.values() {
-        match task_graph {
-            TaskGraph::Pipeline(sub) => f(sub),
-            TaskGraph::Modal { control, modes } => {
-                f(control);
-                for (_, sub) in modes {
-                    f(sub);
+        for sub in subgraphs_of(task_graph) {
+            f(sub);
+        }
+    }
+}
+
+// ── Shared graph query helpers ─────────────────────────────────────────────
+//
+// These replace duplicated free functions that existed in analyze.rs,
+// schedule.rs, and codegen.rs.
+
+/// Find a node in a subgraph by NodeId (linear scan).
+pub fn find_node(sub: &Subgraph, id: NodeId) -> Option<&Node> {
+    sub.nodes.iter().find(|n| n.id == id)
+}
+
+/// Get all subgraphs from a TaskGraph.
+pub fn subgraphs_of(task_graph: &TaskGraph) -> Vec<&Subgraph> {
+    match task_graph {
+        TaskGraph::Pipeline(sub) => vec![sub],
+        TaskGraph::Modal { control, modes } => {
+            let mut subs = vec![control];
+            for (_, sub) in modes {
+                subs.push(sub);
+            }
+            subs
+        }
+    }
+}
+
+/// Identify feedback back-edges in a subgraph.
+///
+/// For each detected cycle, the outgoing edge from the `delay` actor is
+/// treated as the back-edge (delay provides initial tokens, breaking the
+/// data-flow dependency for topological sorting).
+pub fn identify_back_edges(sub: &Subgraph, cycles: &[Vec<NodeId>]) -> HashSet<(NodeId, NodeId)> {
+    let mut back_edges = HashSet::new();
+    let node_ids: HashSet<u32> = sub.nodes.iter().map(|n| n.id.0).collect();
+
+    for cycle in cycles {
+        if !cycle.iter().all(|id| node_ids.contains(&id.0)) {
+            continue;
+        }
+        for (i, &nid) in cycle.iter().enumerate() {
+            if let Some(node) = find_node(sub, nid) {
+                if matches!(&node.kind, NodeKind::Actor { name, .. } if name == "delay") {
+                    let next_nid = cycle[(i + 1) % cycle.len()];
+                    if sub
+                        .edges
+                        .iter()
+                        .any(|e| e.source == nid && e.target == next_nid)
+                    {
+                        back_edges.insert((nid, next_nid));
+                    }
+                    break;
                 }
             }
         }
+    }
+    back_edges
+}
+
+/// Query context for efficient graph lookups, with optional index fallback.
+pub struct GraphQueryCtx<'a> {
+    subgraph_indices: &'a HashMap<usize, SubgraphIndex>,
+}
+
+impl<'a> GraphQueryCtx<'a> {
+    pub fn new(subgraph_indices: &'a HashMap<usize, SubgraphIndex>) -> Self {
+        Self { subgraph_indices }
+    }
+
+    fn subgraph_index(&self, sub: &Subgraph) -> Option<&SubgraphIndex> {
+        self.subgraph_indices.get(&subgraph_key(sub))
+    }
+
+    pub fn node_in_subgraph<'s>(&self, sub: &'s Subgraph, id: NodeId) -> Option<&'s Node> {
+        self.subgraph_index(sub)
+            .and_then(|idx| idx.node(sub, id))
+            .or_else(|| find_node(sub, id))
+    }
+
+    pub fn first_incoming_edge<'s>(&self, sub: &'s Subgraph, id: NodeId) -> Option<&'s Edge> {
+        self.subgraph_index(sub)
+            .and_then(|idx| idx.first_incoming_edge(sub, id))
+            .or_else(|| sub.edges.iter().find(|e| e.target == id))
+    }
+
+    pub fn first_outgoing_edge<'s>(&self, sub: &'s Subgraph, id: NodeId) -> Option<&'s Edge> {
+        self.subgraph_index(sub)
+            .and_then(|idx| idx.first_outgoing_edge(sub, id))
+            .or_else(|| sub.edges.iter().find(|e| e.source == id))
+    }
+
+    pub fn incoming_edge_count(&self, sub: &Subgraph, id: NodeId) -> usize {
+        self.subgraph_index(sub)
+            .map(|idx| idx.incoming_count(id))
+            .unwrap_or_else(|| sub.edges.iter().filter(|e| e.target == id).count())
+    }
+
+    pub fn outgoing_edge_count(&self, sub: &Subgraph, id: NodeId) -> usize {
+        self.subgraph_index(sub)
+            .map(|idx| idx.outgoing_count(id))
+            .unwrap_or_else(|| sub.edges.iter().filter(|e| e.source == id).count())
     }
 }

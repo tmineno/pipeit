@@ -131,182 +131,77 @@ fn main() {
         eprintln!("pcc: {} actors registered", registry.len());
     }
 
-    // ── Name resolution ──
-    let resolve_result = pcc::resolve::resolve(&program, &registry);
-    let resolve_has_errors =
-        print_pipeline_diags(&cli.source, &source, &resolve_result.diagnostics);
-    if resolve_has_errors {
-        std::process::exit(EXIT_COMPILE_ERROR);
-    }
+    // ── Map EmitStage to terminal PassId ──
+    let terminal = match cli.emit {
+        EmitStage::Ast => unreachable!(), // handled above
+        EmitStage::GraphDot => pcc::pass::PassId::BuildGraph,
+        EmitStage::Graph | EmitStage::Schedule | EmitStage::TimingChart => {
+            pcc::pass::PassId::Schedule
+        }
+        EmitStage::Cpp | EmitStage::Exe => pcc::pass::PassId::Codegen,
+    };
 
-    if cli.verbose {
-        eprintln!(
-            "pcc: resolved {} consts, {} params, {} buffers",
-            resolve_result.resolved.consts.len(),
-            resolve_result.resolved.params.len(),
-            resolve_result.resolved.buffers.len(),
-        );
-    }
-
-    // ── Type inference & monomorphization ──
-    let type_infer_result =
-        pcc::type_infer::type_infer(&program, &resolve_result.resolved, &registry);
-    let type_infer_has_errors =
-        print_pipeline_diags(&cli.source, &source, &type_infer_result.diagnostics);
-    if type_infer_has_errors {
-        std::process::exit(EXIT_COMPILE_ERROR);
-    }
-
-    if cli.verbose {
-        let mono_count = type_infer_result.typed.mono_actors.len();
-        let widening_count = type_infer_result.typed.widenings.len();
-        eprintln!(
-            "pcc: type inference complete, {} monomorphized, {} widenings",
-            mono_count, widening_count
-        );
-    }
-
-    // ── Typed lowering & verification ──
-    let lower_result = pcc::lower::lower_and_verify(
-        &program,
-        &resolve_result.resolved,
-        &type_infer_result.typed,
-        &registry,
-    );
-    let lower_has_errors = print_pipeline_diags(&cli.source, &source, &lower_result.diagnostics);
-    if lower_has_errors {
-        std::process::exit(EXIT_COMPILE_ERROR);
-    }
-    if !lower_result.cert.all_pass() {
-        eprintln!("error: lowering verification failed (L1-L5 obligations not met)");
-        std::process::exit(EXIT_COMPILE_ERROR);
-    }
-
-    if cli.verbose {
-        eprintln!(
-            "pcc: lowering complete, {} concrete actors, {} widening nodes, L1-L5 pass",
-            lower_result.lowered.concrete_actors.len(),
-            lower_result.lowered.widening_nodes.len(),
-        );
-    }
-
-    // ── Graph construction ──
-    let graph_result = pcc::graph::build_graph(&program, &resolve_result.resolved, &registry);
-    let graph_has_errors = print_pipeline_diags(&cli.source, &source, &graph_result.diagnostics);
-    if graph_has_errors {
-        std::process::exit(EXIT_COMPILE_ERROR);
-    }
-
-    if cli.verbose {
-        eprintln!("pcc: built {} task graphs", graph_result.graph.tasks.len());
-    }
-
-    if matches!(cli.emit, EmitStage::GraphDot) {
-        print!("{}", pcc::dot::emit_dot(&graph_result.graph));
-        std::process::exit(EXIT_OK);
-    }
-
-    // ── Static analysis ──
-    let analysis_result = pcc::analyze::analyze(
-        &program,
-        &resolve_result.resolved,
-        &graph_result.graph,
-        &registry,
-    );
-    let analysis_has_errors =
-        print_pipeline_diags(&cli.source, &source, &analysis_result.diagnostics);
-    if analysis_has_errors {
-        std::process::exit(EXIT_COMPILE_ERROR);
-    }
-
-    if cli.verbose {
-        eprintln!(
-            "pcc: analysis complete, {} repetition vectors computed",
-            analysis_result.analysis.repetition_vectors.len(),
-        );
-    }
-
-    // ── Schedule generation ──
-    let schedule_result = pcc::schedule::schedule(
-        &program,
-        &resolve_result.resolved,
-        &graph_result.graph,
-        &analysis_result.analysis,
-        &registry,
-    );
-    let schedule_has_errors =
-        print_pipeline_diags(&cli.source, &source, &schedule_result.diagnostics);
-    if schedule_has_errors {
-        std::process::exit(EXIT_COMPILE_ERROR);
-    }
-
-    if cli.verbose {
-        eprintln!(
-            "pcc: schedule complete, {} task schedules generated",
-            schedule_result.schedule.tasks.len(),
-        );
-    }
-
-    if matches!(cli.emit, EmitStage::Graph) {
-        print!(
-            "{}",
-            emit_graph_dump(
-                &graph_result.graph,
-                &analysis_result.analysis,
-                &schedule_result.schedule,
-            )
-        );
-        std::process::exit(EXIT_OK);
-    }
-
-    if matches!(cli.emit, EmitStage::Schedule) {
-        print!("{}", schedule_result.schedule);
-        std::process::exit(EXIT_OK);
-    }
-
-    if matches!(cli.emit, EmitStage::TimingChart) {
-        print!(
-            "{}",
-            pcc::timing::emit_timing_chart(&schedule_result.schedule, &graph_result.graph)
-        );
-        std::process::exit(EXIT_OK);
-    }
-
-    // ── Code generation ──
+    // ── Run pipeline ──
     let codegen_options = pcc::codegen::CodegenOptions {
         release: cli.release,
         include_paths: loaded_headers.clone(),
     };
-    let codegen_result = pcc::codegen::codegen_with_lowered(
-        &program,
-        &resolve_result.resolved,
-        &graph_result.graph,
-        &analysis_result.analysis,
-        &schedule_result.schedule,
-        &registry,
+    let mut state = pcc::pipeline::CompilationState::new(program, registry);
+    let mut has_errors = false;
+    let result = pcc::pipeline::run_pipeline(
+        &mut state,
+        terminal,
         &codegen_options,
-        Some(&lower_result.lowered),
+        cli.verbose,
+        |_pass_id, diags| {
+            has_errors |= print_pipeline_diags(&cli.source, &source, diags);
+        },
     );
 
-    let codegen_has_errors =
-        print_pipeline_diags(&cli.source, &source, &codegen_result.diagnostics);
-    if codegen_has_errors {
+    if has_errors || result.is_err() {
         std::process::exit(EXIT_COMPILE_ERROR);
     }
 
-    if cli.verbose {
-        eprintln!(
-            "pcc: codegen complete, {} bytes of C++",
-            codegen_result.generated.cpp_source.len(),
-        );
-    }
-
+    // ── Emit-specific output ──
     match cli.emit {
+        EmitStage::Ast => unreachable!(),
+        EmitStage::GraphDot => {
+            print!(
+                "{}",
+                pcc::dot::emit_dot(state.upstream.graph.as_ref().unwrap())
+            );
+            std::process::exit(EXIT_OK);
+        }
+        EmitStage::Graph => {
+            print!(
+                "{}",
+                emit_graph_dump(
+                    state.upstream.graph.as_ref().unwrap(),
+                    state.downstream.analysis.as_ref().unwrap(),
+                    state.downstream.schedule.as_ref().unwrap(),
+                )
+            );
+            std::process::exit(EXIT_OK);
+        }
+        EmitStage::Schedule => {
+            print!("{}", state.downstream.schedule.as_ref().unwrap());
+            std::process::exit(EXIT_OK);
+        }
+        EmitStage::TimingChart => {
+            print!(
+                "{}",
+                pcc::timing::emit_timing_chart(
+                    state.downstream.schedule.as_ref().unwrap(),
+                    state.upstream.graph.as_ref().unwrap()
+                )
+            );
+            std::process::exit(EXIT_OK);
+        }
         EmitStage::Cpp => {
+            let cpp_source = &state.downstream.generated.as_ref().unwrap().cpp_source;
             if cli.output == Path::new("-") {
-                print!("{}", codegen_result.generated.cpp_source);
-            } else if let Err(e) = std::fs::write(&cli.output, &codegen_result.generated.cpp_source)
-            {
+                print!("{}", cpp_source);
+            } else if let Err(e) = std::fs::write(&cli.output, cpp_source) {
                 eprintln!("error: failed to write {}: {}", cli.output.display(), e);
                 std::process::exit(EXIT_SYSTEM_ERROR);
             }
@@ -320,7 +215,8 @@ fn main() {
             // Write generated C++ to temp file
             let tmp_dir = std::env::temp_dir();
             let tmp_cpp = tmp_dir.join(format!("pcc_generated_{}.cpp", std::process::id()));
-            if let Err(e) = std::fs::write(&tmp_cpp, &codegen_result.generated.cpp_source) {
+            let cpp_source = &state.downstream.generated.as_ref().unwrap().cpp_source;
+            if let Err(e) = std::fs::write(&tmp_cpp, cpp_source) {
                 eprintln!(
                     "error: failed to write temp file {}: {}",
                     tmp_cpp.display(),
@@ -404,7 +300,6 @@ fn main() {
 
             std::process::exit(EXIT_OK);
         }
-        _ => {}
     }
 }
 

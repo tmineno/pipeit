@@ -1,9 +1,10 @@
 // type_infer.rs — Type Inference & Monomorphization (pcc-spec §9, phase 4)
 //
-// Walks the resolved AST, collects type constraints from actor signatures
-// and pipe connections, and resolves polymorphic actor calls to concrete types.
+// Walks the HIR (defines expanded), collects type constraints from actor
+// signatures and pipe connections, and resolves polymorphic actor calls to
+// concrete types.
 //
-// Preconditions: AST is name-resolved; registry contains actor metadata.
+// Preconditions: HIR is built from resolved AST; registry contains actor metadata.
 // Postconditions: every actor call has a concrete type assignment; widening
 //   points are identified; ambiguities produce diagnostics.
 // Failure modes: unresolvable type parameters, ambiguous polymorphic calls,
@@ -13,9 +14,14 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::ast::*;
+use crate::ast::{Arg, Scalar, Span, Value};
+use crate::hir::{
+    HirActorCall, HirPipeElem, HirPipeExpr, HirPipeSource, HirPipeline, HirProgram, HirTask,
+    HirTaskBody,
+};
+use crate::id::CallId;
 use crate::registry::{ActorMeta, PipitType, Registry, TypeExpr};
-use crate::resolve::{CallResolution, DiagLevel, Diagnostic, ResolvedProgram};
+use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
 
 // ── Widening chains (spec §3.4) ─────────────────────────────────────────────
 
@@ -76,9 +82,9 @@ pub struct TypeInferResult {
 
 /// Concrete type assignments for all actor calls and widening points.
 pub struct TypedProgram {
-    /// For each actor call (keyed by its AST span), the resolved concrete type
+    /// For each actor call (keyed by CallId), the resolved concrete type
     /// assignments for its type parameters. Empty map for non-polymorphic actors.
-    pub type_assignments: HashMap<Span, Vec<PipitType>>,
+    pub type_assignments: HashMap<CallId, Vec<PipitType>>,
 
     /// Widening insertions needed: (source_span, from_type, to_type).
     /// Each entry indicates a pipe edge where implicit widening should be applied.
@@ -86,14 +92,16 @@ pub struct TypedProgram {
 
     /// Monomorphized actor metadata: for each polymorphic call, the concrete
     /// ActorMeta with type parameters substituted.
-    pub mono_actors: HashMap<Span, ActorMeta>,
+    pub mono_actors: HashMap<CallId, ActorMeta>,
 }
 
 /// A point in the pipeline where implicit widening should be inserted.
 #[derive(Debug, Clone)]
 pub struct WideningPoint {
-    /// Span of the target actor call (consumer side).
+    /// Span of the target actor call (consumer side) — for diagnostics.
     pub target_span: Span,
+    /// CallId of the target actor call — primary matching key for lower.
+    pub target_call_id: CallId,
     /// Type produced by upstream actor.
     pub from_type: PipitType,
     /// Type expected by downstream actor.
@@ -102,17 +110,64 @@ pub struct WideningPoint {
 
 // ── Type inference engine ───────────────────────────────────────────────────
 
-/// Run type inference and monomorphization on the program.
+/// Run type inference and monomorphization on the HIR program.
 ///
 /// For non-polymorphic programs with matching types, this is a no-op pass
 /// that produces empty type_assignments and widenings.
 pub fn type_infer(
-    program: &Program,
+    hir: &HirProgram,
     resolved: &ResolvedProgram,
     registry: &Registry,
 ) -> TypeInferResult {
+    // Build param/const type lookup maps for O(1) access
+    let param_types: HashMap<&str, PipitType> = hir
+        .params
+        .iter()
+        .filter_map(|p| match &p.default_value {
+            Scalar::Number(_, _, is_int) => Some((
+                p.name.as_str(),
+                if *is_int {
+                    PipitType::Int32
+                } else {
+                    PipitType::Float
+                },
+            )),
+            _ => None,
+        })
+        .collect();
+
+    let const_types: HashMap<&str, PipitType> = hir
+        .consts
+        .iter()
+        .filter_map(|c| match &c.value {
+            Value::Scalar(Scalar::Number(_, _, is_int)) => Some((
+                c.name.as_str(),
+                if *is_int {
+                    PipitType::Int32
+                } else {
+                    PipitType::Float
+                },
+            )),
+            Value::Array(elems, _) => elems.first().and_then(|e| match e {
+                Scalar::Number(_, _, is_int) => Some((
+                    c.name.as_str(),
+                    if *is_int {
+                        PipitType::Int32
+                    } else {
+                        PipitType::Float
+                    },
+                )),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .collect();
+
+    // `resolved` is no longer needed — all lookups go through HIR directly.
+    let _ = resolved;
+
     let mut engine = TypeInferEngine {
-        resolved,
+        hir,
         registry,
         typed: TypedProgram {
             type_assignments: HashMap::new(),
@@ -123,10 +178,11 @@ pub fn type_infer(
         buffer_types: HashMap::new(),
         tap_types: HashMap::new(),
         effective_registry_meta_cache: RefCell::new(HashMap::new()),
-        program: Some(program),
+        param_types,
+        const_types,
     };
 
-    engine.infer_program(program);
+    engine.infer_program();
 
     TypeInferResult {
         typed: engine.typed,
@@ -135,100 +191,98 @@ pub fn type_infer(
 }
 
 struct TypeInferEngine<'a> {
-    resolved: &'a ResolvedProgram,
+    hir: &'a HirProgram,
     registry: &'a Registry,
     typed: TypedProgram,
     diagnostics: Vec<Diagnostic>,
     /// Output types of shared buffers, keyed by buffer name.
-    /// Populated as pipe chains with buffer writes are processed.
     buffer_types: HashMap<String, PipitType>,
     /// Output types of tap/fork points, keyed by tap label name.
     tap_types: HashMap<String, PipitType>,
     /// Per-call cached registry metadata for non-monomorphized actor calls.
-    /// Monomorphized calls are served directly from `typed.mono_actors`.
-    effective_registry_meta_cache: RefCell<HashMap<Span, Option<&'a ActorMeta>>>,
-    /// Program AST reference for define body lookup.
-    program: Option<&'a Program>,
+    effective_registry_meta_cache: RefCell<HashMap<CallId, Option<&'a ActorMeta>>>,
+    /// Name→type lookup maps for O(1) access.
+    param_types: HashMap<&'a str, PipitType>,
+    const_types: HashMap<&'a str, PipitType>,
 }
 
 impl<'a> TypeInferEngine<'a> {
     fn store_monomorphized_actor(
         &mut self,
-        span: Span,
+        call_id: CallId,
         concrete_types: Vec<PipitType>,
         mono: ActorMeta,
     ) {
-        self.typed.type_assignments.insert(span, concrete_types);
+        self.typed.type_assignments.insert(call_id, concrete_types);
         self.effective_registry_meta_cache
             .borrow_mut()
-            .remove(&span);
-        self.typed.mono_actors.insert(span, mono);
+            .remove(&call_id);
+        self.typed.mono_actors.insert(call_id, mono);
     }
 
-    fn infer_program(&mut self, program: &Program) {
+    fn infer_program(&mut self) {
         // Pass 1: Process all tasks (collects buffer/tap output types along the way).
-        // Define bodies are processed on-demand via define_output_type when
-        // a define call is encountered, using the call site's upstream type context.
-        for stmt in &program.statements {
-            if let StatementKind::Task(task) = &stmt.kind {
-                self.infer_task(task);
-            }
+        // All defines are already expanded inline by HIR.
+        let tasks: Vec<_> = self.hir.tasks.iter().collect();
+        for task in &tasks {
+            self.infer_task(task);
         }
 
         // Pass 2: Re-process tasks that have unresolved polymorphic calls from
         // buffer reads (the writer task may have been processed after the reader)
-        for stmt in &program.statements {
-            if let StatementKind::Task(task) = &stmt.kind {
-                self.reinfer_task_buffer_reads(task);
-            }
+        let tasks: Vec<_> = self.hir.tasks.iter().collect();
+        for task in &tasks {
+            self.reinfer_task_buffer_reads(task);
         }
     }
 
-    fn infer_task(&mut self, task: &TaskStmt) {
+    fn infer_task(&mut self, task: &HirTask) {
         match &task.body {
-            TaskBody::Pipeline(body) => self.infer_pipeline_body(body),
-            TaskBody::Modal(modal) => {
-                self.infer_pipeline_body(&modal.control.body);
-                for mode in &modal.modes {
-                    self.infer_pipeline_body(&mode.body);
+            HirTaskBody::Pipeline(pipeline) => self.infer_pipeline(pipeline),
+            HirTaskBody::Modal(modal) => {
+                self.infer_pipeline(&modal.control);
+                for (_name, pipeline) in &modal.modes {
+                    self.infer_pipeline(pipeline);
                 }
             }
         }
     }
 
-    fn infer_pipeline_body(&mut self, body: &PipelineBody) {
-        for pipe in &body.lines {
+    fn infer_pipeline(&mut self, pipeline: &HirPipeline) {
+        for pipe in &pipeline.pipes {
             self.infer_pipe_expr(pipe);
         }
     }
 
-    fn infer_pipe_expr(&mut self, pipe: &PipeExpr) {
+    fn infer_pipe_expr(&mut self, pipe: &HirPipeExpr) {
         self.infer_pipe_expr_with_upstream(pipe, None);
     }
 
-    fn infer_pipe_expr_with_upstream(&mut self, pipe: &PipeExpr, upstream_type: Option<PipitType>) {
+    fn infer_pipe_expr_with_upstream(
+        &mut self,
+        pipe: &HirPipeExpr,
+        upstream_type: Option<PipitType>,
+    ) {
         // Collect the chain of actor calls in this pipe
-        let mut calls: Vec<&ActorCall> = Vec::new();
+        let mut calls: Vec<&HirActorCall> = Vec::new();
 
         // Determine initial upstream type from pipe source
         let initial_type = match &pipe.source {
-            PipeSource::ActorCall(call) => {
+            HirPipeSource::ActorCall(call) => {
                 calls.push(call);
                 upstream_type // ActorCall source has no external upstream
             }
-            PipeSource::BufferRead(ident) => {
-                // Use tracked buffer type if available
-                upstream_type.or_else(|| self.buffer_types.get(&ident.name).copied())
+            HirPipeSource::BufferRead(name, _span) => {
+                upstream_type.or_else(|| self.buffer_types.get(name.as_str()).copied())
             }
-            PipeSource::TapRef(ident) => {
-                // Use tracked tap type if available
-                upstream_type.or_else(|| self.tap_types.get(&ident.name).copied())
+            HirPipeSource::TapRef(name, _span) => {
+                upstream_type.or_else(|| self.tap_types.get(name.as_str()).copied())
             }
         };
 
         // Track tap element positions so we can record their types after inference
         let mut tap_positions: Vec<(String, usize)> = Vec::new(); // (name, call_index)
-        let mut call_index = if matches!(&pipe.source, PipeSource::ActorCall(_)) {
+        let mut call_index = if matches!(&pipe.source, HirPipeSource::ActorCall(_)) {
             1 // source call is at index 0
         } else {
             0
@@ -236,15 +290,14 @@ impl<'a> TypeInferEngine<'a> {
 
         for elem in &pipe.elements {
             match elem {
-                PipeElem::ActorCall(call) => {
+                HirPipeElem::ActorCall(call) => {
                     calls.push(call);
                     call_index += 1;
                 }
-                PipeElem::Tap(ident) => {
-                    // Record tap position — its type is the output of the most recent call
-                    tap_positions.push((ident.name.clone(), call_index));
+                HirPipeElem::Tap(name, _span) => {
+                    tap_positions.push((name.clone(), call_index));
                 }
-                PipeElem::Probe(_) => {}
+                HirPipeElem::Probe(_, _) => {}
             }
         }
 
@@ -265,7 +318,6 @@ impl<'a> TypeInferEngine<'a> {
             let tap_type = if *idx == 0 {
                 initial_type
             } else {
-                // Get the output type of the call at idx-1
                 self.call_output_type(calls[idx - 1])
             };
             if let Some(t) = tap_type {
@@ -276,47 +328,41 @@ impl<'a> TypeInferEngine<'a> {
         // Track buffer output type if this pipe writes to a buffer
         if let Some(ref sink) = pipe.sink {
             if let Some(out_type) = final_type {
-                self.buffer_types.insert(sink.buffer.name.clone(), out_type);
+                self.buffer_types.insert(sink.buffer_name.clone(), out_type);
             }
         }
     }
 
     /// Resolve explicit type arguments (e.g., `fir<float>(coeff)`).
-    fn resolve_explicit_type_args(&mut self, call: &ActorCall) {
+    fn resolve_explicit_type_args(&mut self, call: &HirActorCall) {
         if call.type_args.is_empty() {
             return;
         }
 
-        let resolution = self.resolved.call_resolutions.get(&call.span);
-        if !matches!(resolution, Some(CallResolution::Actor)) {
-            return;
-        }
-
-        let meta = match self.registry.lookup(&call.name.name) {
+        // All HIR calls are actors (defines already expanded)
+        let meta = match self.registry.lookup(&call.name) {
             Some(m) => m,
             None => return,
         };
 
         if meta.type_params.is_empty() {
-            // Error already reported by resolver
             return;
         }
 
         if call.type_args.len() != meta.type_params.len() {
-            // Error already reported by resolver
             return;
         }
 
         // Parse type argument names to PipitType
         let mut concrete_types = Vec::new();
-        for type_arg in &call.type_args {
-            match parse_type_name(&type_arg.name) {
+        for (type_name, type_span) in &call.type_args {
+            match parse_type_name(type_name) {
                 Some(t) => concrete_types.push(t),
                 None => {
                     self.diagnostics.push(Diagnostic {
                         level: DiagLevel::Error,
-                        span: type_arg.span,
-                        message: format!("unknown type '{}'", type_arg.name),
+                        span: *type_span,
+                        message: format!("unknown type '{}'", type_name),
                         hint: Some(
                             "valid types: int8, int16, int32, float, double, cfloat, cdouble"
                                 .to_string(),
@@ -327,29 +373,22 @@ impl<'a> TypeInferEngine<'a> {
             }
         }
 
-        // Monomorphize: create a concrete ActorMeta with substituted types
         let mono = monomorphize_actor(meta, &concrete_types);
-        self.store_monomorphized_actor(call.span, concrete_types, mono);
+        self.store_monomorphized_actor(call.call_id, concrete_types, mono);
     }
 
     /// Infer type arguments from pipe context, with an optional initial upstream type.
     /// Returns the output type of the last actor in the chain.
+    ///
+    /// All calls in HIR are concrete actors (defines already expanded inline).
     fn infer_from_pipe_context_with_initial(
         &mut self,
-        calls: &[&ActorCall],
+        calls: &[&HirActorCall],
         initial_type: Option<PipitType>,
     ) -> Option<PipitType> {
-        // Walk the pipe chain and propagate types forward
         let mut current_output_type: Option<PipitType> = initial_type;
 
         for call in calls {
-            let resolution = self.resolved.call_resolutions.get(&call.span);
-            if !matches!(resolution, Some(CallResolution::Actor)) {
-                // Define call — try to propagate type through the define body
-                current_output_type = self.define_output_type(call, current_output_type);
-                continue;
-            }
-
             let meta = match self.get_effective_meta(call) {
                 Some(m) => m,
                 None => {
@@ -360,40 +399,35 @@ impl<'a> TypeInferEngine<'a> {
 
             // For polymorphic actors without explicit type args, try to infer
             if !call.type_args.is_empty() || !meta.is_polymorphic() {
-                // Already resolved or concrete — just propagate output type
                 current_output_type = meta.out_type.as_concrete();
                 continue;
             }
 
             // Polymorphic actor without explicit type args — infer from context
             if let Some(upstream_type) = current_output_type {
-                // The input type is a type parameter — match it with upstream type
                 if let TypeExpr::TypeParam(ref param_name) = meta.in_type {
-                    // Find which type parameter this is
                     if let Some(param_idx) = meta.type_params.iter().position(|p| p == param_name) {
                         let mut concrete_types = vec![PipitType::Void; meta.type_params.len()];
                         concrete_types[param_idx] = upstream_type;
 
-                        // Check if all type params are resolved
                         let all_resolved = concrete_types.iter().all(|t| *t != PipitType::Void);
 
                         if all_resolved {
                             let mono = monomorphize_actor(meta, &concrete_types);
                             current_output_type = mono.out_type.as_concrete();
-                            self.store_monomorphized_actor(call.span, concrete_types, mono);
+                            self.store_monomorphized_actor(call.call_id, concrete_types, mono);
                             continue;
                         }
                     }
                 }
 
-                // Could not fully infer — emit ambiguity error
                 self.diagnostics.push(Diagnostic {
                     level: DiagLevel::Error,
-                    span: call.name.span,
-                    message: format!("ambiguous polymorphic actor call '{}'", call.name.name),
+                    span: call.call_span,
+                    message: format!("ambiguous polymorphic actor call '{}'", call.name),
                     hint: Some(format!(
                         "specify type arguments explicitly, e.g. {}<float>({})",
-                        call.name.name,
+                        call.name,
                         call.args
                             .iter()
                             .map(|_| "...")
@@ -403,20 +437,19 @@ impl<'a> TypeInferEngine<'a> {
                 });
                 current_output_type = None;
             } else {
-                // No upstream type and polymorphic — try to infer from arguments
                 let inferred = self.infer_type_from_args(call, meta);
                 if let Some(concrete_types) = inferred {
                     let mono = monomorphize_actor(meta, &concrete_types);
                     current_output_type = mono.out_type.as_concrete();
-                    self.store_monomorphized_actor(call.span, concrete_types, mono);
+                    self.store_monomorphized_actor(call.call_id, concrete_types, mono);
                 } else {
                     self.diagnostics.push(Diagnostic {
                         level: DiagLevel::Error,
-                        span: call.name.span,
-                        message: format!("ambiguous polymorphic actor call '{}'", call.name.name),
+                        span: call.call_span,
+                        message: format!("ambiguous polymorphic actor call '{}'", call.name),
                         hint: Some(format!(
                             "specify type arguments explicitly, e.g. {}<float>({})",
-                            call.name.name,
+                            call.name,
                             call.args
                                 .iter()
                                 .map(|_| "...")
@@ -431,103 +464,30 @@ impl<'a> TypeInferEngine<'a> {
         current_output_type
     }
 
-    /// Get the output type of a define call by looking up the define body's last actor.
-    /// Also processes the define body with the upstream type context if provided.
-    fn define_output_type(
-        &mut self,
-        call: &ActorCall,
-        upstream_type: Option<PipitType>,
-    ) -> Option<PipitType> {
-        let define_entry = self.resolved.defines.get(&call.name.name)?;
-        let program = self.program?;
-        let define_stmt = match &program.statements[define_entry.stmt_index].kind {
-            StatementKind::Define(d) => d,
-            _ => return None,
-        };
-
-        // Process the define body with the upstream type context.
-        // This allows polymorphic actors inside defines to resolve T from the
-        // call site's pipe context (e.g., `constant(0.0) | amplify() | stdout()`
-        // propagates float into amplify's body).
-        let first_pipe = define_stmt.body.lines.first()?;
-
-        // Collect calls from the first pipe line to infer with upstream context
-        let mut calls: Vec<&ActorCall> = Vec::new();
-        if let PipeSource::ActorCall(c) = &first_pipe.source {
-            calls.push(c);
-        }
-        for elem in &first_pipe.elements {
-            if let PipeElem::ActorCall(c) = elem {
-                calls.push(c);
-            }
-        }
-
-        // Resolve explicit type args first
-        for c in &calls {
-            self.resolve_explicit_type_args(c);
-        }
-
-        // Infer from upstream type context
-        let body_output = self.infer_from_pipe_context_with_initial(&calls, upstream_type);
-
-        // Process remaining pipe lines in the define body (if any)
-        for pipe in define_stmt.body.lines.iter().skip(1) {
-            self.infer_pipe_expr(pipe);
-        }
-
-        // Return the output type of the define body
-        if body_output.is_some() {
-            return body_output;
-        }
-
-        // Fallback: check the last actor in the last pipe line
-        let last_pipe = define_stmt.body.lines.last()?;
-        let mut last_call: Option<&ActorCall> = None;
-        for elem in last_pipe.elements.iter().rev() {
-            if let PipeElem::ActorCall(c) = elem {
-                last_call = Some(c);
-                break;
-            }
-        }
-        if last_call.is_none() {
-            if let PipeSource::ActorCall(c) = &last_pipe.source {
-                last_call = Some(c);
-            }
-        }
-
-        let last_call = last_call?;
-        if let Some(mono) = self.typed.mono_actors.get(&last_call.span) {
-            return mono.out_type.as_concrete();
-        }
-        let meta = self.registry.lookup(&last_call.name.name)?;
-        meta.out_type.as_concrete()
-    }
-
     /// Re-process pipes starting with buffer reads that may have had unresolved
     /// polymorphic actors on the first pass (the writer task may have been defined
     /// after the reader task in the source file).
-    fn reinfer_task_buffer_reads(&mut self, task: &TaskStmt) {
-        let pipes = match &task.body {
-            TaskBody::Pipeline(body) => body.lines.iter().collect::<Vec<_>>(),
-            TaskBody::Modal(modal) => {
-                let mut v: Vec<&PipeExpr> = modal.control.body.lines.iter().collect();
-                for mode in &modal.modes {
-                    v.extend(mode.body.lines.iter());
+    fn reinfer_task_buffer_reads(&mut self, task: &HirTask) {
+        let pipes: Vec<&HirPipeExpr> = match &task.body {
+            HirTaskBody::Pipeline(pipeline) => pipeline.pipes.iter().collect(),
+            HirTaskBody::Modal(modal) => {
+                let mut v: Vec<&HirPipeExpr> = modal.control.pipes.iter().collect();
+                for (_name, pipeline) in &modal.modes {
+                    v.extend(pipeline.pipes.iter());
                 }
                 v
             }
         };
 
         for pipe in pipes {
-            if let PipeSource::BufferRead(ident) = &pipe.source {
-                if let Some(&buf_type) = self.buffer_types.get(&ident.name) {
-                    // Check if any actor in this pipe is still unresolved
+            if let HirPipeSource::BufferRead(name, _span) = &pipe.source {
+                if let Some(&buf_type) = self.buffer_types.get(name.as_str()) {
                     let has_unresolved = pipe.elements.iter().any(|elem| {
-                        if let PipeElem::ActorCall(call) = elem {
-                            let meta = self.registry.lookup(&call.name.name);
+                        if let HirPipeElem::ActorCall(call) = elem {
+                            let meta = self.registry.lookup(&call.name);
                             if let Some(m) = meta {
                                 m.is_polymorphic()
-                                    && !self.typed.mono_actors.contains_key(&call.span)
+                                    && !self.typed.mono_actors.contains_key(&call.call_id)
                             } else {
                                 false
                             }
@@ -537,13 +497,12 @@ impl<'a> TypeInferEngine<'a> {
                     });
 
                     if has_unresolved {
-                        // Clear previous errors for these calls before re-inferring
                         let call_spans: Vec<Span> = pipe
                             .elements
                             .iter()
                             .filter_map(|e| {
-                                if let PipeElem::ActorCall(c) = e {
-                                    Some(c.name.span)
+                                if let HirPipeElem::ActorCall(c) = e {
+                                    Some(c.call_span)
                                 } else {
                                     None
                                 }
@@ -562,7 +521,11 @@ impl<'a> TypeInferEngine<'a> {
     }
 
     /// Try to infer type parameters from actor call arguments.
-    fn infer_type_from_args(&self, call: &ActorCall, meta: &ActorMeta) -> Option<Vec<PipitType>> {
+    fn infer_type_from_args(
+        &self,
+        call: &HirActorCall,
+        meta: &ActorMeta,
+    ) -> Option<Vec<PipitType>> {
         let mut concrete_types = vec![PipitType::Void; meta.type_params.len()];
 
         for (i, arg) in call.args.iter().enumerate() {
@@ -617,124 +580,53 @@ impl<'a> TypeInferEngine<'a> {
         }
     }
 
-    /// Get the output type of a call (actor or define).
-    fn call_output_type(&self, call: &ActorCall) -> Option<PipitType> {
+    /// Get the output type of an actor call.
+    fn call_output_type(&self, call: &HirActorCall) -> Option<PipitType> {
         // Check if it's a monomorphized actor
-        if let Some(mono) = self.typed.mono_actors.get(&call.span) {
+        if let Some(mono) = self.typed.mono_actors.get(&call.call_id) {
             return mono.out_type.as_concrete();
         }
         // Check actor registry
-        if let Some(meta) = self.registry.lookup(&call.name.name) {
+        if let Some(meta) = self.registry.lookup(&call.name) {
             return meta.out_type.as_concrete();
-        }
-        // Check if it's a define — get the define body's output type
-        if let Some(define_entry) = self.resolved.defines.get(&call.name.name) {
-            if let Some(program) = self.program {
-                if let StatementKind::Define(def) =
-                    &program.statements[define_entry.stmt_index].kind
-                {
-                    // Find the last actor call in the define body
-                    if let Some(last_pipe) = def.body.lines.last() {
-                        let mut last_call: Option<&ActorCall> = None;
-                        for elem in last_pipe.elements.iter().rev() {
-                            if let PipeElem::ActorCall(c) = elem {
-                                last_call = Some(c);
-                                break;
-                            }
-                        }
-                        if last_call.is_none() {
-                            if let PipeSource::ActorCall(c) = &last_pipe.source {
-                                last_call = Some(c);
-                            }
-                        }
-                        if let Some(lc) = last_call {
-                            return self.call_output_type(lc);
-                        }
-                    }
-                }
-            }
         }
         None
     }
 
     /// Infer the type of a runtime param from its default value.
     fn infer_param_type(&self, name: &str) -> Option<PipitType> {
-        let entry = self.resolved.params.get(name)?;
-        let program = self.program?;
-        let stmt = &program.statements[entry.stmt_index];
-        if let StatementKind::Param(p) = &stmt.kind {
-            match &p.value {
-                Scalar::Number(_, _, is_int) => {
-                    if *is_int {
-                        Some(PipitType::Int32)
-                    } else {
-                        Some(PipitType::Float)
-                    }
-                }
-                _ => None,
-            }
-        } else {
-            None
-        }
+        self.param_types.get(name).copied()
     }
 
     /// Infer the type of a const from its declared value.
     fn infer_const_type(&self, name: &str) -> Option<PipitType> {
-        let entry = self.resolved.consts.get(name)?;
-        let program = self.program?;
-        let stmt = &program.statements[entry.stmt_index];
-        if let StatementKind::Const(c) = &stmt.kind {
-            match &c.value {
-                Value::Scalar(Scalar::Number(_, _, is_int)) => {
-                    if *is_int {
-                        Some(PipitType::Int32)
-                    } else {
-                        Some(PipitType::Float)
-                    }
-                }
-                Value::Array(elems, _) => {
-                    // Infer from first element
-                    if let Some(Scalar::Number(_, _, is_int)) = elems.first() {
-                        if *is_int {
-                            Some(PipitType::Int32)
-                        } else {
-                            Some(PipitType::Float)
-                        }
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            }
-        } else {
-            None
-        }
+        self.const_types.get(name).copied()
     }
 
     /// Get the effective ActorMeta for a call — monomorphized if available, else registry.
-    fn get_effective_meta(&self, call: &ActorCall) -> Option<&ActorMeta> {
-        if let Some(mono) = self.typed.mono_actors.get(&call.span) {
+    fn get_effective_meta(&self, call: &HirActorCall) -> Option<&ActorMeta> {
+        if let Some(mono) = self.typed.mono_actors.get(&call.call_id) {
             return Some(mono);
         }
 
         if let Some(cached) = self
             .effective_registry_meta_cache
             .borrow()
-            .get(&call.span)
+            .get(&call.call_id)
             .copied()
         {
             return cached;
         }
 
-        let looked_up = self.registry.lookup(&call.name.name);
+        let looked_up = self.registry.lookup(&call.name);
         self.effective_registry_meta_cache
             .borrow_mut()
-            .insert(call.span, looked_up);
+            .insert(call.call_id, looked_up);
         looked_up
     }
 
     /// Check for widening between adjacent actor calls in a pipe.
-    fn check_pipe_widening(&mut self, calls: &[&ActorCall]) {
+    fn check_pipe_widening(&mut self, calls: &[&HirActorCall]) {
         if calls.len() < 2 {
             return;
         }
@@ -759,18 +651,17 @@ impl<'a> TypeInferEngine<'a> {
             let (src_type, tgt_type) = (src_out, tgt_in);
 
             if src_type == tgt_type || src_type == PipitType::Void || tgt_type == PipitType::Void {
-                continue; // Exact match or void passthrough
+                continue;
             }
 
             if can_widen(src_type, tgt_type) {
                 self.typed.widenings.push(WideningPoint {
-                    target_span: tgt_call.span,
+                    target_span: tgt_call.call_span,
+                    target_call_id: tgt_call.call_id,
                     from_type: src_type,
                     to_type: tgt_type,
                 });
             }
-            // Note: type mismatch errors are still caught by analyze.rs (Step 8 will
-            // update analyze to accept widening-compatible types)
         }
     }
 }
@@ -976,7 +867,7 @@ mod tests {
             parse_result.errors
         );
         let program = parse_result.program.expect("parse failed");
-        let resolve_result = crate::resolve::resolve(&program, &registry);
+        let mut resolve_result = crate::resolve::resolve(&program, &registry);
         assert!(
             resolve_result
                 .diagnostics
@@ -985,7 +876,12 @@ mod tests {
             "resolve errors: {:#?}",
             resolve_result.diagnostics
         );
-        type_infer(&program, &resolve_result.resolved, &registry)
+        let hir = crate::hir::build_hir(
+            &program,
+            &resolve_result.resolved,
+            &mut resolve_result.id_alloc,
+        );
+        type_infer(&hir, &resolve_result.resolved, &registry)
     }
 
     #[test]
@@ -1026,5 +922,51 @@ mod tests {
         assert_eq!(parse_type_name("int32"), Some(PipitType::Int32));
         assert_eq!(parse_type_name("cfloat"), Some(PipitType::Cfloat));
         assert_eq!(parse_type_name("unknown"), None);
+    }
+
+    // ── Regression tests for Phase 2c ──────────────────────────────────
+
+    #[test]
+    fn define_poly_two_contexts() {
+        // Same polymorphic define expanded in float and double contexts.
+        // Verifies CallId aliasing fix: each expansion gets a fresh CallId,
+        // so monomorphization doesn't collide.
+        let result = infer_source(
+            r#"
+            define amplify() { mul(1.0) }
+            clock 1kHz a { constant<float>(0.0) | amplify() | stdout() }
+            clock 1kHz b { constant<double>(0.0) | amplify() | stdout() }
+            "#,
+        );
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(errors.is_empty(), "unexpected errors: {errors:#?}");
+        assert!(
+            result.typed.mono_actors.len() >= 2,
+            "expected at least 2 monomorphized actors, got {}",
+            result.typed.mono_actors.len()
+        );
+    }
+
+    #[test]
+    fn explicit_type_args_resolve_correctly() {
+        // Verifies that explicit type_args (with preserved spans from HIR) resolve
+        // correctly through the type inference pipeline.
+        let result =
+            infer_source("clock 1kHz t { constant<float>(0.0) | mul<float>(1.0) | stdout() }");
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagLevel::Error)
+            .collect();
+        assert!(errors.is_empty(), "unexpected errors: {errors:#?}");
+        // Both constant and mul should be monomorphized to float
+        assert!(
+            result.typed.mono_actors.len() >= 2,
+            "expected at least 2 monomorphized actors"
+        );
     }
 }

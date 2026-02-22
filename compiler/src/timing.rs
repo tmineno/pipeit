@@ -280,7 +280,7 @@ mod tests {
             parse_result.errors
         );
         let program = parse_result.program.expect("parse failed");
-        let resolve_result = resolve::resolve(&program, registry);
+        let mut resolve_result = resolve::resolve(&program, registry);
         assert!(
             resolve_result
                 .diagnostics
@@ -289,7 +289,13 @@ mod tests {
             "resolve errors: {:?}",
             resolve_result.diagnostics
         );
-        let graph_result = crate::graph::build_graph(&program, &resolve_result.resolved, registry);
+        let hir_program = crate::hir::build_hir(
+            &program,
+            &resolve_result.resolved,
+            &mut resolve_result.id_alloc,
+        );
+        let graph_result =
+            crate::graph::build_graph(&hir_program, &resolve_result.resolved, registry);
         assert!(
             graph_result
                 .diagnostics
@@ -298,12 +304,23 @@ mod tests {
             "graph errors: {:?}",
             graph_result.diagnostics
         );
-        let analysis_result = crate::analyze::analyze(
-            &program,
+        let type_result =
+            crate::type_infer::type_infer(&hir_program, &resolve_result.resolved, registry);
+        let lower_result = crate::lower::lower_and_verify(
+            &hir_program,
             &resolve_result.resolved,
-            &graph_result.graph,
+            &type_result.typed,
             registry,
         );
+        let thir = crate::thir::build_thir_context(
+            &hir_program,
+            &resolve_result.resolved,
+            &type_result.typed,
+            &lower_result.lowered,
+            registry,
+            &graph_result.graph,
+        );
+        let analysis_result = crate::analyze::analyze(&thir, &graph_result.graph);
         assert!(
             analysis_result
                 .diagnostics
@@ -312,13 +329,8 @@ mod tests {
             "analysis errors: {:?}",
             analysis_result.diagnostics
         );
-        let schedule_result = crate::schedule::schedule(
-            &program,
-            &resolve_result.resolved,
-            &graph_result.graph,
-            &analysis_result.analysis,
-            registry,
-        );
+        let schedule_result =
+            crate::schedule::schedule(&thir, &graph_result.graph, &analysis_result.analysis);
         assert!(
             schedule_result
                 .diagnostics
