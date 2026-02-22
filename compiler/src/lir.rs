@@ -197,6 +197,8 @@ pub struct LirActorFiring {
     pub outputs: Vec<LirEdgeRef>,
     pub node_id: NodeId,
     pub void_output: bool,
+    /// True if actor can be hoisted above K-loop (no ParamRef args).
+    pub tick_hoistable: bool,
 }
 
 /// Structured actor argument — resolved by LIR builder, formatted by codegen.
@@ -994,6 +996,9 @@ impl<'a> LirBuilder<'a> {
         let inputs = self.build_edge_refs(sub, sched, node_id, edge_bufs, true);
         let outputs = self.build_edge_refs(sub, sched, node_id, edge_bufs, false);
 
+        // Tick-level hoistable: no ParamRef or TapRef args (can live above K-loop)
+        let tick_hoistable = is_actor_hoistable(args, false);
+
         let hoisted = if allow_hoist && rep > 1 && is_actor_hoistable(args, true) {
             Some(LirHoistedActor {
                 var_name: format!("_actor_{}", node_id.0),
@@ -1018,6 +1023,7 @@ impl<'a> LirBuilder<'a> {
             outputs,
             node_id,
             void_output,
+            tick_hoistable,
         }
     }
 

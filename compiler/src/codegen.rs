@@ -18,7 +18,11 @@ use crate::analyze::AnalyzedProgram;
 use crate::ast::*;
 use crate::graph::*;
 use crate::id::CallId;
-use crate::lir::{LirConstValue, LirProgram, LirTimerSpin};
+use crate::lir::{
+    LirActorArg, LirActorFiring, LirBufferIo, LirConstValue, LirFiring, LirFiringGroup,
+    LirFiringKind, LirFusedChain, LirHoistedActor, LirProbeFiring, LirProgram, LirSubgraph,
+    LirTaskBody, LirTimerSpin,
+};
 use crate::lower::LoweredProgram;
 use crate::program_query;
 use crate::registry::{ActorMeta, ParamKind, ParamType, PipitType, Registry, TokenCount};
@@ -558,6 +562,33 @@ impl<'a> CodegenCtx<'a> {
         schedule: &TaskSchedule,
         indent: &str,
     ) -> HashMap<NodeId, String> {
+        // LIR path: emit tick-level hoisted declarations from pre-resolved LIR data
+        if let Some(lir) = self.lir {
+            if let Some(lir_task) = lir.tasks.iter().find(|t| t.name == task_name) {
+                let hoisted_list = collect_lir_tick_hoistable_actors(&lir_task.body);
+                let mut hoisted = HashMap::new();
+                for (var_name, cpp_name, params) in &hoisted_list {
+                    let params_str = format_lir_actor_args(params);
+                    if params_str.is_empty() {
+                        let _ =
+                            writeln!(self.out, "{}auto {} = {}{{}};", indent, var_name, cpp_name);
+                    } else {
+                        let _ = writeln!(
+                            self.out,
+                            "{}auto {} = {}{{{}}};",
+                            indent, var_name, cpp_name, params_str
+                        );
+                    }
+                    if let Some(id_str) = var_name.strip_prefix("_actor_") {
+                        if let Ok(id) = id_str.parse::<u32>() {
+                            hoisted.insert(NodeId(id), var_name.clone());
+                        }
+                    }
+                }
+                return hoisted;
+            }
+        }
+
         let mut hoisted = HashMap::new();
         match (task_graph, schedule) {
             (TaskGraph::Pipeline(sub), TaskSchedule::Pipeline(sched)) => {
@@ -802,6 +833,31 @@ impl<'a> CodegenCtx<'a> {
         indent: &str,
         tick_hoisted_actors: &HashMap<NodeId, String>,
     ) {
+        // LIR path: find the corresponding LIR subgraph and emit from it
+        if let Some(lir) = self.lir {
+            if let Some(lir_task) = lir.tasks.iter().find(|t| t.name == task_name) {
+                let lir_sg = match &lir_task.body {
+                    LirTaskBody::Pipeline(sg) if label == "pipeline" => Some(sg),
+                    LirTaskBody::Modal(modal) => {
+                        if label == "control" {
+                            Some(&modal.control)
+                        } else {
+                            modal
+                                .modes
+                                .iter()
+                                .find(|(n, _)| n == label)
+                                .map(|(_, sg)| sg)
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(lir_sg) = lir_sg {
+                    self.emit_lir_subgraph(task_name, lir_sg, indent, tick_hoisted_actors);
+                    return;
+                }
+            }
+        }
+
         // Declare intra-task edge buffers
         let edge_bufs = self.declare_edge_buffers(task_name, label, sub, sched, indent);
 
@@ -1922,6 +1978,20 @@ impl<'a> CodegenCtx<'a> {
         task_graph: &TaskGraph,
         task_schedule: &TaskSchedule,
     ) {
+        // LIR path: use pre-resolved feedback buffers
+        if let Some(lir) = self.lir {
+            if let Some(lir_task) = lir.tasks.iter().find(|t| t.name == task_name) {
+                for fb in &lir_task.feedback_buffers {
+                    let _ = writeln!(
+                        self.out,
+                        "    {} {}[{}] = {{{}}};",
+                        fb.cpp_type, fb.var_name, fb.tokens, fb.init_val
+                    );
+                }
+                return;
+            }
+        }
+
         let subs_and_scheds: Vec<(&Subgraph, &SubgraphSchedule)> = match (task_graph, task_schedule)
         {
             (TaskGraph::Pipeline(sub), TaskSchedule::Pipeline(sched)) => vec![(sub, sched)],
@@ -3222,9 +3292,526 @@ impl<'a> CodegenCtx<'a> {
 
         overrides
     }
+
+    // ── LIR-based emission methods ────────────────────────────────────────
+
+    /// Emit all firings for a LIR subgraph: edge buffer declarations + firing groups.
+    fn emit_lir_subgraph(
+        &mut self,
+        task_name: &str,
+        lir_sg: &LirSubgraph,
+        indent: &str,
+        tick_hoisted: &HashMap<NodeId, String>,
+    ) {
+        // Declare edge buffers (skip feedback and aliased)
+        for eb in &lir_sg.edge_buffers {
+            if eb.is_feedback || eb.alias_of.is_some() {
+                continue;
+            }
+            let _ = writeln!(
+                self.out,
+                "{}static {} {}[{}];",
+                indent, eb.cpp_type, eb.var_name, eb.tokens
+            );
+        }
+
+        // Emit firing groups
+        for group in &lir_sg.firings {
+            match group {
+                LirFiringGroup::Single(firing) => {
+                    self.emit_lir_single_firing(task_name, firing, indent, tick_hoisted);
+                }
+                LirFiringGroup::Fused(chain) => {
+                    self.emit_lir_fused_chain(task_name, chain, indent, tick_hoisted);
+                }
+            }
+        }
+    }
+
+    /// Emit a single LIR firing with optional repetition loop.
+    fn emit_lir_single_firing(
+        &mut self,
+        task_name: &str,
+        firing: &LirFiring,
+        indent: &str,
+        tick_hoisted: &HashMap<NodeId, String>,
+    ) {
+        // For actors: determine hoisted var (tick-level first, then rep-level)
+        // and potentially emit rep-level hoisted declaration before loop
+        let mut rep_hoisted_var: Option<String> = None;
+        if let LirFiringKind::Actor(actor) = &firing.kind {
+            if tick_hoisted.contains_key(&actor.node_id) {
+                // Already tick-hoisted, will use that var
+            } else if firing.needs_loop {
+                // Rep-level hoist: emit declaration before the loop
+                if let Some(h) = &actor.hoisted {
+                    self.emit_lir_hoisted_decl(h, indent);
+                    rep_hoisted_var = Some(h.var_name.clone());
+                }
+            }
+        }
+
+        let (body_indent, close_loop) = if firing.needs_loop {
+            let _ = writeln!(
+                self.out,
+                "{}for (int _r = 0; _r < {}; ++_r) {{",
+                indent, firing.repetition
+            );
+            (format!("{}    ", indent), true)
+        } else {
+            (indent.to_string(), false)
+        };
+        let ind = body_indent.as_str();
+
+        match &firing.kind {
+            LirFiringKind::Actor(actor) => {
+                let hoisted_var = tick_hoisted
+                    .get(&actor.node_id)
+                    .map(|s| s.as_str())
+                    .or(rep_hoisted_var.as_deref());
+                self.emit_lir_actor_call(task_name, actor, ind, firing.repetition, hoisted_var);
+            }
+            LirFiringKind::Fork(fork) => {
+                let _ = writeln!(self.out, "{}// fork: {} (zero-copy)", ind, fork.tap_name);
+            }
+            LirFiringKind::Probe(probe) => {
+                self.emit_lir_probe(probe, ind, firing.repetition);
+            }
+            LirFiringKind::BufferRead(io) => {
+                self.emit_lir_buffer_read(task_name, io, ind);
+            }
+            LirFiringKind::BufferWrite(io) => {
+                if !io.skip {
+                    self.emit_lir_buffer_write(task_name, io, ind);
+                }
+            }
+        }
+
+        if close_loop {
+            let _ = writeln!(self.out, "{}}}", indent);
+        }
+    }
+
+    /// Emit a fused actor chain from LIR.
+    fn emit_lir_fused_chain(
+        &mut self,
+        task_name: &str,
+        chain: &LirFusedChain,
+        indent: &str,
+        tick_hoisted: &HashMap<NodeId, String>,
+    ) {
+        // Emit rep-level hoisted actor declarations (skip tick-hoisted ones)
+        for hoisted in &chain.hoisted_actors {
+            if let Some(id_str) = hoisted.var_name.strip_prefix("_actor_") {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    if tick_hoisted.contains_key(&NodeId(id)) {
+                        continue; // Already declared at tick level
+                    }
+                }
+            }
+            self.emit_lir_hoisted_decl(hoisted, indent);
+        }
+
+        // Emit fork comments before loop
+        for firing in &chain.body {
+            if let LirFiringKind::Fork(fork) = &firing.kind {
+                let _ = writeln!(self.out, "{}// fork: {} (zero-copy)", indent, fork.tap_name);
+            }
+        }
+
+        // Open fused loop
+        let _ = writeln!(
+            self.out,
+            "{}for (int _r = 0; _r < {}; ++_r) {{",
+            indent, chain.repetition
+        );
+        let body_indent = format!("{}    ", indent);
+        let ind = body_indent.as_str();
+
+        // Emit each firing in the chain
+        for firing in &chain.body {
+            match &firing.kind {
+                LirFiringKind::Actor(actor) => {
+                    // Priority: tick-hoisted > chain-hoisted > actor-hoisted
+                    let hoisted_var = tick_hoisted
+                        .get(&actor.node_id)
+                        .map(|s| s.as_str())
+                        .or_else(|| {
+                            chain
+                                .hoisted_actors
+                                .iter()
+                                .find(|h| h.var_name == format!("_actor_{}", actor.node_id.0))
+                                .map(|h| h.var_name.as_str())
+                        })
+                        .or_else(|| actor.hoisted.as_ref().map(|h| h.var_name.as_str()));
+                    self.emit_lir_actor_call(task_name, actor, ind, chain.repetition, hoisted_var);
+                }
+                LirFiringKind::Fork(_) => {} // Already emitted above
+                LirFiringKind::Probe(probe) => {
+                    self.emit_lir_probe(probe, ind, chain.repetition);
+                }
+                _ => {}
+            }
+        }
+
+        let _ = writeln!(self.out, "{}}}", indent);
+    }
+
+    /// Emit a hoisted actor declaration.
+    fn emit_lir_hoisted_decl(&mut self, hoisted: &LirHoistedActor, indent: &str) {
+        let params = format_lir_actor_args(&hoisted.params);
+        if params.is_empty() {
+            let _ = writeln!(
+                self.out,
+                "{}auto {} = {}{{}};",
+                indent, hoisted.var_name, hoisted.cpp_name
+            );
+        } else {
+            let _ = writeln!(
+                self.out,
+                "{}auto {} = {}{{{}}};",
+                indent, hoisted.var_name, hoisted.cpp_name, params
+            );
+        }
+    }
+
+    /// Emit an actor call from LIR with error handling.
+    fn emit_lir_actor_call(
+        &mut self,
+        task_name: &str,
+        actor: &LirActorFiring,
+        indent: &str,
+        rep: u32,
+        hoisted_var: Option<&str>,
+    ) {
+        let in_ptr = self.build_lir_input_ptr(actor, indent, rep);
+        let out_ptr = build_lir_output_ptr(actor, rep);
+
+        let call_expr = if let Some(var_name) = hoisted_var {
+            format!("{}.operator()({}, {})", var_name, in_ptr, out_ptr)
+        } else {
+            let params = format_lir_actor_args(&actor.params);
+            if params.is_empty() {
+                format!("{}{{}}({}, {})", actor.cpp_name, in_ptr, out_ptr)
+            } else {
+                format!(
+                    "{}{{{}}}.operator()({}, {})",
+                    actor.cpp_name, params, in_ptr, out_ptr
+                )
+            }
+        };
+
+        let _ = writeln!(self.out, "{}if ({} != ACTOR_OK) {{", indent, call_expr);
+        let _ = writeln!(
+            self.out,
+            "{}    fprintf(stderr, \"runtime error: actor '{}' in task '{}' returned ACTOR_ERROR\\n\");",
+            indent, actor.actor_name, task_name
+        );
+        let _ = writeln!(
+            self.out,
+            "{}    _exit_code.store(1, std::memory_order_release);",
+            indent
+        );
+        let _ = writeln!(
+            self.out,
+            "{}    _stop.store(true, std::memory_order_release);",
+            indent
+        );
+        let _ = writeln!(self.out, "{}    return;", indent);
+        let _ = writeln!(self.out, "{}}}", indent);
+    }
+
+    /// Build input pointer expression from LIR actor data.
+    fn build_lir_input_ptr(&mut self, actor: &LirActorFiring, indent: &str, rep: u32) -> String {
+        if actor.in_type == "void" || actor.inputs.is_empty() {
+            return "nullptr".to_string();
+        }
+        if actor.inputs.len() == 1 {
+            let input = &actor.inputs[0];
+            if rep > 1 {
+                let stride = actor.in_rate.unwrap_or_else(|| input.tokens / rep);
+                return format!("&{}[_r * {}]", input.buffer_var, stride);
+            }
+            return input.buffer_var.clone();
+        }
+
+        // Multi-input: concatenate slices into local buffer
+        let mut segments: Vec<(String, u32)> = Vec::with_capacity(actor.inputs.len());
+        for input in &actor.inputs {
+            let tokens_per_firing = if rep > 1 {
+                input.tokens / rep
+            } else {
+                input.tokens
+            };
+            let src_expr = if rep > 1 {
+                format!("&{}[_r * {}]", input.buffer_var, tokens_per_firing)
+            } else {
+                input.buffer_var.clone()
+            };
+            segments.push((src_expr, tokens_per_firing));
+        }
+        if segments.is_empty() {
+            return "nullptr".to_string();
+        }
+
+        let total_tokens: u32 = segments.iter().map(|(_, n)| *n).sum();
+        let effective_in = actor.in_rate.unwrap_or(total_tokens);
+        let local_in = format!("_in_{}", actor.node_id.0);
+        if total_tokens == effective_in {
+            let _ = writeln!(
+                self.out,
+                "{}{} {}[{}];",
+                indent, actor.in_type, local_in, effective_in
+            );
+        } else {
+            let _ = writeln!(
+                self.out,
+                "{}{} {}[{}] = {{}};",
+                indent, actor.in_type, local_in, effective_in
+            );
+        }
+
+        let mut offset = 0u32;
+        for (src_expr, tokens) in segments {
+            if offset >= effective_in {
+                break;
+            }
+            let copy_tokens = tokens.min(effective_in - offset);
+            self.emit_compact_input_copy(
+                indent,
+                &local_in,
+                offset,
+                src_expr.as_str(),
+                copy_tokens,
+                actor.in_type,
+            );
+            offset += copy_tokens;
+        }
+        local_in
+    }
+
+    /// Emit shared buffer read from LIR data.
+    fn emit_lir_buffer_read(&mut self, task_name: &str, io: &LirBufferIo, indent: &str) {
+        let reader_idx = io.reader_idx.unwrap_or(0);
+        let _ = writeln!(self.out, "{}int _rb_retry_{} = 0;", indent, io.edge_var);
+        let _ = writeln!(self.out, "{}while (true) {{", indent);
+        let _ = writeln!(
+            self.out,
+            "{}    if (!_ringbuf_{}.read({}, {}, {})) {{",
+            indent, io.buffer_name, reader_idx, io.edge_var, io.total_tokens
+        );
+        let _ = writeln!(
+            self.out,
+            "{}        if (_stop.load(std::memory_order_acquire)) {{",
+            indent
+        );
+        let _ = writeln!(self.out, "{}            return;", indent);
+        let _ = writeln!(self.out, "{}        }}", indent);
+        let _ = writeln!(
+            self.out,
+            "{}        if (++_rb_retry_{} < 1000000) {{",
+            indent, io.edge_var
+        );
+        let _ = writeln!(self.out, "{}            std::this_thread::yield();", indent);
+        let _ = writeln!(self.out, "{}            continue;", indent);
+        let _ = writeln!(self.out, "{}        }}", indent);
+        let _ = writeln!(
+            self.out,
+            "{}        std::fprintf(stderr, \"runtime error: task '{}' failed to read {} token(s) from shared buffer '{}'\\n\");",
+            indent, task_name, io.total_tokens, io.buffer_name
+        );
+        let _ = writeln!(
+            self.out,
+            "{}        _exit_code.store(1, std::memory_order_release);",
+            indent
+        );
+        let _ = writeln!(
+            self.out,
+            "{}        _stop.store(true, std::memory_order_release);",
+            indent
+        );
+        let _ = writeln!(self.out, "{}        return;", indent);
+        let _ = writeln!(self.out, "{}    }}", indent);
+        let _ = writeln!(self.out, "{}    break;", indent);
+        let _ = writeln!(self.out, "{}}}", indent);
+    }
+
+    /// Emit shared buffer write from LIR data.
+    fn emit_lir_buffer_write(&mut self, task_name: &str, io: &LirBufferIo, indent: &str) {
+        let _ = writeln!(self.out, "{}int _rb_retry_{} = 0;", indent, io.edge_var);
+        let _ = writeln!(self.out, "{}while (true) {{", indent);
+        let _ = writeln!(
+            self.out,
+            "{}    if (!_ringbuf_{}.write({}, {})) {{",
+            indent, io.buffer_name, io.edge_var, io.total_tokens
+        );
+        let _ = writeln!(
+            self.out,
+            "{}        if (_stop.load(std::memory_order_acquire)) {{",
+            indent
+        );
+        let _ = writeln!(self.out, "{}            return;", indent);
+        let _ = writeln!(self.out, "{}        }}", indent);
+        let _ = writeln!(
+            self.out,
+            "{}        if (++_rb_retry_{} < 1000000) {{",
+            indent, io.edge_var
+        );
+        let _ = writeln!(self.out, "{}            std::this_thread::yield();", indent);
+        let _ = writeln!(self.out, "{}            continue;", indent);
+        let _ = writeln!(self.out, "{}        }}", indent);
+        let _ = writeln!(
+            self.out,
+            "{}        std::fprintf(stderr, \"runtime error: task '{}' failed to write {} token(s) to shared buffer '{}'\\n\");",
+            indent, task_name, io.total_tokens, io.buffer_name
+        );
+        let _ = writeln!(
+            self.out,
+            "{}        _exit_code.store(1, std::memory_order_release);",
+            indent
+        );
+        let _ = writeln!(
+            self.out,
+            "{}        _stop.store(true, std::memory_order_release);",
+            indent
+        );
+        let _ = writeln!(self.out, "{}        return;", indent);
+        let _ = writeln!(self.out, "{}    }}", indent);
+        let _ = writeln!(self.out, "{}    break;", indent);
+        let _ = writeln!(self.out, "{}}}", indent);
+    }
+
+    /// Emit probe observation from LIR data.
+    fn emit_lir_probe(&mut self, probe: &LirProbeFiring, indent: &str, rep: u32) {
+        if self.options.release {
+            return;
+        }
+        let (count, src_expr) = if rep > 1 {
+            let per_firing = probe.tokens / rep;
+            if per_firing == 0 {
+                return;
+            }
+            (
+                per_firing,
+                format!("&{}[_r * {}]", probe.src_var, per_firing),
+            )
+        } else {
+            (probe.tokens, format!("({})", probe.src_var))
+        };
+        let _ = writeln!(self.out, "{}#ifndef NDEBUG", indent);
+        let _ = writeln!(
+            self.out,
+            "{}if (_probe_{}_enabled) {{",
+            indent, probe.probe_name
+        );
+        let _ = writeln!(
+            self.out,
+            "{}    for (int _pi = 0; _pi < {}; ++_pi)",
+            indent, count
+        );
+        let _ = writeln!(
+            self.out,
+            "{}        fprintf(_probe_output_file, \"[probe:{}] {}\\n\", {}[_pi]);",
+            indent, probe.probe_name, probe.fmt_spec, src_expr
+        );
+        let _ = writeln!(self.out, "{}    fflush(_probe_output_file);", indent);
+        let _ = writeln!(self.out, "{}}}", indent);
+        let _ = writeln!(self.out, "{}#endif", indent);
+    }
 }
 
 // ── Free helpers ────────────────────────────────────────────────────────────
+
+/// Collect all hoisted actor declarations from a LIR task body (free function
+/// to avoid borrow conflicts with &mut self emission methods).
+/// Collect tick-hoistable actors (above K-loop) from all subgraphs.
+/// Returns (var_name, cpp_name, params) tuples for declaration emission.
+fn collect_lir_tick_hoistable_actors(
+    body: &LirTaskBody,
+) -> Vec<(String, String, Vec<LirActorArg>)> {
+    let mut result = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let subgraphs: Vec<&LirSubgraph> = match body {
+        LirTaskBody::Pipeline(sg) => vec![sg],
+        LirTaskBody::Modal(modal) => {
+            let mut sgs = vec![&modal.control];
+            for (_, sg) in &modal.modes {
+                sgs.push(sg);
+            }
+            sgs
+        }
+    };
+    for sg in subgraphs {
+        for group in &sg.firings {
+            let actors: Vec<&LirActorFiring> = match group {
+                LirFiringGroup::Single(firing) => {
+                    if let LirFiringKind::Actor(actor) = &firing.kind {
+                        vec![actor]
+                    } else {
+                        vec![]
+                    }
+                }
+                LirFiringGroup::Fused(chain) => chain
+                    .body
+                    .iter()
+                    .filter_map(|f| {
+                        if let LirFiringKind::Actor(actor) = &f.kind {
+                            Some(actor)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect(),
+            };
+            for actor in actors {
+                if actor.tick_hoistable && seen.insert(actor.node_id) {
+                    result.push((
+                        format!("_actor_{}", actor.node_id.0),
+                        actor.cpp_name.clone(),
+                        actor.params.clone(),
+                    ));
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Format a single LIR actor arg to C++ string.
+fn format_lir_actor_arg(arg: &LirActorArg) -> String {
+    match arg {
+        LirActorArg::Literal(s) => s.clone(),
+        LirActorArg::ParamRef(name) => format!("_param_{}_val", name),
+        LirActorArg::ConstScalar(name) => format!("_const_{}", name),
+        LirActorArg::ConstSpan { name, len } => {
+            format!("std::span<const float>(_const_{}, {})", name, len)
+        }
+        LirActorArg::ConstArrayLen(len) => format!("{}", len),
+        LirActorArg::DimValue(val) => format!("{}", val),
+    }
+}
+
+/// Format all LIR actor args into a comma-separated C++ parameter string.
+fn format_lir_actor_args(args: &[LirActorArg]) -> String {
+    args.iter()
+        .map(format_lir_actor_arg)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Build output pointer expression from LIR actor data (free function to avoid borrow issues).
+fn build_lir_output_ptr(actor: &LirActorFiring, rep: u32) -> String {
+    if actor.void_output || actor.outputs.is_empty() {
+        return "nullptr".to_string();
+    }
+    let output = &actor.outputs[0];
+    if rep > 1 {
+        let stride = actor.out_rate.unwrap_or_else(|| output.tokens / rep);
+        format!("&{}[_r * {}]", output.buffer_var, stride)
+    } else {
+        output.buffer_var.clone()
+    }
+}
 
 /// Free-function actor lookup that borrows only the lowered program and registry,
 /// not the entire CodegenCtx — avoids whole-self borrow conflicts with `self.out`.
