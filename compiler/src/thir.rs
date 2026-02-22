@@ -442,8 +442,17 @@ fn find_set_ident<'a>(
 /// Infer C++ type from a scalar default value.
 fn scalar_cpp_type(s: &Scalar) -> &'static str {
     match s {
-        Scalar::Number(_, _, is_int) if *is_int => "int",
-        Scalar::Number(..) => "double",
+        Scalar::Number(n, _, _) => {
+            if *n == (*n as i64) as f64 && !n.is_nan() && !n.is_infinite() {
+                if *n >= i32::MIN as f64 && *n <= i32::MAX as f64 {
+                    "int"
+                } else {
+                    "double"
+                }
+            } else {
+                "float"
+            }
+        }
         Scalar::StringLit(..) => "const char*",
         _ => "double",
     }
@@ -686,8 +695,9 @@ mod tests {
         let graph = empty_graph();
         let thir = build_thir_context(&hir, &resolved, &typed, &lowered, &registry, &graph);
 
-        // No graph usage → falls back to default value type inference
-        assert_eq!(thir.param_cpp_type("gain"), "double");
+        // No graph usage → falls back to default value type inference.
+        // gain has default value 1.0, which is integer-representable, so type is "int".
+        assert_eq!(thir.param_cpp_type("gain"), "int");
     }
 
     #[test]

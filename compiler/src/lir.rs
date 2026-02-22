@@ -249,6 +249,10 @@ pub struct LirBufferIo {
     pub total_tokens: u32,
     pub reader_idx: Option<usize>,
     pub skip: bool,
+    /// Source node ID (for retry variable naming: `_rb_retry_{src}_{tgt}`).
+    pub src_node_id: NodeId,
+    /// Target/peer node ID (for retry variable naming).
+    pub peer_node_id: NodeId,
 }
 
 // ── Probes ─────────────────────────────────────────────────────────────────
@@ -866,7 +870,14 @@ impl<'a> LirBuilder<'a> {
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
     ) -> LirFiring {
         let rep = entry.repetition_count;
-        let needs_loop = rep > 1;
+        // Fork/Probe are zero-copy passthrough nodes; buffer I/O already performs
+        // block transfers. These nodes do not get per-firing loops.
+        let is_passthrough = matches!(node.kind, NodeKind::Fork { .. } | NodeKind::Probe { .. });
+        let is_buffer_io = matches!(
+            node.kind,
+            NodeKind::BufferRead { .. } | NodeKind::BufferWrite { .. }
+        );
+        let needs_loop = rep > 1 && !is_passthrough && !is_buffer_io;
         let kind = self.build_firing_kind(task_name, sub, sched, node, edge_bufs, rep, true);
         LirFiring {
             kind,
@@ -1395,6 +1406,11 @@ impl<'a> LirBuilder<'a> {
             .buffer_reader_tasks(buffer_name)
             .iter()
             .position(|t| t == task_name);
+        let (src_node_id, peer_node_id) = if let Some(out_edge) = outgoing.first() {
+            (node.id, out_edge.target)
+        } else {
+            (node.id, node.id)
+        };
         LirBufferIo {
             buffer_name: buffer_name.to_string(),
             task_name: task_name.to_string(),
@@ -1402,6 +1418,8 @@ impl<'a> LirBuilder<'a> {
             total_tokens,
             reader_idx,
             skip: false,
+            src_node_id,
+            peer_node_id,
         }
     }
 
@@ -1436,6 +1454,11 @@ impl<'a> LirBuilder<'a> {
             .get(buffer_name)
             .map(|info| info.readers.is_empty())
             .unwrap_or(false);
+        let (src_node_id, peer_node_id) = if let Some(in_edge) = incoming.first() {
+            (in_edge.source, node.id)
+        } else {
+            (node.id, node.id)
+        };
         LirBufferIo {
             buffer_name: buffer_name.to_string(),
             task_name: task_name.to_string(),
@@ -1443,6 +1466,8 @@ impl<'a> LirBuilder<'a> {
             total_tokens,
             reader_idx: None,
             skip,
+            src_node_id,
+            peer_node_id,
         }
     }
 

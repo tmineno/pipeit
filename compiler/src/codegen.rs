@@ -2410,7 +2410,9 @@ impl<'a> CodegenCtx<'a> {
             .push_str("            auto val = arg.substr(eq + 1);\n");
 
         if let Some(lir) = self.lir {
-            for (i, p) in lir.params.iter().enumerate() {
+            let mut sorted_params: Vec<&_> = lir.params.iter().collect();
+            sorted_params.sort_by_key(|p| &p.name);
+            for (i, p) in sorted_params.iter().enumerate() {
                 let keyword = if i == 0 { "if" } else { "else if" };
                 let _ = writeln!(
                     self.out,
@@ -3441,7 +3443,8 @@ impl<'a> CodegenCtx<'a> {
                 let _ = writeln!(self.out, "{}// fork: {} (zero-copy)", ind, fork.tap_name);
             }
             LirFiringKind::Probe(probe) => {
-                self.emit_lir_probe(probe, ind, firing.repetition);
+                // Probes are standalone (no _r loop), so always emit full buffer
+                self.emit_lir_probe(probe, ind, 1);
             }
             LirFiringKind::BufferRead(io) => {
                 self.emit_lir_buffer_read(task_name, io, ind);
@@ -3659,7 +3662,11 @@ impl<'a> CodegenCtx<'a> {
     /// Emit shared buffer read from LIR data.
     fn emit_lir_buffer_read(&mut self, task_name: &str, io: &LirBufferIo, indent: &str) {
         let reader_idx = io.reader_idx.unwrap_or(0);
-        let _ = writeln!(self.out, "{}int _rb_retry_{} = 0;", indent, io.edge_var);
+        let _ = writeln!(
+            self.out,
+            "{}int _rb_retry_{}_{} = 0;",
+            indent, io.src_node_id.0, io.peer_node_id.0
+        );
         let _ = writeln!(self.out, "{}while (true) {{", indent);
         let _ = writeln!(
             self.out,
@@ -3675,8 +3682,8 @@ impl<'a> CodegenCtx<'a> {
         let _ = writeln!(self.out, "{}        }}", indent);
         let _ = writeln!(
             self.out,
-            "{}        if (++_rb_retry_{} < 1000000) {{",
-            indent, io.edge_var
+            "{}        if (++_rb_retry_{}_{} < 1000000) {{",
+            indent, io.src_node_id.0, io.peer_node_id.0
         );
         let _ = writeln!(self.out, "{}            std::this_thread::yield();", indent);
         let _ = writeln!(self.out, "{}            continue;", indent);
@@ -3704,7 +3711,11 @@ impl<'a> CodegenCtx<'a> {
 
     /// Emit shared buffer write from LIR data.
     fn emit_lir_buffer_write(&mut self, task_name: &str, io: &LirBufferIo, indent: &str) {
-        let _ = writeln!(self.out, "{}int _rb_retry_{} = 0;", indent, io.edge_var);
+        let _ = writeln!(
+            self.out,
+            "{}int _rb_retry_{}_{} = 0;",
+            indent, io.src_node_id.0, io.peer_node_id.0
+        );
         let _ = writeln!(self.out, "{}while (true) {{", indent);
         let _ = writeln!(
             self.out,
@@ -3720,8 +3731,8 @@ impl<'a> CodegenCtx<'a> {
         let _ = writeln!(self.out, "{}        }}", indent);
         let _ = writeln!(
             self.out,
-            "{}        if (++_rb_retry_{} < 1000000) {{",
-            indent, io.edge_var
+            "{}        if (++_rb_retry_{}_{} < 1000000) {{",
+            indent, io.src_node_id.0, io.peer_node_id.0
         );
         let _ = writeln!(self.out, "{}            std::this_thread::yield();", indent);
         let _ = writeln!(self.out, "{}            continue;", indent);
@@ -3762,7 +3773,7 @@ impl<'a> CodegenCtx<'a> {
                 format!("&{}[_r * {}]", probe.src_var, per_firing),
             )
         } else {
-            (probe.tokens, format!("({})", probe.src_var))
+            (probe.tokens, probe.src_var.clone())
         };
         let _ = writeln!(self.out, "{}#ifndef NDEBUG", indent);
         let _ = writeln!(
@@ -3777,7 +3788,7 @@ impl<'a> CodegenCtx<'a> {
         );
         let _ = writeln!(
             self.out,
-            "{}        fprintf(_probe_output_file, \"[probe:{}] {}\\n\", {}[_pi]);",
+            "{}        fprintf(_probe_output_file, \"[probe:{}] {}\\n\", ({})[_pi]);",
             indent, probe.probe_name, probe.fmt_spec, src_expr
         );
         let _ = writeln!(self.out, "{}    fflush(_probe_output_file);", indent);
