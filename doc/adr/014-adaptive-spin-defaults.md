@@ -2,7 +2,7 @@
 
 ## Context
 
-v0.2.1 benchmarks (doc/performance-analysis-report.md) revealed that the current defaults (`tick_rate = 1MHz`, `timer_spin = 0`) cause unnecessary OS wake-ups and leave wake-up jitter unmitigated:
+v0.2.1 benchmark runs revealed that the current defaults (`tick_rate = 1MHz`, `timer_spin = 0`) cause unnecessary OS wake-ups and leave wake-up jitter unmitigated:
 
 - At 100kHz with K=1, overrun rate is 87.65% and CPU time is 105ms.
 - At 10kHz with K=1, overrun rate is 2.85% with p99 latency ~111us.

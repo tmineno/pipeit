@@ -119,7 +119,7 @@ runtime/        C++ runtime library (libpipit)
 tools/          Standalone tools
   pipscope/       Real-time oscilloscope GUI (ImGui + ImPlot)
 examples/       Example .pdl files and actor headers
-doc/            Language spec, ADRs, usage guide, performance report
+doc/            Language spec, ADRs, usage guide, performance specs
 benches/        Performance benchmarks (compiler, runtime, E2E)
 ```
 
@@ -129,7 +129,7 @@ benches/        Performance benchmarks (compiler, runtime, E2E)
 - [PPKT Protocol Spec](doc/spec/ppkt-protocol-spec-v0.3.0.md)
 - [Standard Library Reference](doc/spec/standard-library-spec-v0.3.0.md)
 - [pcc Usage Guide](doc/pcc-usage-guide.md)
-- [Performance Analysis Report](doc/performance-analysis-report.md)
+- [pcc Performance KPI/Test Spec](doc/spec/pcc-perf-spec-v0.3.0.md)
 - [Development TODO](doc/TODO.md)
 
 ## License
