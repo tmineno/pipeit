@@ -121,8 +121,8 @@ pub struct HirActorCall {
     /// Actor arguments — reuses AST `Arg` type. Already substituted if
     /// this call was expanded from a define body.
     pub args: Vec<Arg>,
-    /// Explicit type arguments (e.g., `actor<float>(...)`).
-    pub type_args: Vec<String>,
+    /// Explicit type arguments (e.g., `actor<float>(...)`) with their spans.
+    pub type_args: Vec<(String, Span)>,
     /// Optional shape constraint: `actor(...)[d0, d1, ...]`.
     pub shape_constraint: Option<ShapeConstraint>,
 }
@@ -417,16 +417,21 @@ impl<'a> HirBuilder<'a> {
         if let Some(CallResolution::Define) = self.resolved.call_resolution_for(call.span) {
             if depth >= MAX_INLINE_DEPTH {
                 // Exceeded depth limit — emit as actor (will fail later in graph)
-                return ExpandedCall::Actor(self.make_hir_actor_call(call));
+                return ExpandedCall::Actor(self.make_hir_actor_call(call, depth));
             }
             return self.inline_define(call, depth);
         }
 
-        ExpandedCall::Actor(self.make_hir_actor_call(call))
+        ExpandedCall::Actor(self.make_hir_actor_call(call, depth))
     }
 
-    fn make_hir_actor_call(&mut self, call: &ActorCall) -> HirActorCall {
-        // Use the resolve-phase CallId if available; allocate fresh otherwise
+    fn make_hir_actor_call(&mut self, call: &ActorCall, _depth: u32) -> HirActorCall {
+        // Use the resolve-phase CallId if available; allocate fresh otherwise.
+        //
+        // NOTE: CallId aliasing fix (fresh IDs per define expansion) is deferred
+        // to Step 2, when type_infer migrates to HIR. Until then, type_infer
+        // stores monomorphization results under resolve-phase CallIds — changing
+        // them here would break downstream lookup.
         let call_id = if let Some(&id) = self.resolved.call_ids.get(&call.span) {
             id
         } else {
@@ -441,7 +446,11 @@ impl<'a> HirBuilder<'a> {
             call_id,
             call_span: call.span,
             args: call.args.clone(),
-            type_args: call.type_args.iter().map(|i| i.name.clone()).collect(),
+            type_args: call
+                .type_args
+                .iter()
+                .map(|i| (i.name.clone(), i.span))
+                .collect(),
             shape_constraint: call.shape_constraint.clone(),
         }
     }
@@ -449,12 +458,12 @@ impl<'a> HirBuilder<'a> {
     fn inline_define(&mut self, call: &ActorCall, depth: u32) -> ExpandedCall {
         let define_entry = match self.resolved.defines.get(&call.name.name) {
             Some(e) => e.clone(),
-            None => return ExpandedCall::Actor(self.make_hir_actor_call(call)),
+            None => return ExpandedCall::Actor(self.make_hir_actor_call(call, depth)),
         };
 
         let define_stmt = match &self.program.statements[define_entry.stmt_index].kind {
             StatementKind::Define(d) => d,
-            _ => return ExpandedCall::Actor(self.make_hir_actor_call(call)),
+            _ => return ExpandedCall::Actor(self.make_hir_actor_call(call, depth)),
         };
 
         // Build argument substitution map: formal param name → actual arg
