@@ -425,14 +425,15 @@ impl<'a> HirBuilder<'a> {
         ExpandedCall::Actor(self.make_hir_actor_call(call, depth))
     }
 
-    fn make_hir_actor_call(&mut self, call: &ActorCall, _depth: u32) -> HirActorCall {
-        // Use the resolve-phase CallId if available; allocate fresh otherwise.
-        //
-        // NOTE: CallId aliasing fix (fresh IDs when depth > 0) is deferred to
-        // Step 3, when lower is also migrated to HIR. Until then, lower resolves
-        // CallIds via resolved.call_id_for_span(call.span) — changing IDs here
-        // would cause lower's type_instantiation lookup to miss.
-        let call_id = if let Some(&id) = self.resolved.call_ids.get(&call.span) {
+    fn make_hir_actor_call(&mut self, call: &ActorCall, depth: u32) -> HirActorCall {
+        let call_id = if depth > 0 {
+            // Define-expanded call: always allocate fresh CallId to avoid aliasing
+            // when the same define is expanded in different type contexts.
+            let id = self.id_alloc.alloc_call();
+            self.expanded_call_ids.insert(call.span, id);
+            self.expanded_call_spans.insert(id, call.span);
+            id
+        } else if let Some(&id) = self.resolved.call_ids.get(&call.span) {
             id
         } else {
             let id = self.id_alloc.alloc_call();
