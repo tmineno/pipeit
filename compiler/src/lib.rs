@@ -14,6 +14,7 @@ pub mod lexer;
 pub mod lir;
 pub mod lower;
 pub mod parser;
+pub mod pass;
 pub mod program_query;
 pub mod registry;
 pub mod resolve;
