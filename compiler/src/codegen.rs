@@ -18,6 +18,7 @@ use crate::analyze::AnalyzedProgram;
 use crate::ast::*;
 use crate::graph::*;
 use crate::id::CallId;
+use crate::lir::{LirConstValue, LirProgram, LirTimerSpin};
 use crate::lower::LoweredProgram;
 use crate::program_query;
 use crate::registry::{ActorMeta, ParamKind, ParamType, PipitType, Registry, TokenCount};
@@ -74,7 +75,7 @@ pub fn codegen_with_lowered(
     lowered: Option<&LoweredProgram>,
 ) -> CodegenResult {
     let mut ctx = CodegenCtx::new(
-        program, resolved, graph, analysis, schedule, registry, options, lowered,
+        program, resolved, graph, analysis, schedule, registry, options, lowered, None,
     );
     ctx.emit_all();
     ctx.build_result()
@@ -91,6 +92,7 @@ struct CodegenCtx<'a> {
     registry: &'a Registry,
     options: &'a CodegenOptions,
     lowered: Option<&'a LoweredProgram>,
+    lir: Option<&'a LirProgram>,
     subgraph_indices: HashMap<usize, SubgraphIndex>,
     out: String,
     diagnostics: Vec<Diagnostic>,
@@ -129,6 +131,7 @@ impl<'a> CodegenCtx<'a> {
         registry: &'a Registry,
         options: &'a CodegenOptions,
         lowered: Option<&'a LoweredProgram>,
+        lir: Option<&'a LirProgram>,
     ) -> Self {
         let subgraph_indices = build_subgraph_indices(graph);
         CodegenCtx {
@@ -140,6 +143,7 @@ impl<'a> CodegenCtx<'a> {
             registry,
             options,
             lowered,
+            lir,
             subgraph_indices,
             out: String::with_capacity(8192),
             diagnostics: Vec::new(),
@@ -251,6 +255,37 @@ impl<'a> CodegenCtx<'a> {
     // ── Phase 2: Const storage ──────────────────────────────────────────
 
     fn emit_const_storage(&mut self) {
+        if let Some(lir) = self.lir {
+            if lir.consts.is_empty() {
+                return;
+            }
+            for c in &lir.consts {
+                match &c.value {
+                    LirConstValue::Scalar { literal } => {
+                        let _ = writeln!(
+                            self.out,
+                            "static constexpr auto _const_{} = {};",
+                            c.name, literal
+                        );
+                    }
+                    LirConstValue::Array {
+                        elem_type,
+                        elements,
+                    } => {
+                        let _ = writeln!(
+                            self.out,
+                            "static constexpr {} _const_{}[] = {{{}}};",
+                            elem_type,
+                            c.name,
+                            elements.join(", ")
+                        );
+                    }
+                }
+            }
+            self.out.push('\n');
+            return;
+        }
+
         let mut has_any = false;
         for stmt in &self.program.statements {
             if let StatementKind::Const(c) = &stmt.kind {
@@ -326,6 +361,26 @@ impl<'a> CodegenCtx<'a> {
     }
 
     fn emit_param_storage(&mut self) {
+        if let Some(lir) = self.lir {
+            if lir.params.is_empty() {
+                return;
+            }
+            for p in &lir.params {
+                let _ = writeln!(
+                    self.out,
+                    "static std::atomic<{}> _param_{}_write({});",
+                    p.cpp_type, p.name, p.default_literal
+                );
+                let _ = writeln!(
+                    self.out,
+                    "static std::atomic<{}> _param_{}_read({});",
+                    p.cpp_type, p.name, p.default_literal
+                );
+            }
+            self.out.push('\n');
+            return;
+        }
+
         let mut has_any = false;
         for stmt in &self.program.statements {
             if let StatementKind::Param(p) = &stmt.kind {
@@ -352,6 +407,21 @@ impl<'a> CodegenCtx<'a> {
     // ── Phase 4: Shared (inter-task) buffers ────────────────────────────
 
     fn emit_shared_buffers(&mut self) {
+        if let Some(lir) = self.lir {
+            if lir.inter_task_buffers.is_empty() {
+                return;
+            }
+            for buf in &lir.inter_task_buffers {
+                let _ = writeln!(
+                    self.out,
+                    "static pipit::RingBuffer<{}, {}, {}> _ringbuf_{};",
+                    buf.cpp_type, buf.capacity_tokens, buf.reader_count, buf.name
+                );
+            }
+            self.out.push('\n');
+            return;
+        }
+
         if self.resolved.buffers.is_empty() {
             return;
         }
@@ -387,6 +457,25 @@ impl<'a> CodegenCtx<'a> {
 
     fn emit_stats_storage(&mut self) {
         self.out.push_str("static bool _stats = false;\n");
+
+        if let Some(lir) = self.lir {
+            for task in &lir.tasks {
+                let _ = writeln!(self.out, "static pipit::TaskStats _stats_{};", task.name);
+            }
+            if !lir.probes.is_empty() && !self.options.release {
+                self.out
+                    .push_str("static FILE* _probe_output_file = nullptr;\n");
+                for probe in &lir.probes {
+                    let _ = writeln!(
+                        self.out,
+                        "static bool _probe_{}_enabled = false;",
+                        probe.name
+                    );
+                }
+            }
+            self.out.push('\n');
+            return;
+        }
 
         let mut task_names: Vec<&String> = self.schedule.tasks.keys().collect();
         task_names.sort();
@@ -538,7 +627,12 @@ impl<'a> CodegenCtx<'a> {
 
         // Timer (measure_latency enabled only when stats are active;
         // spin_ns from `set timer_spin`, default 10us; `auto` = adaptive).
-        let spin_ns = if program_query::get_set_ident(self.program, "timer_spin") == Some("auto") {
+        let spin_ns = if let Some(lir) = self.lir {
+            match lir.directives.timer_spin {
+                LirTimerSpin::Fixed(ns) => ns,
+                LirTimerSpin::Adaptive => -1,
+            }
+        } else if program_query::get_set_ident(self.program, "timer_spin") == Some("auto") {
             -1_i64
         } else {
             program_query::get_set_number(self.program, "timer_spin").unwrap_or(10_000.0) as i64
@@ -2015,9 +2109,40 @@ impl<'a> CodegenCtx<'a> {
     fn emit_stats_output(&mut self) {
         self.out.push_str("    if (_stats) {\n");
 
+        let policy = self.get_overrun_policy().to_string();
+
+        if let Some(lir) = self.lir {
+            for task in &lir.tasks {
+                let _ = writeln!(
+                    self.out,
+                    "        fprintf(stderr, \"[stats] task '{}': ticks=%lu, missed=%lu ({}), max_latency=%ldns, avg_latency=%ldns\\n\",\n\
+                                 (unsigned long)_stats_{}.ticks, (unsigned long)_stats_{}.missed,\n\
+                                 _stats_{}.max_latency_ns, _stats_{}.avg_latency_ns());",
+                    task.name, policy, task.name, task.name, task.name, task.name
+                );
+            }
+
+            for buf in &lir.inter_task_buffers {
+                let _ = writeln!(
+                    self.out,
+                    "        fprintf(stderr, \"[stats] shared buffer '{}': %zu tokens (%zuB)\\n\",\n\
+                                 (size_t)_ringbuf_{}.available(), _ringbuf_{}.available() * sizeof({}));",
+                    buf.name, buf.name, buf.name, buf.cpp_type
+                );
+            }
+
+            let _ = writeln!(
+                self.out,
+                "        fprintf(stderr, \"[stats] memory pool: %zuB allocated, %zuB used\\n\", (size_t){}, (size_t){});",
+                lir.directives.mem_bytes, lir.total_memory
+            );
+
+            self.out.push_str("    }\n");
+            return;
+        }
+
         let mut task_names: Vec<&String> = self.schedule.tasks.keys().collect();
         task_names.sort();
-        let policy = self.get_overrun_policy().to_string();
 
         for name in &task_names {
             let _ = writeln!(
@@ -2414,6 +2539,9 @@ impl<'a> CodegenCtx<'a> {
     }
 
     fn get_overrun_policy(&self) -> &str {
+        if let Some(lir) = self.lir {
+            return &lir.directives.overrun_policy;
+        }
         match program_query::get_set_ident(self.program, "overrun") {
             Some("drop") | Some("slip") | Some("backlog") => {
                 program_query::get_set_ident(self.program, "overrun").unwrap()
@@ -3121,7 +3249,13 @@ mod tests {
             "schedule errors: {:#?}",
             schedule_result.diagnostics
         );
-        codegen(
+        let lir = crate::lir::build_lir(
+            &thir,
+            &graph_result.graph,
+            &analysis_result.analysis,
+            &schedule_result.schedule,
+        );
+        let mut ctx = CodegenCtx::new(
             &program,
             &resolve_result.resolved,
             &graph_result.graph,
@@ -3129,7 +3263,11 @@ mod tests {
             &schedule_result.schedule,
             registry,
             &options,
-        )
+            None,
+            Some(&lir),
+        );
+        ctx.emit_all();
+        ctx.build_result()
     }
 
     fn codegen_source(source: &str, registry: &Registry) -> CodegenResult {
@@ -3899,19 +4037,29 @@ mod tests {
             schedule_result.diagnostics
         );
 
-        let result = codegen_with_lowered(
+        let lir = crate::lir::build_lir(
+            &thir,
+            &graph_result.graph,
+            &analysis_result.analysis,
+            &schedule_result.schedule,
+        );
+        let options = CodegenOptions {
+            release: false,
+            include_paths: vec![],
+        };
+        let mut ctx = CodegenCtx::new(
             &program,
             &resolve_result.resolved,
             &graph_result.graph,
             &analysis_result.analysis,
             &schedule_result.schedule,
             registry,
-            &CodegenOptions {
-                release: false,
-                include_paths: vec![],
-            },
+            &options,
             Some(&lower_result.lowered),
+            Some(&lir),
         );
+        ctx.emit_all();
+        let result = ctx.build_result();
         let errors: Vec<_> = result
             .diagnostics
             .iter()
