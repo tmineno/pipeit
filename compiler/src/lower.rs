@@ -91,6 +91,28 @@ impl Cert {
     }
 }
 
+impl crate::pass::StageCert for Cert {
+    fn all_pass(&self) -> bool {
+        Cert::all_pass(self)
+    }
+
+    fn obligations(&self) -> Vec<(&'static str, bool)> {
+        vec![
+            ("L1_type_consistency", self.l1_type_consistency),
+            ("L2_widening_safety", self.l2_widening_safety),
+            (
+                "L3_rate_shape_preservation",
+                self.l3_rate_shape_preservation,
+            ),
+            (
+                "L4_monomorphization_soundness",
+                self.l4_monomorphization_soundness,
+            ),
+            ("L5_no_fallback_typing", self.l5_no_fallback_typing),
+        ]
+    }
+}
+
 // ── Public entry point ──────────────────────────────────────────────────────
 
 /// Lower the typed program: insert widening nodes, build concrete actor map,
@@ -1036,6 +1058,38 @@ mod tests {
             l5_no_fallback_typing: true,
         };
         assert!(!cert.all_pass());
+    }
+
+    #[test]
+    fn stage_cert_obligations_reflect_fields() {
+        use crate::pass::StageCert;
+
+        let passing = Cert {
+            l1_type_consistency: true,
+            l2_widening_safety: true,
+            l3_rate_shape_preservation: true,
+            l4_monomorphization_soundness: true,
+            l5_no_fallback_typing: true,
+        };
+        assert!(passing.all_pass());
+        assert_eq!(passing.obligations().len(), 5);
+        assert!(passing.obligations().iter().all(|(_, ok)| *ok));
+
+        let failing = Cert {
+            l1_type_consistency: true,
+            l2_widening_safety: false,
+            l3_rate_shape_preservation: true,
+            l4_monomorphization_soundness: true,
+            l5_no_fallback_typing: false,
+        };
+        assert!(!StageCert::all_pass(&failing));
+        let failed: Vec<&str> = failing
+            .obligations()
+            .iter()
+            .filter(|(_, ok)| !ok)
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(failed, vec!["L2_widening_safety", "L5_no_fallback_typing"]);
     }
 
     // ── Widening node insertion test ────────────────────────────────────

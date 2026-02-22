@@ -8,6 +8,17 @@
 
 use std::collections::HashSet;
 
+// ── Stage verification trait ──────────────────────────────────────────────
+
+/// Machine-checkable evidence for stage postconditions.
+/// Each stage with proof obligations implements this trait.
+pub trait StageCert: std::fmt::Debug {
+    /// True if all proof obligations pass.
+    fn all_pass(&self) -> bool;
+    /// Returns (obligation_name, passed) pairs for reporting.
+    fn obligations(&self) -> Vec<(&'static str, bool)>;
+}
+
 // ── Pass and Artifact identifiers ──────────────────────────────────────────
 
 /// Identifies each compiler pass (parse excluded — handled before the runner).
