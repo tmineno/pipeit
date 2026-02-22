@@ -75,6 +75,124 @@ pub struct ScheduledProgram {
     pub tasks: HashMap<String, TaskMeta>,
 }
 
+// ── Verification ─────────────────────────────────────────────────────────────
+
+/// Machine-checkable evidence for schedule postconditions (S1-S2).
+#[derive(Debug, Clone)]
+pub struct ScheduleCert {
+    /// S1: Every HIR task has a corresponding schedule entry.
+    pub s1_all_tasks_scheduled: bool,
+    /// S2: Every subgraph node appears exactly once in the firing order.
+    pub s2_all_nodes_fired: bool,
+}
+
+impl crate::pass::StageCert for ScheduleCert {
+    fn all_pass(&self) -> bool {
+        self.s1_all_tasks_scheduled && self.s2_all_nodes_fired
+    }
+
+    fn obligations(&self) -> Vec<(&'static str, bool)> {
+        vec![
+            ("S1_all_tasks_scheduled", self.s1_all_tasks_scheduled),
+            ("S2_all_nodes_fired", self.s2_all_nodes_fired),
+        ]
+    }
+}
+
+/// Verify schedule postconditions.
+///
+/// `task_names` is the list of task names from `hir.tasks` (extracted before
+/// entering the thir borrow scope to avoid lifetime conflicts).
+pub fn verify_schedule(
+    schedule: &ScheduledProgram,
+    graph: &ProgramGraph,
+    task_names: &[String],
+) -> ScheduleCert {
+    let s1 = verify_s1_all_tasks_scheduled(schedule, task_names);
+    let s2 = verify_s2_all_nodes_fired(schedule, graph);
+    ScheduleCert {
+        s1_all_tasks_scheduled: s1,
+        s2_all_nodes_fired: s2,
+    }
+}
+
+/// S1: Every HIR task name has a corresponding entry in the schedule.
+fn verify_s1_all_tasks_scheduled(schedule: &ScheduledProgram, task_names: &[String]) -> bool {
+    task_names
+        .iter()
+        .all(|name| schedule.tasks.contains_key(name))
+}
+
+/// S2: For each scheduled task, every graph node appears exactly once in firings.
+///
+/// Three conditions checked per subgraph pair:
+/// (a) firings.len() == graph_nodes.len()
+/// (b) no duplicate node_ids in firings (HashSet insert returns false → duplicate)
+/// (c) every graph node is present in the firing set
+fn verify_s2_all_nodes_fired(schedule: &ScheduledProgram, graph: &ProgramGraph) -> bool {
+    for (task_name, task_meta) in &schedule.tasks {
+        let task_graph = match graph.tasks.get(task_name) {
+            Some(g) => g,
+            None => return false, // scheduled task not in graph — unexpected
+        };
+
+        match (&task_meta.schedule, task_graph) {
+            (TaskSchedule::Pipeline(sched), TaskGraph::Pipeline(sub)) => {
+                if !check_subgraph_coverage(sched, sub) {
+                    return false;
+                }
+            }
+            (
+                TaskSchedule::Modal {
+                    control: ctrl_sched,
+                    modes: mode_scheds,
+                },
+                TaskGraph::Modal {
+                    control: ctrl_graph,
+                    modes: mode_graphs,
+                },
+            ) => {
+                if !check_subgraph_coverage(ctrl_sched, ctrl_graph) {
+                    return false;
+                }
+                for (mode_name, mode_sched) in mode_scheds {
+                    let mode_graph = match mode_graphs.iter().find(|(n, _)| n == mode_name) {
+                        Some((_, g)) => g,
+                        None => return false,
+                    };
+                    if !check_subgraph_coverage(mode_sched, mode_graph) {
+                        return false;
+                    }
+                }
+            }
+            _ => return false, // Pipeline/Modal mismatch
+        }
+    }
+    true
+}
+
+/// Check that a subgraph schedule covers every node exactly once.
+fn check_subgraph_coverage(sched: &SubgraphSchedule, sub: &Subgraph) -> bool {
+    // (a) Length equality
+    if sched.firings.len() != sub.nodes.len() {
+        return false;
+    }
+    // (b) No duplicates in firings
+    let mut seen = HashSet::with_capacity(sched.firings.len());
+    for entry in &sched.firings {
+        if !seen.insert(entry.node_id) {
+            return false; // duplicate
+        }
+    }
+    // (c) Every graph node is present
+    for node in &sub.nodes {
+        if !seen.contains(&node.id) {
+            return false;
+        }
+    }
+    true
+}
+
 // ── Public entry point ──────────────────────────────────────────────────────
 
 /// Generate PASS schedules for all tasks in a program.
@@ -1107,5 +1225,115 @@ mod tests {
             "batched high-freq should not warn: {:?}",
             warnings
         );
+    }
+
+    // ── verify_schedule tests ───────────────────────────────────────────
+
+    /// Helper: build schedule and graph from source for verification tests.
+    fn build_schedule_and_graph(
+        source: &str,
+        registry: &Registry,
+    ) -> (ScheduleResult, crate::graph::GraphResult, Vec<String>) {
+        let parse_result = crate::parser::parse(source);
+        assert!(
+            parse_result.errors.is_empty(),
+            "parse errors: {:?}",
+            parse_result.errors
+        );
+        let program = parse_result.program.expect("parse failed");
+        let mut resolve_result = resolve::resolve(&program, registry);
+        assert!(
+            resolve_result
+                .diagnostics
+                .iter()
+                .all(|d| d.level != DiagLevel::Error),
+            "resolve errors: {:#?}",
+            resolve_result.diagnostics
+        );
+        let hir_program = crate::hir::build_hir(
+            &program,
+            &resolve_result.resolved,
+            &mut resolve_result.id_alloc,
+        );
+        let task_names: Vec<String> = hir_program.tasks.iter().map(|t| t.name.clone()).collect();
+        let graph_result =
+            crate::graph::build_graph(&hir_program, &resolve_result.resolved, registry);
+        assert!(
+            graph_result
+                .diagnostics
+                .iter()
+                .all(|d| d.level != DiagLevel::Error),
+            "graph errors: {:#?}",
+            graph_result.diagnostics
+        );
+        let type_result =
+            crate::type_infer::type_infer(&hir_program, &resolve_result.resolved, registry);
+        let lower_result = crate::lower::lower_and_verify(
+            &hir_program,
+            &resolve_result.resolved,
+            &type_result.typed,
+            registry,
+        );
+        let thir = crate::thir::build_thir_context(
+            &hir_program,
+            &resolve_result.resolved,
+            &type_result.typed,
+            &lower_result.lowered,
+            registry,
+            &graph_result.graph,
+        );
+        let analysis_result = crate::analyze::analyze(&thir, &graph_result.graph);
+        assert!(
+            analysis_result
+                .diagnostics
+                .iter()
+                .all(|d| d.level != DiagLevel::Error),
+            "analysis errors: {:#?}",
+            analysis_result.diagnostics
+        );
+        let sched_result = schedule(&thir, &graph_result.graph, &analysis_result.analysis);
+        (sched_result, graph_result, task_names)
+    }
+
+    #[test]
+    fn verify_schedule_passing() {
+        use crate::pass::StageCert;
+        let reg = test_registry();
+        let (sched_result, graph_result, task_names) =
+            build_schedule_and_graph("clock 1kHz t {\n    constant(0.0) | stdout()\n}", &reg);
+        let cert = verify_schedule(&sched_result.schedule, &graph_result.graph, &task_names);
+        assert!(
+            cert.all_pass(),
+            "cert should pass: {:?}",
+            cert.obligations()
+        );
+    }
+
+    #[test]
+    fn verify_schedule_s1_missing_task() {
+        let reg = test_registry();
+        let (sched_result, graph_result, _) =
+            build_schedule_and_graph("clock 1kHz t {\n    constant(0.0) | stdout()\n}", &reg);
+        // Inject an extra task name that doesn't exist in schedule
+        let task_names = vec!["t".to_string(), "nonexistent".to_string()];
+        let cert = verify_schedule(&sched_result.schedule, &graph_result.graph, &task_names);
+        assert!(!cert.s1_all_tasks_scheduled, "S1 should fail");
+        assert!(cert.s2_all_nodes_fired, "S2 should still pass");
+    }
+
+    #[test]
+    fn verify_schedule_s2_missing_node() {
+        let reg = test_registry();
+        let (mut sched_result, graph_result, task_names) =
+            build_schedule_and_graph("clock 1kHz t {\n    constant(0.0) | stdout()\n}", &reg);
+        // Remove a firing from the schedule to simulate missing node
+        if let Some(meta) = sched_result.schedule.tasks.get_mut("t") {
+            if let TaskSchedule::Pipeline(ref mut sched) = meta.schedule {
+                sched.firings.pop(); // remove last firing
+            }
+        }
+        let cert = verify_schedule(&sched_result.schedule, &graph_result.graph, &task_names);
+        assert!(cert.s1_all_tasks_scheduled, "S1 should still pass");
+        assert!(!cert.s2_all_nodes_fired, "S2 should fail");
     }
 }
