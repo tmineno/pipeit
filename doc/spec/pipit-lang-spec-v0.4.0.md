@@ -847,13 +847,23 @@ error: feedback loop detected at ':out -> :fb -> add' with no delay
 ```
 bind iq  = udp("127.0.0.1:9100", chan=10)
 bind cmd = udp("127.0.0.1:9200", chan=2)
+bind iq2 = shm("rx.iq", slots=1024, slot_bytes=4096)
 ```
+
+利用可能な endpoint 種別:
+
+- `udp("host:port", chan=<u16>)`
+- `unix_dgram("unix:///path", chan=<u16>)`
+- `shm("<name>", slots=<int>, slot_bytes=<int>)`
+
+`udp` / `unix_dgram` は [ppkt-protocol-spec-v0.3.0.md](ppkt-protocol-spec-v0.3.0.md) に従う。`shm` は [pshm-protocol-spec-v0.1.0.md](pshm-protocol-spec-v0.1.0.md) に従う。
 
 #### セマンティクス
 
 - `bind <name> = <endpoint>` は共有バッファ `<name>` に対する外部接続を1つ定義する
 - `bind` は SDF グラフ構造を変更しない。スケジュール、repetition vector、既存 FIFO 順序を保持しなければならない（MUST）
 - 実装は `bind` を非ブロッキングな入出力アダプタへ lower してよい（MAY）。観測可能な意味は `socket_write` / `socket_read` と同等でなければならない（MUST）
+- `shm` endpoint は同一ホスト上の複数 PDL プロセス間通信を対象とする。トランスポート層での信頼性再送は行わない（MUST NOT）
 
 #### 方向推論
 
@@ -869,7 +879,8 @@ bind cmd = udp("127.0.0.1:9200", chan=2)
 - **レート**:
   - out-bind: writer の `Pw × fw`（tokens/sec）
   - in-bind: 全 reader が要求する `Cr × fr` が同一値に収束しなければならない
-- 推論結果は `pipeline.interface.json` に出力される（§9.4）
+- 推論結果はランタイム制御面の `list_bindings` で取得できなければならない（§9.5）
+- コンパイル時に静的成果物が必要な場合、実装は interface manifest を出力してよい（§9.4）
 
 #### 安定ID（`stable_id`）生成
 
@@ -992,6 +1003,7 @@ switch(ctrl, sync, data) default sync
 | パラメータ型不整合 | `param` の型とアクターの `RUNTIME_PARAM` 型の不一致 |
 | bind 方向推論失敗 | `bind name = ...` で `@name` / `-> name` が存在しない |
 | bind 契約曖昧 | in-bind の reader 群から単一レート契約を導けない |
+| bind endpoint 不正 | `bind` の endpoint 種別やオプションが未定義/範囲外 |
 | SDF バランス不能 | バランス方程式に非負整数解が存在しない |
 | メモリプール超過 | 算出バッファサイズの総計が `set mem` を超過 |
 | 構文エラー | BNF に適合しないソース |
@@ -1063,11 +1075,11 @@ $ ./my_app [OPTIONS]
 [stats] memory pool: 64MB allocated, 17KB used
 ```
 
-### 9.4 バインドインターフェース出力
+### 9.4 バインドインターフェース出力（任意）
 
-コンパイラは `bind` 対象の推論結果を `pipeline.interface.json` として出力しなければならない（MUST）。
+コンパイラ実装は、pcc 仕様で定義される方法により、`bind` 対象の推論結果を interface manifest（例: `pipeline.interface.json`）として任意に出力してよい（MAY）。
 
-最低限、以下の情報を含むこと（MUST）。
+出力する場合、最低限以下の情報を含むべきである（SHOULD）。
 
 - `stable_id`（決定的 ID）
 - `name`（PDL 上の共有バッファ名）
@@ -1591,13 +1603,16 @@ clock 60Hz vision {
 
 ### 14.1 概要
 
-Pipit パイプラインと外部プロセス（オシロスコープ GUI、ロガー、テストハーネス等）間のリアルタイム信号データストリーミングを、標準化されたパケットプロトコル **PPKT (Pipit Packet Protocol)** で行う。プロトコルの完全な仕様は [ppkt-protocol-spec-v0.3.0.md](ppkt-protocol-spec-v0.3.0.md) を参照のこと。
+Pipit パイプラインと外部プロセス（オシロスコープ GUI、ロガー、テストハーネス等）間のリアルタイム信号データストリーミングには、以下の標準プロトコルを使用する。
+
+- datagram transport: **PPKT (Pipit Packet Protocol)** — [ppkt-protocol-spec-v0.3.0.md](ppkt-protocol-spec-v0.3.0.md)
+- shared-memory transport: **PSHM (Pipit Shared Memory Bind Protocol)** — [pshm-protocol-spec-v0.1.0.md](pshm-protocol-spec-v0.1.0.md)
 
 設計原則:
 
 - **プロセス分離**: GUI やロガーはパイプラインプロセスの外部で動作する。クラッシュ隔離・言語非依存
 - **ノンブロッキング**: 送受信ともに `O_NONBLOCK`。SDF スケジュールを一切阻害しない
-- **トランスポート非依存**: UDP (`host:port`) と Unix domain socket (`unix:///path`) を同一 API で扱う
+- **トランスポート非依存**: UDP / Unix domain datagram / Shared memory を同一 `bind` API で扱う
 - **自己記述型パケット**: 各パケットが型・レート・タイムスタンプを含み、受信側に事前設定不要
 
 ### 14.2 標準アクター
@@ -1655,6 +1670,28 @@ bind cmd  = udp("127.0.0.1:9200", chan=2)   # in は推論
 ```
 
 ランタイムはこの `bind` 記述を基に外部入出力を構成する。SDF スケジュールとタスクの実行意味は変更してはならない（MUST NOT）。
+
+### 14.4 `bind` + `shm` による複数 PDL プロセス通信
+
+2つの独立した PDL プロセスが同一の `shm("<name>")` endpoint を共有することで、低レイテンシなローカル IPC を実現できる。
+
+```pdl
+# tx.pdl
+clock 1MHz tx {
+    source() -> iq
+}
+bind iq = shm("rx.iq", slots=1024, slot_bytes=4096)
+```
+
+```pdl
+# rx.pdl
+clock 1MHz rx {
+    @iq | sink()
+}
+bind iq = shm("rx.iq", slots=1024, slot_bytes=4096)
+```
+
+この場合、writer/reader の契約（dtype/shape/rate）は一致しなければならない（MUST）。不一致時の挙動は protocol spec ではなく language semantics に従い、起動時または再配線時に拒否される（MUST）。
 
 ---
 

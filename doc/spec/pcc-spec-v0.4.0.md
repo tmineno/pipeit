@@ -8,22 +8,22 @@ Version: 0.4.0 (Draft)
 
 For v0.4.0, the primary goal is architectural: define explicit IR boundaries, pass ownership, and pass-manager contracts so downstream phases consume a single typed/lowered source of truth.
 
-Refer to [pipit-lang-spec-v0.3.0](pipit-lang-spec-v0.3.0.md) for language semantics. This document specifies compiler tool behavior and architecture contracts.
+Refer to [pipit-lang-spec-v0.4.0](pipit-lang-spec-v0.4.0.md) for language semantics. This document specifies compiler tool behavior and architecture contracts.
 
 ## 2. Non-goals
 
-- No language-surface expansion in Phase 0 (syntax/semantics remain aligned with v0.3.x unless explicitly versioned).
 - No mandatory incremental/watch mode.
 - No mandatory distributed build cache.
 - No C++ AST parsing of actor implementation bodies.
+- No protocol-level reliability guarantees beyond each transport spec (`PPKT` / `PSHM`).
 
 ---
 
-## 3. Compatibility Gate (v0.3.x Baseline)
+## 3. Compatibility Gate
 
-v0.4.0 Phase 0 adopts a compatibility gate:
+v0.4.0 adopts a compatibility gate:
 
-- Default behavior keeps v0.3.x language and CLI compatibility.
+- Default behavior keeps v0.3.x language and CLI compatibility unless v0.4.0 language spec deltas are explicitly enabled.
 - Any breaking behavior requires all of:
   - explicit spec delta in this file (or successor spec),
   - dedicated ADR with migration reasoning,
@@ -34,7 +34,7 @@ Compatibility gate scope includes:
 - language parsing/typing behavior,
 - `pcc` CLI options and defaults,
 - output-stage semantics (`--emit`),
-- runtime option behavior in generated binaries (`--duration`, `--param`, `--probe`, `--probe-output`, `--stats`).
+- runtime option behavior in generated binaries (`--duration`, `--param`, `--bind`, `--probe`, `--probe-output`, `--stats`).
 
 ---
 
@@ -72,7 +72,8 @@ AST -> HIR -> THIR -> LIR -> C++ generation
 | Resolve + Normalize | `AST`, registry | `HIR` | symbols, scope, normalization |
 | Type Infer + Mono + Lower Verify | `HIR`, registry | `THIR` | typing, monomorphization, widening safety |
 | Graph/Analyze/Schedule | `THIR` | `LIR` | graph facts, rates, buffers, schedule |
-| Codegen | `LIR` | C++ source | serialization only |
+| Bind Infer + Contract Check | `LIR` | `BindInterface` | bind direction/contract inference, stable-id assignment |
+| Codegen | `LIR`, `BindInterface` | C++ source | serialization only |
 
 Rules:
 
@@ -97,6 +98,7 @@ Each pass declares:
 - Registry provenance (manifest/header hash set, schema version) participates in invalidation.
 - Cache miss or verification failure falls back to recompute.
 - Cache behavior must not change observable compiler semantics.
+- `BindInterface` (backing optional interface manifest output) is a first-class artifact and participates in deterministic invalidation.
 
 ---
 
@@ -108,7 +110,9 @@ Each pass declares:
 - actor metadata:
   - preferred: `--actor-meta` manifest (`actors.meta.json`),
   - fallback: header scanning via `-I` / `--include` / `--actor-path`,
-- compilation config (`--emit`, `--cc`, `--cflags`, `--release`, etc.).
+- compilation config (`--emit`, `--cc`, `--cflags`, `--release`, etc.),
+- bind endpoint overrides (`--bind <name>=<endpoint>`, optional, repeatable).
+- optional interface manifest output path (`--interface-out <path>`).
 
 ### 5.2 Outputs
 
@@ -118,9 +122,38 @@ Each pass declares:
 - `--emit schedule`: schedule dump,
 - `--emit timing-chart`: Mermaid timing chart,
 - `--emit cpp`: generated C++,
+- `--emit interface` (optional): bind contract manifest (`stable_id`, direction, contract, endpoint),
 - default `--emit exe`: executable via system C++ compiler.
 
 Phase 0 expects stage outputs to remain behaviorally compatible with v0.3.x unless explicitly versioned as breaking.
+
+### 5.3 Bind Compilation Contract
+
+For the `bind` specification (`pipit-lang-spec-v0.4.0`, section 5.11), `pcc` must satisfy the following.
+
+1. **direction inference**
+   - If `-> name` exists, infer `out`.
+   - If `-> name` does not exist and only `@name` exists, infer `in`.
+   - Otherwise, emit a compile-time error.
+
+1. **contract inference**
+   - `dtype` / `shape`: determined from buffer type information in LIR.
+   - `rate_hz`: determined from `tokens_per_iter * task_rate_hz` on writer/reader sides.
+   - For an `in` bind, if required rates from multiple readers do not match, emit an error.
+
+1. **stable_id assignment**
+   - `stable_id` is generated deterministically from semantic IDs (task/node/edge lineage), not span/name text.
+   - It must remain stable for identical input and compiler configuration (deterministic).
+
+1. **endpoint validation**
+   - Validate `udp` / `unix_dgram` endpoint arguments against the PPKT spec.
+   - Validate `shm` endpoint arguments against the PSHM spec.
+
+1. **manifest emission**
+   - Emit an interface manifest when `--emit interface` or `--interface-out <path>` is specified.
+   - When emitted, the manifest must contain bind contract information consistent with generated C++.
+
+`pcc` MUST NOT change the SDF schedule as a side effect of bind inference/validation.
 
 ---
 
@@ -141,6 +174,11 @@ Presentation requirements:
 - human-readable diagnostics remain default CLI output,
 - machine-readable mode (`json`) provides structured diagnostics for tooling,
 - diagnostic stability policy: adding codes is allowed; changing meaning of existing codes requires versioned note.
+- bind-related diagnostics include at least:
+  - direction inference failure,
+  - contract ambiguity/mismatch,
+  - duplicate bind target,
+  - unsupported endpoint option/value.
 
 ---
 
@@ -152,6 +190,7 @@ Compilation fails when:
 - resolution fails,
 - type/lowering verification fails,
 - analysis/scheduling invariants fail,
+- bind inference/contract validation fails,
 - backend emission prerequisites are missing,
 - external C++ compilation fails for `--emit exe`.
 
@@ -173,6 +212,8 @@ Diagnostic failures must identify owning pass and primary span (where available)
 - `AST -> HIR -> THIR -> LIR` boundary and ownership are documented and internally consistent.
 - Pass-manager contract (inputs/outputs/invalidation/invariants) is documented.
 - Compatibility gate is documented and explicit.
+- bind inference contract is documented (`direction`, `dtype/shape/rate`, deterministic `stable_id`).
+- optional interface manifest artifact contract is documented.
 - ADR set for Phase 0 architecture decisions is published:
   - `ADR-020` pass-manager artifact model,
   - `ADR-021` stable semantic IDs,

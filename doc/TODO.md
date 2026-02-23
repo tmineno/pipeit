@@ -320,6 +320,60 @@
 
 ---
 
+## v0.4.2 - Shared-Memory Bind Transport (PSHM) and Interface Optionalization
+
+**Goal**: Implement `shm(...)` bind transport for multi-process local IPC, and align compiler/runtime behavior with optional interface-manifest output.
+
+### Phase 1: Compiler Surface Alignment
+
+- [ ] Add `shm(name, slots, slot_bytes)` endpoint parsing/validation in bind endpoint grammar
+- [ ] Add endpoint option range checks (`slots > 0`, `slot_bytes > 0`, bounded upper limits)
+- [ ] Change interface manifest behavior from always-on to opt-in (`--emit interface`, `--interface-out <path>`)
+- [ ] Keep `list_bindings` as mandatory runtime introspection path even when no manifest is emitted
+
+### Phase 2: PSHM Runtime Core (Protocol v0.1.0)
+
+- [ ] Implement PSHM superblock + slot header binary layout exactly per spec (`magic/version/header_len/epoch/write_seq`)
+- [ ] Implement single-writer publish path with release-store ordering guarantees
+- [ ] Implement reader consume path with acquire-load ordering and overwrite detection
+- [ ] Implement shared-memory object lifecycle (create/open/map/unmap/close) with safe defaults
+
+### Phase 3: Contract Validation and Attach Semantics
+
+- [ ] Validate attach-time contract (`dtype`, `shape`, `rate_hz`, `stable_id_hash`) against compiler-inferred bind contract
+- [ ] Reject mismatched endpoints at startup with clear diagnostics (startup error path)
+- [ ] Define and implement endpoint precedence (`CLI --bind` override vs DSL bind default)
+
+### Phase 4: Rebind Epoch Semantics
+
+- [ ] Implement iteration-boundary rebind apply point for PSHM endpoints
+- [ ] Emit/consume epoch fence markers during endpoint generation switch
+- [ ] Ensure reader resynchronization drops incomplete frame state across epoch transition
+
+### Phase 5: Codegen and Runtime Wiring
+
+- [ ] Lower `bind ... = shm(...)` to runtime PSHM adapter wiring in generated C++
+- [ ] Keep existing UDP/Unix datagram bind paths behaviorally unchanged
+- [ ] Preserve `socket_write`/`socket_read` backward compatibility while bind transport backends coexist
+
+### Phase 6: Verification, Tests, and Performance
+
+- [ ] Add struct layout tests (Superblock=128B, SlotHeader=64B, field offsets)
+- [ ] Add protocol tests for sequence monotonicity, lag overwrite handling, and non-blocking empty read
+- [ ] Add integration tests for tx.pdl/rx.pdl cross-process shared-memory loopback
+- [ ] Add rebind tests validating epoch fence and atomic boundary switch behavior
+- [ ] Add determinism tests for stable_id and optional interface manifest reproducibility
+- [ ] Measure throughput/latency vs UDP bind baseline and record report under `doc/performance/`
+
+### Exit Criteria
+
+- [ ] Two independent PDL executables can exchange data via `bind ... = shm(...)` on one host
+- [ ] Rebind over PSHM is atomic at iteration boundary with no mixed-epoch frame visibility
+- [ ] Interface manifest is optional; runtime `list_bindings` provides equivalent bind metadata
+- [ ] No regressions in existing UDP/Unix bind behavior or legacy socket actor behavior
+
+---
+
 ## v0.5.x - Ecosystem & Quality of Life
 
 **Goal**: Make Pipit easier to use and deploy in real projects.
