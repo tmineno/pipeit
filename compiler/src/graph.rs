@@ -278,12 +278,8 @@ impl<'a> GraphBuilder<'a> {
     }
 
     fn error(&mut self, span: Span, message: String) {
-        self.diagnostics.push(Diagnostic {
-            level: DiagLevel::Error,
-            span,
-            message,
-            hint: None,
-        });
+        self.diagnostics
+            .push(Diagnostic::new(DiagLevel::Error, span, message));
     }
 
     // ── Build all tasks ─────────────────────────────────────────────────

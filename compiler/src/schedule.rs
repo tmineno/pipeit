@@ -232,21 +232,13 @@ impl<'a> ScheduleCtx<'a> {
     }
 
     fn error(&mut self, span: Span, message: String) {
-        self.diagnostics.push(Diagnostic {
-            level: DiagLevel::Error,
-            span,
-            message,
-            hint: None,
-        });
+        self.diagnostics
+            .push(Diagnostic::new(DiagLevel::Error, span, message));
     }
 
     fn warning(&mut self, span: Span, message: String) {
-        self.diagnostics.push(Diagnostic {
-            level: DiagLevel::Warning,
-            span,
-            message,
-            hint: None,
-        });
+        self.diagnostics
+            .push(Diagnostic::new(DiagLevel::Warning, span, message));
     }
 
     fn build_result(self) -> ScheduleResult {

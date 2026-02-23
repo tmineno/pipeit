@@ -359,15 +359,16 @@ impl<'a> TypeInferEngine<'a> {
             match parse_type_name(type_name) {
                 Some(t) => concrete_types.push(t),
                 None => {
-                    self.diagnostics.push(Diagnostic {
-                        level: DiagLevel::Error,
-                        span: *type_span,
-                        message: format!("unknown type '{}'", type_name),
-                        hint: Some(
-                            "valid types: int8, int16, int32, float, double, cfloat, cdouble"
-                                .to_string(),
+                    self.diagnostics.push(
+                        Diagnostic::new(
+                            DiagLevel::Error,
+                            *type_span,
+                            format!("unknown type '{}'", type_name),
+                        )
+                        .with_hint(
+                            "valid types: int8, int16, int32, float, double, cfloat, cdouble",
                         ),
-                    });
+                    );
                     return;
                 }
             }
@@ -421,11 +422,13 @@ impl<'a> TypeInferEngine<'a> {
                     }
                 }
 
-                self.diagnostics.push(Diagnostic {
-                    level: DiagLevel::Error,
-                    span: call.call_span,
-                    message: format!("ambiguous polymorphic actor call '{}'", call.name),
-                    hint: Some(format!(
+                self.diagnostics.push(
+                    Diagnostic::new(
+                        DiagLevel::Error,
+                        call.call_span,
+                        format!("ambiguous polymorphic actor call '{}'", call.name),
+                    )
+                    .with_hint(format!(
                         "specify type arguments explicitly, e.g. {}<float>({})",
                         call.name,
                         call.args
@@ -434,7 +437,7 @@ impl<'a> TypeInferEngine<'a> {
                             .collect::<Vec<_>>()
                             .join(", ")
                     )),
-                });
+                );
                 current_output_type = None;
             } else {
                 let inferred = self.infer_type_from_args(call, meta);
@@ -443,11 +446,13 @@ impl<'a> TypeInferEngine<'a> {
                     current_output_type = mono.out_type.as_concrete();
                     self.store_monomorphized_actor(call.call_id, concrete_types, mono);
                 } else {
-                    self.diagnostics.push(Diagnostic {
-                        level: DiagLevel::Error,
-                        span: call.call_span,
-                        message: format!("ambiguous polymorphic actor call '{}'", call.name),
-                        hint: Some(format!(
+                    self.diagnostics.push(
+                        Diagnostic::new(
+                            DiagLevel::Error,
+                            call.call_span,
+                            format!("ambiguous polymorphic actor call '{}'", call.name),
+                        )
+                        .with_hint(format!(
                             "specify type arguments explicitly, e.g. {}<float>({})",
                             call.name,
                             call.args
@@ -456,7 +461,7 @@ impl<'a> TypeInferEngine<'a> {
                                 .collect::<Vec<_>>()
                                 .join(", ")
                         )),
-                    });
+                    );
                     current_output_type = None;
                 }
             }

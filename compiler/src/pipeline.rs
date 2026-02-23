@@ -252,12 +252,11 @@ pub fn run_pipeline(
                         .filter(|(_, ok)| !ok)
                         .map(|(name, _)| *name)
                         .collect();
-                    let diags = vec![Diagnostic {
-                        level: DiagLevel::Error,
-                        message: format!("HIR verification failed: {}", failed.join(", ")),
-                        span: state.upstream.hir.as_ref().unwrap().program_span,
-                        hint: None,
-                    }];
+                    let diags = vec![Diagnostic::new(
+                        DiagLevel::Error,
+                        state.upstream.hir.as_ref().unwrap().program_span,
+                        format!("HIR verification failed: {}", failed.join(", ")),
+                    )];
                     finish_pass(
                         state,
                         PassId::BuildHir,
@@ -300,13 +299,11 @@ pub fn run_pipeline(
                 let elapsed = t.elapsed();
                 let mut diags = result.diagnostics;
                 if !result.cert.all_pass() {
-                    diags.push(Diagnostic {
-                        level: DiagLevel::Error,
-                        message: "lowering verification failed (L1-L5 obligations not met)"
-                            .to_string(),
-                        span: state.upstream.hir.as_ref().unwrap().program_span,
-                        hint: None,
-                    });
+                    diags.push(Diagnostic::new(
+                        DiagLevel::Error,
+                        state.upstream.hir.as_ref().unwrap().program_span,
+                        "lowering verification failed (L1-L5 obligations not met)",
+                    ));
                 }
                 state.upstream.cert = Some(result.cert);
                 state.upstream.lowered = Some(result.lowered);
@@ -408,12 +405,11 @@ fn run_thir_and_downstream(
                 .filter(|(_, ok)| !ok)
                 .map(|(name, _)| *name)
                 .collect();
-            diags.push(Diagnostic {
-                level: DiagLevel::Error,
-                message: format!("schedule verification failed: {}", failed.join(", ")),
-                span: thir.hir.program_span,
-                hint: None,
-            });
+            diags.push(Diagnostic::new(
+                DiagLevel::Error,
+                thir.hir.program_span,
+                format!("schedule verification failed: {}", failed.join(", ")),
+            ));
         }
         finish_pass_core(
             &mut state.diagnostics,
@@ -447,12 +443,11 @@ fn run_thir_and_downstream(
                 .filter(|(_, ok)| !ok)
                 .map(|(name, _)| *name)
                 .collect();
-            let diags = vec![Diagnostic {
-                level: DiagLevel::Error,
-                message: format!("LIR verification failed: {}", failed.join(", ")),
-                span: thir.hir.program_span,
-                hint: None,
-            }];
+            let diags = vec![Diagnostic::new(
+                DiagLevel::Error,
+                thir.hir.program_span,
+                format!("LIR verification failed: {}", failed.join(", ")),
+            )];
             finish_pass_core(
                 &mut state.diagnostics,
                 &mut state.has_error,

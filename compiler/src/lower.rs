@@ -342,15 +342,14 @@ impl<'a> LowerEngine<'a> {
             }
 
             if src_type != tgt_type {
-                self.diagnostics.push(Diagnostic {
-                    level: DiagLevel::Error,
-                    span: tgt.call_span,
-                    message: format!(
+                self.diagnostics.push(Diagnostic::new(
+                    DiagLevel::Error,
+                    tgt.call_span,
+                    format!(
                         "lowering verification failed (L1 type consistency): edge type mismatch {} -> {}",
                         src_type, tgt_type
                     ),
-                    hint: None,
-                });
+                ));
                 ok = false;
             }
         }
@@ -364,19 +363,20 @@ impl<'a> LowerEngine<'a> {
 
         for wn in &self.widening_nodes {
             if !can_widen(wn.from_type, wn.to_type) {
-                self.diagnostics.push(Diagnostic {
-                    level: DiagLevel::Error,
-                    span: wn.target_span,
-                    message: format!(
-                        "lowering verification failed (L2 widening safety): \
-                         {} -> {} is not a safe widening chain",
-                        wn.from_type, wn.to_type
+                self.diagnostics.push(
+                    Diagnostic::new(
+                        DiagLevel::Error,
+                        wn.target_span,
+                        format!(
+                            "lowering verification failed (L2 widening safety): \
+                             {} -> {} is not a safe widening chain",
+                            wn.from_type, wn.to_type
+                        ),
+                    )
+                    .with_hint(
+                        "allowed chains: int8->int16->int32->float->double, cfloat->cdouble",
                     ),
-                    hint: Some(
-                        "allowed chains: int8->int16->int32->float->double, cfloat->cdouble"
-                            .to_string(),
-                    ),
-                });
+                );
                 ok = false;
             }
         }
@@ -393,14 +393,12 @@ impl<'a> LowerEngine<'a> {
                 let in_count = &tgt_meta.in_count;
                 if let TokenCount::Literal(n) = in_count {
                     if *n == 0 {
-                        self.diagnostics.push(Diagnostic {
-                            level: DiagLevel::Error,
-                            span: wn.target_span,
-                            message: "lowering verification failed (L3 rate/shape preservation): \
-                                 widening target has zero-rate input"
-                                .to_string(),
-                            hint: None,
-                        });
+                        self.diagnostics.push(Diagnostic::new(
+                            DiagLevel::Error,
+                            wn.target_span,
+                            "lowering verification failed (L3 rate/shape preservation): \
+                                 widening target has zero-rate input",
+                        ));
                         ok = false;
                     }
                 }
@@ -453,29 +451,33 @@ impl<'a> LowerEngine<'a> {
                 let call_id = call.call_id;
                 if let Some(concrete) = self.concrete_actors.get(&call_id) {
                     if concrete.is_polymorphic() {
-                        self.diagnostics.push(Diagnostic {
-                            level: DiagLevel::Error,
-                            span: call.call_span,
-                            message: format!(
-                                "lowering verification failed (L4 monomorphization soundness): \
-                                 polymorphic actor '{}' not fully monomorphized",
-                                call.name
-                            ),
-                            hint: Some("specify type arguments explicitly".to_string()),
-                        });
+                        self.diagnostics.push(
+                            Diagnostic::new(
+                                DiagLevel::Error,
+                                call.call_span,
+                                format!(
+                                    "lowering verification failed (L4 monomorphization soundness): \
+                                     polymorphic actor '{}' not fully monomorphized",
+                                    call.name
+                                ),
+                            )
+                            .with_hint("specify type arguments explicitly"),
+                        );
                         *ok = false;
                     }
                 } else {
-                    self.diagnostics.push(Diagnostic {
-                        level: DiagLevel::Error,
-                        span: call.call_span,
-                        message: format!(
-                            "lowering verification failed (L4 monomorphization soundness): \
-                             polymorphic actor '{}' has no concrete instance",
-                            call.name
-                        ),
-                        hint: Some("specify type arguments explicitly".to_string()),
-                    });
+                    self.diagnostics.push(
+                        Diagnostic::new(
+                            DiagLevel::Error,
+                            call.call_span,
+                            format!(
+                                "lowering verification failed (L4 monomorphization soundness): \
+                                 polymorphic actor '{}' has no concrete instance",
+                                call.name
+                            ),
+                        )
+                        .with_hint("specify type arguments explicitly"),
+                    );
                     *ok = false;
                 }
             }
@@ -498,29 +500,27 @@ impl<'a> LowerEngine<'a> {
                     Span::new((), 0..0)
                 });
             if !meta.in_type.is_concrete() {
-                self.diagnostics.push(Diagnostic {
-                    level: DiagLevel::Error,
+                self.diagnostics.push(Diagnostic::new(
+                    DiagLevel::Error,
                     span,
-                    message: format!(
+                    format!(
                         "lowering verification failed (L5 no fallback typing): \
                          actor '{}' has unresolved input type '{}'",
                         meta.name, meta.in_type
                     ),
-                    hint: None,
-                });
+                ));
                 ok = false;
             }
             if !meta.out_type.is_concrete() {
-                self.diagnostics.push(Diagnostic {
-                    level: DiagLevel::Error,
+                self.diagnostics.push(Diagnostic::new(
+                    DiagLevel::Error,
                     span,
-                    message: format!(
+                    format!(
                         "lowering verification failed (L5 no fallback typing): \
                          actor '{}' has unresolved output type '{}'",
                         meta.name, meta.out_type
                     ),
-                    hint: None,
-                });
+                ));
                 ok = false;
             }
         }

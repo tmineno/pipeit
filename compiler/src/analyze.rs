@@ -189,30 +189,18 @@ impl<'a> AnalyzeCtx<'a> {
     }
 
     fn error(&mut self, span: Span, message: String) {
-        self.diagnostics.push(Diagnostic {
-            level: DiagLevel::Error,
-            span,
-            message,
-            hint: None,
-        });
+        self.diagnostics
+            .push(Diagnostic::new(DiagLevel::Error, span, message));
     }
 
     fn error_with_hint(&mut self, span: Span, message: String, hint: String) {
-        self.diagnostics.push(Diagnostic {
-            level: DiagLevel::Error,
-            span,
-            message,
-            hint: Some(hint),
-        });
+        self.diagnostics
+            .push(Diagnostic::new(DiagLevel::Error, span, message).with_hint(hint));
     }
 
     fn warning_with_hint(&mut self, span: Span, message: String, hint: String) {
-        self.diagnostics.push(Diagnostic {
-            level: DiagLevel::Warning,
-            span,
-            message,
-            hint: Some(hint),
-        });
+        self.diagnostics
+            .push(Diagnostic::new(DiagLevel::Warning, span, message).with_hint(hint));
     }
 
     fn build_result(self) -> AnalysisResult {

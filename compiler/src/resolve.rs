@@ -12,7 +12,6 @@
 // Side effects: none.
 
 use std::collections::HashMap;
-use std::fmt;
 
 use crate::ast::*;
 use crate::id::{CallId, DefId, IdAllocator, TaskId};
@@ -126,34 +125,7 @@ pub struct ProbeEntry {
     pub context: String,
 }
 
-/// A name resolution diagnostic.
-#[derive(Debug, Clone)]
-pub struct Diagnostic {
-    pub level: DiagLevel,
-    pub span: Span,
-    pub message: String,
-    pub hint: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiagLevel {
-    Error,
-    Warning,
-}
-
-impl fmt::Display for Diagnostic {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let level = match self.level {
-            DiagLevel::Error => "error",
-            DiagLevel::Warning => "warning",
-        };
-        write!(f, "{}: {}", level, self.message)?;
-        if let Some(hint) = &self.hint {
-            write!(f, "\n  hint: {}", hint)?;
-        }
-        Ok(())
-    }
-}
+pub use crate::diag::{DiagCode, DiagLevel, Diagnostic};
 
 // ── Public entry point ──────────────────────────────────────────────────────
 
@@ -225,21 +197,13 @@ impl<'a> ResolveCtx<'a> {
     }
 
     fn error(&mut self, span: Span, message: String) {
-        self.diagnostics.push(Diagnostic {
-            level: DiagLevel::Error,
-            span,
-            message,
-            hint: None,
-        });
+        self.diagnostics
+            .push(Diagnostic::new(DiagLevel::Error, span, message));
     }
 
     fn warning(&mut self, span: Span, message: String) {
-        self.diagnostics.push(Diagnostic {
-            level: DiagLevel::Warning,
-            span,
-            message,
-            hint: None,
-        });
+        self.diagnostics
+            .push(Diagnostic::new(DiagLevel::Warning, span, message));
     }
 
     // ── Pass 1: collect globals ─────────────────────────────────────────
@@ -625,12 +589,14 @@ impl<'a> ResolveCtx<'a> {
             return;
         }
 
-        self.diagnostics.push(Diagnostic {
-            level: DiagLevel::Error,
-            span: call.name.span,
-            message: format!("unknown actor or define '{}'", name),
-            hint: Some("check actor header includes (-I flag)".to_string()),
-        });
+        self.diagnostics.push(
+            Diagnostic::new(
+                DiagLevel::Error,
+                call.name.span,
+                format!("unknown actor or define '{}'", name),
+            )
+            .with_hint("check actor header includes (-I flag)"),
+        );
     }
 
     fn validate_actor_type_args(&mut self, call: &ActorCall, actor_name: &str, expected: usize) {
@@ -702,15 +668,17 @@ impl<'a> ResolveCtx<'a> {
             if let crate::ast::ShapeDim::ConstRef(ident) = dim {
                 if !scope_has_formal_param(scope, &ident.name) {
                     if self.resolved.params.contains_key(&ident.name) {
-                        self.diagnostics.push(Diagnostic {
-                            level: DiagLevel::Error,
-                            span: ident.span,
-                            message: format!(
-                                "runtime param '${}' cannot be used as frame dimension",
-                                ident.name
-                            ),
-                            hint: Some("use const or literal for shape constraints".to_string()),
-                        });
+                        self.diagnostics.push(
+                            Diagnostic::new(
+                                DiagLevel::Error,
+                                ident.span,
+                                format!(
+                                    "runtime param '${}' cannot be used as frame dimension",
+                                    ident.name
+                                ),
+                            )
+                            .with_hint("use const or literal for shape constraints"),
+                        );
                     } else if !self.resolved.consts.contains_key(&ident.name) {
                         self.error(
                             ident.span,
