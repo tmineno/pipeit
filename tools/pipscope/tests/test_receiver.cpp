@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "ppkt_receiver.h"
+#include "trigger.h"
 
 #define TEST(name)                                                                                 \
     static void test_##name();                                                                     \
@@ -1197,6 +1198,79 @@ TEST(receiver_is_running) {
 
     rx.stop();
     ASSERT_FALSE(rx.is_running());
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Trigger search tests (pure function — no receiver or GUI dependency)
+// ══════════════════════════════════════════════════════════════════════════════
+
+TEST(trigger_rising_edge_found) {
+    // Ramp from -1.0 to 1.0 in 10 steps, crossing 0.0 at index 5
+    float samples[10];
+    for (int i = 0; i < 10; i++)
+        samples[i] = -1.0f + 2.0f * i / 9.0f;
+
+    int idx = pipscope::find_trigger(samples, 10, 0.0f, pipscope::TriggerConfig::Rising, 2, 2);
+    ASSERT_TRUE(idx >= 0);
+    // Verify the crossing: samples[idx-1] < 0 && samples[idx] >= 0
+    ASSERT_TRUE(samples[idx - 1] < 0.0f);
+    ASSERT_TRUE(samples[idx] >= 0.0f);
+}
+
+TEST(trigger_falling_edge_found) {
+    // Descending ramp from 1.0 to -1.0
+    float samples[10];
+    for (int i = 0; i < 10; i++)
+        samples[i] = 1.0f - 2.0f * i / 9.0f;
+
+    int idx = pipscope::find_trigger(samples, 10, 0.0f, pipscope::TriggerConfig::Falling, 2, 2);
+    ASSERT_TRUE(idx >= 0);
+    ASSERT_TRUE(samples[idx - 1] > 0.0f);
+    ASSERT_TRUE(samples[idx] <= 0.0f);
+}
+
+TEST(trigger_no_event_returns_negative) {
+    // Flat signal at 1.0 — never crosses 0.0
+    float samples[20];
+    for (int i = 0; i < 20; i++)
+        samples[i] = 1.0f;
+
+    int idx = pipscope::find_trigger(samples, 20, 0.0f, pipscope::TriggerConfig::Rising, 2, 2);
+    ASSERT_EQ(idx, -1);
+}
+
+TEST(trigger_finds_most_recent_event) {
+    // Sine wave: multiple zero-crossings, should return the last valid one
+    const int n = 200;
+    float samples[200];
+    for (int i = 0; i < n; i++)
+        samples[i] = sinf(2.0f * 3.14159265f * 4.0f * i / n); // 4 full cycles
+
+    int idx = pipscope::find_trigger(samples, n, 0.0f, pipscope::TriggerConfig::Rising, 10, 10);
+    ASSERT_TRUE(idx >= 0);
+    ASSERT_TRUE(samples[idx - 1] < 0.0f);
+    ASSERT_TRUE(samples[idx] >= 0.0f);
+
+    // The returned index should be the LAST valid rising crossing (closest to end)
+    // Verify no later rising crossing exists within the valid range
+    for (int i = idx + 1; i < n - 10; i++) {
+        bool is_rising = samples[i - 1] < 0.0f && samples[i] >= 0.0f;
+        ASSERT_FALSE(is_rising);
+    }
+}
+
+TEST(trigger_respects_pre_post_margin) {
+    // Crossing at index 2 — but with pre_margin=5, it should be excluded
+    float samples[10] = {-1.0f, -0.5f, 0.5f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+
+    int idx = pipscope::find_trigger(samples, 10, 0.0f, pipscope::TriggerConfig::Rising, 5, 2);
+    ASSERT_EQ(idx, -1); // crossing at index 2 is before pre_margin=5
+}
+
+TEST(trigger_empty_buffer) {
+    float samples[1] = {0.0f};
+    ASSERT_EQ(pipscope::find_trigger(nullptr, 0, 0.0f, pipscope::TriggerConfig::Rising, 0, 0), -1);
+    ASSERT_EQ(pipscope::find_trigger(samples, 1, 0.0f, pipscope::TriggerConfig::Rising, 0, 0), -1);
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────

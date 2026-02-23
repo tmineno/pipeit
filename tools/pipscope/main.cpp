@@ -22,6 +22,7 @@
 #include <implot.h>
 
 #include "ppkt_receiver.h"
+#include "trigger.h"
 
 // ── Signal handling ──────────────────────────────────────────────────────────
 
@@ -131,6 +132,8 @@ static void shutdown_imgui() {
 
 enum class ConnStatus { Disconnected, Connected, Error };
 
+static constexpr float kUncalDropRate = 0.05f; // 5%
+
 struct AppState {
     bool paused = false;
     bool auto_y = true;
@@ -140,6 +143,8 @@ struct AppState {
     char address_buf[128] = "0.0.0.0:9100";
     ConnStatus conn_status = ConnStatus::Disconnected;
     char status_msg[256] = "Disconnected";
+
+    pipscope::TriggerConfig trigger;
 };
 
 static void begin_frame() {
@@ -211,11 +216,155 @@ static void render_toolbar(AppState &state, pipscope::PpktReceiver &receiver) {
         break;
     }
     ImGui::TextColored(status_color, "%s", state.status_msg);
+
+    // ── Trigger controls (row 2) ─────────────────────────────────────────
+    ImGui::Checkbox("Trigger", &state.trigger.enabled);
+    ImGui::SameLine();
+
+    if (!state.trigger.enabled)
+        ImGui::BeginDisabled();
+
+    ImGui::SetNextItemWidth(100);
+    ImGui::InputFloat("Level", &state.trigger.level, 0, 0, "%.3f");
+    ImGui::SameLine();
+
+    const char *edge_label =
+        state.trigger.edge == pipscope::TriggerConfig::Rising ? "Edge: /" : "Edge: \\";
+    if (ImGui::Button(edge_label)) {
+        state.trigger.edge = state.trigger.edge == pipscope::TriggerConfig::Rising
+                                 ? pipscope::TriggerConfig::Falling
+                                 : pipscope::TriggerConfig::Rising;
+    }
+    ImGui::SameLine();
+
+    const char *mode_label =
+        state.trigger.mode == pipscope::TriggerConfig::Auto ? "Mode: Auto" : "Mode: Norm";
+    if (ImGui::Button(mode_label)) {
+        state.trigger.mode = state.trigger.mode == pipscope::TriggerConfig::Auto
+                                 ? pipscope::TriggerConfig::Normal
+                                 : pipscope::TriggerConfig::Auto;
+    }
+    ImGui::SameLine();
+
+    // Source channel combo — populated from current snapshot chan_ids
+    {
+        char combo_label[32];
+        snprintf(combo_label, sizeof(combo_label), "Ch %u", state.trigger.source_chan_id);
+        ImGui::SetNextItemWidth(80);
+        if (ImGui::BeginCombo("Source", combo_label)) {
+            for (const auto &snap : state.snapshots) {
+                char item_label[32];
+                snprintf(item_label, sizeof(item_label), "Ch %u", snap.chan_id);
+                bool selected = (snap.chan_id == state.trigger.source_chan_id);
+                if (ImGui::Selectable(item_label, selected)) {
+                    state.trigger.source_chan_id = snap.chan_id;
+                }
+                if (selected)
+                    ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+    }
+
+    if (!state.trigger.enabled)
+        ImGui::EndDisabled();
+}
+
+static void extract_window(std::vector<pipscope::ChannelSnapshot> &dst,
+                           const std::vector<pipscope::ChannelSnapshot> &src, int offset,
+                           int count) {
+    dst.resize(src.size());
+    for (size_t c = 0; c < src.size(); ++c) {
+        dst[c].chan_id = src[c].chan_id;
+        dst[c].sample_rate_hz = src[c].sample_rate_hz;
+        dst[c].packet_count = src[c].packet_count;
+        dst[c].stats = src[c].stats;
+
+        int avail = static_cast<int>(src[c].samples.size());
+        int start = offset;
+        int end = offset + count;
+        if (start < 0)
+            start = 0;
+        if (end > avail)
+            end = avail;
+        int n = end - start;
+        if (n > 0) {
+            dst[c].samples.assign(src[c].samples.begin() + start, src[c].samples.begin() + end);
+        } else {
+            dst[c].samples.clear();
+        }
+    }
+}
+
+static void take_tail(std::vector<pipscope::ChannelSnapshot> &dst,
+                      const std::vector<pipscope::ChannelSnapshot> &src, int count) {
+    dst.resize(src.size());
+    for (size_t c = 0; c < src.size(); ++c) {
+        dst[c].chan_id = src[c].chan_id;
+        dst[c].sample_rate_hz = src[c].sample_rate_hz;
+        dst[c].packet_count = src[c].packet_count;
+        dst[c].stats = src[c].stats;
+
+        int avail = static_cast<int>(src[c].samples.size());
+        int n = count < avail ? count : avail;
+        if (n > 0) {
+            dst[c].samples.assign(src[c].samples.end() - n, src[c].samples.end());
+        } else {
+            dst[c].samples.clear();
+        }
+    }
 }
 
 static void update_snapshots(AppState &state, pipscope::PpktReceiver &receiver) {
-    if (!state.paused) {
-        state.snapshots = receiver.snapshot(static_cast<size_t>(state.display_samples));
+    if (state.paused)
+        return;
+
+    int ds = state.display_samples;
+    size_t request_size =
+        state.trigger.enabled ? static_cast<size_t>(ds) * 2 : static_cast<size_t>(ds);
+    auto raw = receiver.snapshot(request_size);
+
+    // X-axis guard: if we already have valid display data AND any channel in raw
+    // has fewer samples than display_samples, hold the previous display.
+    if (!state.snapshots.empty()) {
+        for (const auto &ch : raw) {
+            if (static_cast<int>(ch.samples.size()) < ds)
+                return; // hold previous display
+        }
+    }
+
+    if (state.trigger.enabled) {
+        // Find trigger source channel by chan_id
+        const pipscope::ChannelSnapshot *trig_ch = nullptr;
+        for (const auto &ch : raw) {
+            if (ch.chan_id == state.trigger.source_chan_id) {
+                trig_ch = &ch;
+                break;
+            }
+        }
+        if (!trig_ch) {
+            state.trigger.waiting = true;
+            return; // source channel not present yet
+        }
+
+        int pre = ds / 2;
+        int post = ds - pre;
+        int idx = pipscope::find_trigger(trig_ch->samples.data(), trig_ch->samples.size(),
+                                         state.trigger.level, state.trigger.edge, pre, post);
+
+        if (idx >= 0) {
+            state.trigger.waiting = false;
+            extract_window(state.snapshots, raw, idx - pre, ds);
+        } else if (state.trigger.mode == pipscope::TriggerConfig::Auto) {
+            state.trigger.waiting = false;
+            take_tail(state.snapshots, raw, ds);
+        } else {
+            // Normal mode: no trigger found — keep previous display
+            state.trigger.waiting = true;
+        }
+    } else {
+        state.trigger.waiting = false;
+        state.snapshots = std::move(raw);
     }
 }
 
@@ -229,7 +378,7 @@ static float plot_height_for_channels(size_t channel_count) {
 }
 
 static void render_channel_plot(const pipscope::ChannelSnapshot &channel, bool auto_y,
-                                float plot_height) {
+                                float plot_height, pipscope::TriggerConfig &trigger) {
     char label[256];
     snprintf(label, sizeof(label),
              "Channel %u  |  %.0f Hz  |  %lu pkts  |  frames: %lu ok / %lu dropped",
@@ -267,14 +416,55 @@ static void render_channel_plot(const pipscope::ChannelSnapshot &channel, bool a
             int n = static_cast<int>(channel.samples.size());
             ImPlot::PlotLine("signal", channel.samples.data(), n, dt, 0.0);
         }
+
+        // Trigger level line (draggable, yellow) on the source channel
+        if (trigger.enabled && channel.chan_id == trigger.source_chan_id) {
+            double trig_level = static_cast<double>(trigger.level);
+            ImPlot::DragLineY(0, &trig_level, ImVec4(1, 1, 0, 1), 1, ImPlotDragToolFlags_NoFit);
+            trigger.level = static_cast<float>(trig_level);
+        }
+
+        // "Waiting for trigger..." overlay
+        if (trigger.waiting) {
+            ImPlot::PushPlotClipRect();
+            ImVec2 pos = ImPlot::GetPlotPos();
+            ImVec2 sz = ImPlot::GetPlotSize();
+            ImGui::GetWindowDrawList()->AddText(
+                ImVec2(pos.x + sz.x * 0.5f - 70, pos.y + sz.y * 0.5f - 8),
+                IM_COL32(200, 200, 200, 180), "Waiting for trigger...");
+            ImPlot::PopPlotClipRect();
+        }
+
+        // UNCAL overlay — drop rate or inter-frame gap rate exceeds 5%
+        {
+            uint64_t total_frames = channel.stats.accepted_frames + channel.stats.dropped_frames;
+            float drop_rate = (total_frames > 0)
+                                  ? static_cast<float>(channel.stats.dropped_frames) / total_frames
+                                  : 0.0f;
+
+            uint64_t gap_total = channel.stats.inter_frame_gaps + channel.stats.accepted_frames;
+            float gap_rate = (gap_total > 0)
+                                 ? static_cast<float>(channel.stats.inter_frame_gaps) / gap_total
+                                 : 0.0f;
+
+            if (drop_rate > kUncalDropRate || gap_rate > kUncalDropRate) {
+                ImPlot::PushPlotClipRect();
+                ImVec2 pos = ImPlot::GetPlotPos();
+                ImVec2 sz = ImPlot::GetPlotSize();
+                ImGui::GetWindowDrawList()->AddText(ImVec2(pos.x + sz.x - 70, pos.y + 5),
+                                                    IM_COL32(255, 60, 60, 255), "UNCAL");
+                ImPlot::PopPlotClipRect();
+            }
+        }
+
         ImPlot::EndPlot();
     }
 }
 
-static void render_channels(const AppState &state) {
+static void render_channels(AppState &state) {
     float plot_height = plot_height_for_channels(state.snapshots.size());
     for (const auto &channel : state.snapshots) {
-        render_channel_plot(channel, state.auto_y, plot_height);
+        render_channel_plot(channel, state.auto_y, plot_height, state.trigger);
     }
 }
 
