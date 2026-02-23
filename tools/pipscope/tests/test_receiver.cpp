@@ -59,19 +59,20 @@ static uint16_t next_test_port() {
 
 /// Send a single-frame PPKT packet (both FRAME_START and FRAME_END set).
 static void send_ppkt(uint16_t port, uint16_t chan_id, const float *samples, uint32_t n,
-                      double sample_rate_hz = 1000.0) {
+                      double sample_rate_hz = 1000.0, uint64_t iteration_index = 0,
+                      uint8_t extra_flags = 0) {
     DatagramSender tx;
     char addr[32];
     snprintf(addr, sizeof(addr), "localhost:%u", port);
     ASSERT_TRUE(tx.open(addr, strlen(addr)));
 
     PpktHeader hdr = ppkt_make_header(DTYPE_F32, chan_id);
-    hdr.flags = FLAG_FRAME_START | FLAG_FRAME_END;
+    hdr.flags = FLAG_FRAME_START | FLAG_FRAME_END | extra_flags;
     hdr.sample_count = n;
     hdr.payload_bytes = n * sizeof(float);
     hdr.sample_rate_hz = sample_rate_hz;
     hdr.timestamp_ns = pipit_now_ns();
-    hdr.iteration_index = 0;
+    hdr.iteration_index = iteration_index;
 
     size_t pkt_size = sizeof(PpktHeader) + hdr.payload_bytes;
     uint8_t pkt[65536];
@@ -376,15 +377,15 @@ TEST(receiver_multiple_packets_accumulate) {
     ASSERT_TRUE(rx.start(port));
     usleep(5000);
 
-    // Send 3 packets to same channel
+    // Send 3 packets to same channel with contiguous iteration indices
     float s1[2] = {1.0f, 2.0f};
     float s2[2] = {3.0f, 4.0f};
     float s3[2] = {5.0f, 6.0f};
-    send_ppkt(port, 0, s1, 2);
+    send_ppkt(port, 0, s1, 2, 1000.0, 0, FLAG_FIRST_FRAME);
     usleep(1000);
-    send_ppkt(port, 0, s2, 2);
+    send_ppkt(port, 0, s2, 2, 1000.0, 2);
     usleep(1000);
-    send_ppkt(port, 0, s3, 2);
+    send_ppkt(port, 0, s3, 2, 1000.0, 4);
 
     usleep(10000);
 
@@ -398,6 +399,7 @@ TEST(receiver_multiple_packets_accumulate) {
     ASSERT_EQ(snaps[0].samples[3], 4.0f);
     ASSERT_EQ(snaps[0].samples[4], 5.0f);
     ASSERT_EQ(snaps[0].samples[5], 6.0f);
+    ASSERT_EQ(snaps[0].stats.inter_frame_gaps, 0);
 
     rx.stop();
 }
@@ -931,6 +933,7 @@ TEST(e2e_phase_continuity_60s) {
     printf("    received %zu samples (expected %zu)\n", snaps[0].samples.size(), total_samples);
     ASSERT_EQ(snaps[0].samples.size(), total_samples);
     ASSERT_EQ(snaps[0].stats.dropped_frames, 0);
+    ASSERT_EQ(snaps[0].stats.inter_frame_gaps, 0);
 
     // Verify every sample matches the reference sine
     size_t errors = 0;
@@ -954,6 +957,128 @@ TEST(e2e_phase_continuity_60s) {
     }
 
     printf("    all %zu samples match reference sine (0 discontinuities)\n", total_samples);
+    rx.stop();
+}
+
+// ── Inter-frame gap detection tests ──────────────────────────────────────────
+
+TEST(inter_frame_gap_detected_on_missing_packets) {
+    // Simulates kernel-level packet loss: frame 0 (iter=0, n=4) arrives,
+    // then frame 2 (iter=8, n=4) arrives with frame 1 (iter=4) missing.
+    // The gap should be detected and the buffer cleared.
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(1024);
+    ASSERT_TRUE(rx.start(port));
+    usleep(5000);
+
+    // Frame 0: iter=0, 4 samples → next expected = 4
+    float s0[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    send_ppkt(port, 0, s0, 4, 1000.0, 0, FLAG_FIRST_FRAME);
+    usleep(2000);
+
+    // Frame 2: iter=8 (skipping iter=4) → gap detected, buffer cleared
+    float s2[4] = {9.0f, 10.0f, 11.0f, 12.0f};
+    send_ppkt(port, 0, s2, 4, 1000.0, 8);
+    usleep(10000);
+
+    auto snaps = rx.snapshot(100);
+    ASSERT_EQ(snaps.size(), 1);
+    // Buffer was cleared on gap, then frame 2 was pushed
+    ASSERT_EQ(snaps[0].samples.size(), 4);
+    ASSERT_EQ(snaps[0].samples[0], 9.0f);
+    ASSERT_EQ(snaps[0].stats.inter_frame_gaps, 1);
+    ASSERT_EQ(snaps[0].stats.accepted_frames, 2);
+
+    rx.stop();
+}
+
+TEST(inter_frame_gap_no_false_positive_on_first_frame) {
+    // The first frame should never trigger a gap (tracking is inactive).
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(1024);
+    ASSERT_TRUE(rx.start(port));
+    usleep(5000);
+
+    float s[2] = {1.0f, 2.0f};
+    send_ppkt(port, 0, s, 2, 1000.0, 100); // arbitrary starting iter=100
+
+    usleep(10000);
+
+    auto snaps = rx.snapshot(100);
+    ASSERT_EQ(snaps.size(), 1);
+    ASSERT_EQ(snaps[0].samples.size(), 2);
+    ASSERT_EQ(snaps[0].stats.inter_frame_gaps, 0);
+    ASSERT_EQ(snaps[0].stats.accepted_frames, 1);
+
+    rx.stop();
+}
+
+TEST(inter_frame_gap_first_frame_flag_resets_tracking) {
+    // FLAG_FIRST_FRAME should reset inter-frame tracking so that a sender
+    // restart doesn't produce a false gap.
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(1024);
+    ASSERT_TRUE(rx.start(port));
+    usleep(5000);
+
+    // First batch: 2 frames, contiguous
+    float s0[2] = {1.0f, 2.0f};
+    float s1[2] = {3.0f, 4.0f};
+    send_ppkt(port, 0, s0, 2, 1000.0, 0, FLAG_FIRST_FRAME);
+    usleep(1000);
+    send_ppkt(port, 0, s1, 2, 1000.0, 2);
+    usleep(2000);
+
+    // Sender restarts: FLAG_FIRST_FRAME with iter=0 (not contiguous with iter=4)
+    float s2[2] = {10.0f, 20.0f};
+    send_ppkt(port, 0, s2, 2, 1000.0, 0, FLAG_FIRST_FRAME);
+    usleep(10000);
+
+    auto snaps = rx.snapshot(100);
+    ASSERT_EQ(snaps.size(), 1);
+    // No gap should be reported because FLAG_FIRST_FRAME resets tracking
+    ASSERT_EQ(snaps[0].stats.inter_frame_gaps, 0);
+    ASSERT_EQ(snaps[0].stats.accepted_frames, 3);
+
+    rx.stop();
+}
+
+TEST(inter_frame_gap_contiguous_frames_no_gap) {
+    // Multiple contiguous frames should not trigger any gap.
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(4096);
+    ASSERT_TRUE(rx.start(port));
+    usleep(5000);
+
+    DatagramSender tx;
+    char addr[32];
+    snprintf(addr, sizeof(addr), "localhost:%u", port);
+    ASSERT_TRUE(tx.open(addr, strlen(addr)));
+
+    PpktHeader hdr = ppkt_make_header(DTYPE_F32, 0);
+    hdr.sample_rate_hz = 1000.0;
+
+    constexpr int N = 100;
+    for (int i = 0; i < N; i++) {
+        hdr.flags = (i == 0) ? FLAG_FIRST_FRAME : static_cast<uint8_t>(0);
+        hdr.timestamp_ns = 1000 + i;
+        hdr.iteration_index = static_cast<uint64_t>(i * 4);
+
+        float samples[4];
+        for (int j = 0; j < 4; j++)
+            samples[j] = static_cast<float>(i * 4 + j);
+        ppkt_send_chunked(tx, hdr, samples, 4);
+        usleep(200);
+    }
+
+    usleep(20000);
+
+    auto snaps = rx.snapshot(4096);
+    ASSERT_EQ(snaps.size(), 1);
+    ASSERT_EQ(snaps[0].samples.size(), N * 4);
+    ASSERT_EQ(snaps[0].stats.inter_frame_gaps, 0);
+    ASSERT_EQ(snaps[0].stats.accepted_frames, N);
+
     rx.stop();
 }
 

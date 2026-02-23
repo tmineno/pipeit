@@ -247,6 +247,11 @@ static void render_channel_plot(const pipscope::ChannelSnapshot &channel, bool a
                            static_cast<unsigned long>(channel.stats.drop_boundary),
                            static_cast<unsigned long>(channel.stats.drop_meta_mismatch));
     }
+    if (channel.stats.inter_frame_gaps > 0) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.2f, 1.0f), "[pkt loss: %lu]",
+                           static_cast<unsigned long>(channel.stats.inter_frame_gaps));
+    }
 
     char plot_id[32];
     snprintf(plot_id, sizeof(plot_id), "##ch%u", channel.chan_id);

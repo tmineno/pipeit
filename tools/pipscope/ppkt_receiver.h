@@ -147,6 +147,7 @@ struct FrameStats {
     uint64_t drop_iter_gap = 0;      // iteration_index discontinuity
     uint64_t drop_boundary = 0;      // missing start/end boundary
     uint64_t drop_meta_mismatch = 0; // dtype/sample_rate changed mid-frame
+    uint64_t inter_frame_gaps = 0;   // kernel-level packet loss (inter-frame iter gap)
 };
 
 // ── Pending frame accumulator ────────────────────────────────────────────────
@@ -176,6 +177,11 @@ struct ChannelState {
     SampleBuffer buffer;
     FrameStats stats;
     PendingFrame pending;
+
+    // Inter-frame iteration_index continuity tracking.
+    // Detects kernel-level packet loss that the receiver can't otherwise observe.
+    bool iter_tracking = false;
+    uint64_t next_expected_iter = 0;
 
     explicit ChannelState(uint16_t id, size_t buf_capacity) : chan_id(id), buffer(buf_capacity) {}
 };
@@ -401,6 +407,19 @@ class PpktReceiver {
                 // Previous frame never closed — drop it
                 record_drop(ch, DropReason::Boundary);
             }
+
+            // ── Inter-frame iteration_index continuity check ──
+            // Detects kernel-level packet loss (packets the receiver never saw).
+            // FLAG_FIRST_FRAME means the sender just (re)started — reset tracking.
+            if (hdr.flags & pipit::net::FLAG_FIRST_FRAME) {
+                ch.iter_tracking = false;
+            }
+            if (ch.iter_tracking && hdr.iteration_index != ch.next_expected_iter) {
+                ch.stats.inter_frame_gaps++;
+                // Clear buffer so the display only shows phase-continuous samples
+                ch.buffer = SampleBuffer(ch.buffer.capacity);
+            }
+
             ch.pending.active = true;
             ch.pending.expected_sequence = hdr.sequence + 1;
             ch.pending.start_timestamp_ns = hdr.timestamp_ns;
@@ -414,6 +433,8 @@ class PpktReceiver {
                 ch.stats.accepted_frames++;
                 ch.buffer.push(ch.pending.samples.data(), ch.pending.samples.size());
                 ch.pending.reset();
+                ch.iter_tracking = true;
+                ch.next_expected_iter = hdr.iteration_index + sample_count;
             }
             return;
         }
@@ -452,6 +473,9 @@ class PpktReceiver {
         if (is_end) {
             ch.stats.accepted_frames++;
             ch.buffer.push(ch.pending.samples.data(), ch.pending.samples.size());
+            // Update inter-frame tracking: next frame should continue from here
+            ch.iter_tracking = true;
+            ch.next_expected_iter = ch.pending.next_iteration;
             ch.pending.reset();
         }
     }
