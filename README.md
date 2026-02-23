@@ -101,8 +101,10 @@ target/release/pcc examples/gain.pdl \
 
 - **pipscope** — Real-time oscilloscope GUI (ImGui + ImPlot) receiving PPKT packets via UDP
 
-### Visualization
+### Output Modes
 
+- `--emit manifest` — Actor metadata JSON (hermetic builds, no `.pdl` required)
+- `--emit build-info` — Provenance JSON (source hash, registry fingerprint)
 - `--emit graph-dot` — Graphviz DOT dataflow graph
 - `--emit timing-chart` — Mermaid Gantt scheduling diagram
 - `--emit schedule` — PASS firing order

@@ -92,13 +92,13 @@ When `--actor-meta` is NOT provided (header scanning mode):
 
 ## Exit criteria
 
-- [ ] `--emit manifest` produces canonical JSON from header scanning (no `.pdl` required)
-- [ ] `--emit build-info` produces provenance JSON (source_hash, registry_fingerprint, manifest_schema_version, compiler_version)
-- [ ] `--emit build-info` succeeds with parse-invalid source
-- [ ] Generated C++ includes `// pcc provenance:` comment header
-- [ ] `canonical_json()` produces compact JSON, decoupled from `generate_manifest()` formatting
-- [ ] Overlay/precedence rules documented and tested
-- [ ] `--emit manifest` + `--actor-meta` = usage error (exit code 2)
-- [ ] Reproducibility tests pass (byte-identical outputs for same inputs)
-- [ ] All existing tests remain green
-- [ ] Phase 7b (CMake integration) documented as deferred
+- [x] `--emit manifest` produces canonical JSON from header scanning (no `.pdl` required)
+- [x] `--emit build-info` produces provenance JSON (source_hash, registry_fingerprint, manifest_schema_version, compiler_version)
+- [x] `--emit build-info` succeeds with parse-invalid source
+- [x] Generated C++ includes `// pcc provenance:` comment header
+- [x] `canonical_json()` produces compact JSON, decoupled from `generate_manifest()` formatting
+- [x] Overlay/precedence rules documented and tested
+- [x] `--emit manifest` + `--actor-meta` = usage error (exit code 2)
+- [x] Reproducibility tests pass (byte-identical outputs for same inputs)
+- [x] All existing tests remain green
+- [x] Phase 7b (CMake integration) documented as deferred

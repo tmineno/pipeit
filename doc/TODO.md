@@ -238,11 +238,22 @@
 
 ### Phase 7: Registry Determinism and Hermetic Build Inputs
 
-- [ ] Promote `actors.meta.json` to first-class compiler input path for deterministic builds
-- [ ] Treat header scanning as explicit metadata generation workflow (separate from core semantic compile path)
-- [ ] Define deterministic overlay and precedence rules for manifest/header hybrid flows
-- [ ] Add provenance stamping (input manifest hash, schema version, header set hash) to emitted artifacts
-- [ ] Add CI reproducibility tests (same inputs -> same artifacts/diagnostics)
+#### Phase 7a (core) ✅
+
+- [x] `--emit manifest`: scan headers → output canonical `actors.meta.json` (no `.pdl` required)
+- [x] `--emit build-info`: source + registry provenance as JSON (source_hash, registry_fingerprint, manifest_schema_version, compiler_version)
+- [x] Provenance stamping: generated C++ includes `// pcc provenance: source_hash=... registry_fingerprint=... version=...` comment header
+- [x] Canonical fingerprint: SHA-256 of compact JSON (`canonical_json()`), decoupled from display formatting
+- [x] Overlay/precedence rules documented and tested (`--actor-meta` = manifest-only; `-I` > `--actor-path`; `--emit manifest` + `--actor-meta` = usage error)
+- [x] CI reproducibility tests (byte-identical outputs for same inputs; 6 tests)
+- [x] ADR-027: Registry determinism and hermetic build inputs
+
+#### Phase 7b (build integration) — deferred
+
+- [ ] CMake integration: manifest generation/consumption in examples build graph
+- [ ] `add_custom_command` for `actors.meta.json` generation
+- [ ] `--actor-meta <generated_manifest>` consumption in pcc targets
+- [ ] Dependency tracking: header change → manifest regeneration → recompile
 
 ### Phase 8: Test Strategy and Migration Hardening
 
@@ -504,6 +515,9 @@
 - **v0.4.0 Phase 6** complete — runtime shell library (`pipit_shell.h`): descriptor table + `shell_main()` replaces ~150 LOC inline shell per pipeline; codegen emits compact ParamDesc/TaskDesc/BufferStatsDesc/ProbeDesc arrays; preamble 13 includes → 3; 4 emit methods removed (~180 LOC net reduction in codegen.rs); `_probe_output_file` always generated; probe init gate is `probes.empty()` (no `#ifndef NDEBUG`); 12 C++ shell unit tests + 2 E2E release regression tests; 552 tests passing
 - **New files (Phase 6)**: `runtime/libpipit/include/pipit_shell.h` (shell orchestration library), `runtime/tests/test_shell.cpp` (shell unit tests)
 - **ADR-026**: Runtime Shell Library design (descriptor table approach, probe gate simplification, always-emit `_probe_output_file`)
+- **v0.4.0 Phase 7a** complete — registry determinism and hermetic build inputs: `--emit manifest` (header scan → canonical JSON, no `.pdl` required), `--emit build-info` (SHA-256 provenance JSON), provenance comment stamped in generated C++ (`// pcc provenance: ...`), canonical fingerprint via `canonical_json()` (compact, decoupled from display formatting), overlay/precedence rules documented and tested, 6 reproducibility tests, 15 integration tests; Phase 7b (CMake integration) deferred
+- **New methods (Phase 7a)**: `Registry::canonical_json()` (compact JSON for fingerprint), `compute_provenance()` (SHA-256 hashing), `Provenance::to_json()` (build-info output)
+- **ADR-027**: Registry determinism and hermetic build inputs (manifest-first workflow, canonical fingerprint, output destination contract, overlay rules)
 - **v0.5.x** open items are currently deferred
 - Performance characterization should inform optimization priorities (measure before optimizing)
 - Spec files renamed to versioned names (`pipit-lang-spec-v0.3.0.md`, `pcc-spec-v0.3.0.md`); `v0.2.0` specs are frozen from tag `v0.2.2`
