@@ -869,6 +869,123 @@ TEST(e2e_chunked_firings) {
     rx.stop();
 }
 
+// ── Address-based start and reconnect tests ──────────────────────────────────
+
+TEST(receiver_start_with_address_string) {
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(1024);
+
+    char addr[32];
+    snprintf(addr, sizeof(addr), "0.0.0.0:%u", port);
+    ASSERT_TRUE(rx.start(addr));
+    usleep(5000);
+
+    float samples[2] = {42.0f, 43.0f};
+    send_ppkt(port, 0, samples, 2);
+    usleep(10000);
+
+    auto snaps = rx.snapshot(100);
+    ASSERT_EQ(snaps.size(), 1);
+    ASSERT_EQ(snaps[0].samples.size(), 2);
+    ASSERT_EQ(snaps[0].samples[0], 42.0f);
+
+    rx.stop();
+}
+
+TEST(receiver_start_with_localhost_address) {
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(1024);
+
+    char addr[32];
+    snprintf(addr, sizeof(addr), "127.0.0.1:%u", port);
+    ASSERT_TRUE(rx.start(addr));
+    usleep(5000);
+
+    float samples[2] = {10.0f, 20.0f};
+    send_ppkt(port, 0, samples, 2);
+    usleep(10000);
+
+    auto snaps = rx.snapshot(100);
+    ASSERT_EQ(snaps.size(), 1);
+    ASSERT_EQ(snaps[0].samples[0], 10.0f);
+
+    rx.stop();
+}
+
+TEST(receiver_clear_channels) {
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(1024);
+    ASSERT_TRUE(rx.start(port));
+    usleep(5000);
+
+    float samples[2] = {1.0f, 2.0f};
+    send_ppkt(port, 0, samples, 2);
+    usleep(10000);
+
+    auto snaps = rx.snapshot(100);
+    ASSERT_EQ(snaps.size(), 1);
+
+    rx.clear_channels();
+
+    snaps = rx.snapshot(100);
+    ASSERT_EQ(snaps.size(), 0);
+
+    rx.stop();
+}
+
+TEST(receiver_reconnect_cycle) {
+    uint16_t port1 = next_test_port();
+    uint16_t port2 = next_test_port();
+    pipscope::PpktReceiver rx(1024);
+
+    // Connect to port1
+    ASSERT_TRUE(rx.start(port1));
+    usleep(5000);
+    float s1[2] = {1.0f, 2.0f};
+    send_ppkt(port1, 0, s1, 2);
+    usleep(10000);
+    auto snaps = rx.snapshot(100);
+    ASSERT_EQ(snaps.size(), 1);
+
+    // Reconnect to port2
+    rx.stop();
+    rx.clear_channels();
+    ASSERT_TRUE(rx.start(port2));
+    usleep(5000);
+
+    // Old data should be gone
+    snaps = rx.snapshot(100);
+    ASSERT_EQ(snaps.size(), 0);
+
+    // New data on port2 works
+    float s2[2] = {10.0f, 20.0f};
+    send_ppkt(port2, 0, s2, 2);
+    usleep(10000);
+    snaps = rx.snapshot(100);
+    ASSERT_EQ(snaps.size(), 1);
+    ASSERT_EQ(snaps[0].samples[0], 10.0f);
+
+    rx.stop();
+}
+
+TEST(receiver_start_invalid_address) {
+    pipscope::PpktReceiver rx(1024);
+    ASSERT_FALSE(rx.start("not-a-valid-address"));
+    ASSERT_FALSE(rx.start(""));
+}
+
+TEST(receiver_is_running) {
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(1024);
+    ASSERT_FALSE(rx.is_running());
+
+    ASSERT_TRUE(rx.start(port));
+    ASSERT_TRUE(rx.is_running());
+
+    rx.stop();
+    ASSERT_FALSE(rx.is_running());
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 int main() {

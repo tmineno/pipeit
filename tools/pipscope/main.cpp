@@ -4,8 +4,8 @@
 // Receives PPKT packets over UDP and displays real-time waveforms using
 // ImGui + ImPlot.  See doc/spec/ppkt-protocol-spec-v0.3.0.md for protocol details.
 //
-// Usage: pipscope --port <port>
-//        pipscope -p <port>
+// Usage: pipscope [--port <port>] [--address <addr>]
+//        pipscope [-p <port>] [-a <addr>]
 //
 
 #include <csignal>
@@ -32,23 +32,54 @@ static void signal_handler(int) { g_shutdown = 1; }
 // ── CLI parsing ──────────────────────────────────────────────────────────────
 
 static void print_usage(const char *argv0) {
-    fprintf(stderr, "Usage: %s --port <port>\n", argv0);
-    fprintf(stderr, "       %s -p <port>\n", argv0);
+    fprintf(stderr, "Usage: %s [--port <port>] [--address <addr>]\n", argv0);
+    fprintf(stderr, "       %s [-p <port>] [-a <addr>]\n", argv0);
+    fprintf(stderr, "\n");
+    fprintf(stderr, "  -p, --port <port>       Listen on 0.0.0.0:<port> (UDP)\n");
+    fprintf(stderr, "  -a, --address <addr>    Listen on <addr> (e.g. localhost:9100)\n");
+    fprintf(stderr, "  -h, --help              Show this help message\n");
+    fprintf(stderr, "\nIf no address is given, starts with GUI address input.\n");
 }
 
-static bool parse_port(int argc, char **argv, int &port_out) {
-    for (int i = 1; i + 1 < argc; i++) {
-        if (strcmp(argv[i], "--port") == 0 || strcmp(argv[i], "-p") == 0) {
+struct CliArgs {
+    char address[128] = {};
+    bool has_address = false;
+    bool error = false;
+};
+
+static CliArgs parse_args(int argc, char **argv) {
+    CliArgs args{};
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            print_usage(argv[0]);
+            exit(0);
+        }
+        if ((strcmp(argv[i], "--port") == 0 || strcmp(argv[i], "-p") == 0) && i + 1 < argc) {
             int port = atoi(argv[i + 1]);
             if (port > 0 && port <= 65535) {
-                port_out = port;
-                return true;
+                snprintf(args.address, sizeof(args.address), "0.0.0.0:%d", port);
+                args.has_address = true;
+            } else {
+                fprintf(stderr, "Error: invalid port '%s'\n", argv[i + 1]);
+                args.error = true;
             }
-            fprintf(stderr, "Error: invalid port '%s'\n", argv[i + 1]);
-            return false;
+            i++;
+            continue;
+        }
+        if ((strcmp(argv[i], "--address") == 0 || strcmp(argv[i], "-a") == 0) && i + 1 < argc) {
+            size_t len = strlen(argv[i + 1]);
+            if (len > 0 && len < sizeof(args.address)) {
+                strncpy(args.address, argv[i + 1], sizeof(args.address) - 1);
+                args.has_address = true;
+            } else {
+                fprintf(stderr, "Error: invalid address '%s'\n", argv[i + 1]);
+                args.error = true;
+            }
+            i++;
+            continue;
         }
     }
-    return false;
+    return args;
 }
 
 static bool init_window(GLFWwindow *&window) {
@@ -98,11 +129,17 @@ static void shutdown_imgui() {
     ImGui::DestroyContext();
 }
 
+enum class ConnStatus { Disconnected, Connected, Error };
+
 struct AppState {
     bool paused = false;
     bool auto_y = true;
     int display_samples = 8192;
     std::vector<pipscope::ChannelSnapshot> snapshots;
+
+    char address_buf[128] = "0.0.0.0:9100";
+    ConnStatus conn_status = ConnStatus::Disconnected;
+    char status_msg[256] = "Disconnected";
 };
 
 static void begin_frame() {
@@ -123,7 +160,22 @@ static void end_frame(GLFWwindow *window) {
     glfwSwapBuffers(window);
 }
 
-static void render_toolbar(AppState &state, int port) {
+static void do_connect(AppState &state, pipscope::PpktReceiver &receiver) {
+    receiver.stop();
+    receiver.clear_channels();
+    state.snapshots.clear();
+
+    if (receiver.start(state.address_buf)) {
+        state.conn_status = ConnStatus::Connected;
+        snprintf(state.status_msg, sizeof(state.status_msg), "Listening on %s", state.address_buf);
+    } else {
+        state.conn_status = ConnStatus::Error;
+        snprintf(state.status_msg, sizeof(state.status_msg), "Failed to bind %s",
+                 state.address_buf);
+    }
+}
+
+static void render_toolbar(AppState &state, pipscope::PpktReceiver &receiver) {
     if (ImGui::Button(state.paused ? "Resume" : "Pause")) {
         state.paused = !state.paused;
     }
@@ -133,8 +185,32 @@ static void render_toolbar(AppState &state, int port) {
     ImGui::SetNextItemWidth(200);
     ImGui::SliderInt("Samples", &state.display_samples, 64, 65536, "%d",
                      ImGuiSliderFlags_Logarithmic);
+
     ImGui::SameLine();
-    ImGui::Text("| Port: %d", port);
+    ImGui::Text("|");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(200);
+    bool enter_pressed = ImGui::InputText("##address", state.address_buf, sizeof(state.address_buf),
+                                          ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+    if (ImGui::Button("Connect") || enter_pressed) {
+        do_connect(state, receiver);
+    }
+
+    ImGui::SameLine();
+    ImVec4 status_color;
+    switch (state.conn_status) {
+    case ConnStatus::Connected:
+        status_color = ImVec4(0.2f, 0.9f, 0.2f, 1.0f);
+        break;
+    case ConnStatus::Error:
+        status_color = ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+        break;
+    default:
+        status_color = ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
+        break;
+    }
+    ImGui::TextColored(status_color, "%s", state.status_msg);
 }
 
 static void update_snapshots(AppState &state, pipscope::PpktReceiver &receiver) {
@@ -197,19 +273,23 @@ static void render_channels(const AppState &state) {
     }
 }
 
-static void render_ui(AppState &state, int port, pipscope::PpktReceiver &receiver) {
+static void render_ui(AppState &state, pipscope::PpktReceiver &receiver) {
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
     ImGui::Begin("pipscope", nullptr,
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-    render_toolbar(state, port);
+    render_toolbar(state, receiver);
     ImGui::Separator();
 
     update_snapshots(state, receiver);
     if (state.snapshots.empty()) {
-        ImGui::TextDisabled("Waiting for PPKT data on UDP port %d ...", port);
+        if (state.conn_status == ConnStatus::Connected) {
+            ImGui::TextDisabled("Waiting for PPKT data on %s ...", state.address_buf);
+        } else if (state.conn_status == ConnStatus::Disconnected) {
+            ImGui::TextDisabled("Enter an address and click Connect to start.");
+        }
     }
 
     render_channels(state);
@@ -219,8 +299,8 @@ static void render_ui(AppState &state, int port, pipscope::PpktReceiver &receive
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 int main(int argc, char **argv) {
-    int port = 0;
-    if (!parse_port(argc, argv, port)) {
+    CliArgs args = parse_args(argc, argv);
+    if (args.error) {
         print_usage(argv[0]);
         return 1;
     }
@@ -236,19 +316,24 @@ int main(int argc, char **argv) {
     init_imgui(window);
 
     pipscope::PpktReceiver receiver;
-    if (!receiver.start(static_cast<uint16_t>(port))) {
-        fprintf(stderr, "Error: failed to bind UDP port %d\n", port);
-        shutdown_imgui();
-        shutdown_window(window);
-        return 1;
-    }
-    printf("pipscope: listening on UDP port %d\n", port);
-
     AppState state;
+
+    if (args.has_address) {
+        strncpy(state.address_buf, args.address, sizeof(state.address_buf) - 1);
+        do_connect(state, receiver);
+        if (state.conn_status == ConnStatus::Error) {
+            fprintf(stderr, "Error: %s\n", state.status_msg);
+            shutdown_imgui();
+            shutdown_window(window);
+            return 1;
+        }
+        printf("pipscope: %s\n", state.status_msg);
+    }
+
     while (!glfwWindowShouldClose(window) && !g_shutdown) {
         glfwPollEvents();
         begin_frame();
-        render_ui(state, port, receiver);
+        render_ui(state, receiver);
         end_frame(window);
     }
 

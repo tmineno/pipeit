@@ -205,26 +205,41 @@ class PpktReceiver {
 
     ~PpktReceiver() { stop(); }
 
-    /// Bind to UDP port on localhost and start the receiver thread.
+    /// Bind to UDP port on all interfaces and start the receiver thread.
     bool start(uint16_t port) {
-        // Create and bind socket
-        fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+        char addr_str[32];
+        snprintf(addr_str, sizeof(addr_str), "0.0.0.0:%u", port);
+        return start(addr_str);
+    }
+
+    /// Bind to the given address string and start the receiver thread.
+    ///
+    /// Preconditions: receiver must be stopped.
+    /// Postconditions: on success, receiver thread is running.
+    /// Failure modes: returns false if address is invalid or bind fails.
+    /// Side effects: opens a socket and spawns a background thread.
+    ///
+    /// Supports "host:port" (UDP) and "unix:///path" (Unix domain socket).
+    bool start(const char *address) {
+        pipit::net::ParsedAddr pa = pipit::net::parse_address(address, std::strlen(address));
+        if (pa.kind == pipit::net::AddrKind::INVALID)
+            return false;
+
+        int domain = (pa.kind == pipit::net::AddrKind::UNIX) ? AF_UNIX : AF_INET;
+        fd_ = ::socket(domain, SOCK_DGRAM, 0);
         if (fd_ < 0)
             return false;
 
-        int optval = 1;
-        setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+        if (domain == AF_INET) {
+            int optval = 1;
+            setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+        }
 
         // Enlarge receive buffer to reduce kernel-level drops at high packet rates
         int rcvbuf = 4 * 1024 * 1024; // 4 MB
         setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 
-        struct sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_ANY);
-        addr.sin_port = htons(port);
-
-        if (::bind(fd_, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0) {
+        if (::bind(fd_, reinterpret_cast<const struct sockaddr *>(&pa.storage), pa.len) < 0) {
             ::close(fd_);
             fd_ = -1;
             return false;
@@ -274,6 +289,15 @@ class PpktReceiver {
 
         return result;
     }
+
+    /// Clear all channel data. Called on reconnect to discard stale data.
+    void clear_channels() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        channels_.clear();
+    }
+
+    /// Returns true if the receiver thread is currently running.
+    bool is_running() const { return running_.load(); }
 
     // Non-copyable
     PpktReceiver(const PpktReceiver &) = delete;
