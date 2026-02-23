@@ -241,9 +241,13 @@ class PpktReceiver {
             setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
         }
 
-        // Enlarge receive buffer to reduce kernel-level drops at high packet rates
-        int rcvbuf = 4 * 1024 * 1024; // 4 MB
-        setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+        // Enlarge receive buffer to reduce kernel-level drops at high packet rates.
+        // SO_RCVBUF is silently capped by /proc/sys/net/core/rmem_max (often 212 KB).
+        // Try SO_RCVBUFFORCE first (requires CAP_NET_ADMIN), fall back to SO_RCVBUF.
+        int rcvbuf = 16 * 1024 * 1024; // 16 MB requested
+        if (setsockopt(fd_, SOL_SOCKET, SO_RCVBUFFORCE, &rcvbuf, sizeof(rcvbuf)) < 0) {
+            setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+        }
 
         if (::bind(fd_, reinterpret_cast<const struct sockaddr *>(&pa.storage), pa.len) < 0) {
             ::close(fd_);
@@ -312,7 +316,7 @@ class PpktReceiver {
   private:
     static constexpr size_t kMaxPacketBytes = 65536;
     static constexpr size_t kMaxConvertedSamples = 8192;
-    static constexpr auto kPollSleep = std::chrono::microseconds(100);
+    static constexpr auto kPollSleep = std::chrono::microseconds(10);
 
     enum class RecvStatus { Retry, Packet, Fatal };
 

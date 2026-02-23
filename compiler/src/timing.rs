@@ -826,7 +826,10 @@ mod tests {
         let reg = test_registry();
         let chart = build_and_emit("clock 10MHz t {\n    constant(0.0) | stdout()\n}", &reg);
         assert!(chart.contains("10MHz"), "should format as MHz");
-        assert!(chart.contains("K=10"), "K factor should be 10 for 10MHz");
+        assert!(
+            chart.contains("K=500"),
+            "K factor should be 500 for 10MHz (capped)"
+        );
     }
 
     #[test]

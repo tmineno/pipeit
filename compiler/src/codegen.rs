@@ -2018,10 +2018,10 @@ mod tests {
     #[test]
     fn k_factor_loop() {
         let reg = test_registry();
-        // default tick_rate = 10kHz → K = ceil(10MHz / 10kHz) = 1000
+        // default tick_rate = 10kHz → K = ceil(10MHz / 10kHz) = 1000, capped to MAX_K_FACTOR = 500
         let cpp = codegen_ok("clock 10MHz t { constant(0.0) | stdout() }", &reg);
         assert!(
-            cpp.contains("for (int _k = 0; _k < 1000; ++_k)"),
+            cpp.contains("for (int _k = 0; _k < 500; ++_k)"),
             "should have K-loop: {}",
             cpp
         );
