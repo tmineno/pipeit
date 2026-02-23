@@ -442,33 +442,35 @@ impl<'a> CodegenCtx<'a> {
         _schedule: &TaskSchedule,
     ) -> &'static str {
         let stride = self.iteration_stride(task_name);
-        let iter_advance = if stride <= 1 {
-            "_iter_idx++".to_string()
-        } else {
-            format!("_iter_idx += {}", stride)
-        };
-        if k_factor > 1 {
+        let indent = if k_factor > 1 {
             let _ = writeln!(
                 self.out,
                 "        for (int _k = 0; _k < {}; ++_k) {{",
                 k_factor
             );
-            let _ = writeln!(
-                self.out,
-                "            pipit::detail::set_actor_iteration_index({});",
-                iter_advance
-            );
-            self.emit_param_reads(task_name, task_graph, "            ");
             "            "
         } else {
+            "        "
+        };
+        if stride <= 1 {
+            // _iter_idx++ is post-increment: passes old value, then increments
             let _ = writeln!(
                 self.out,
-                "        pipit::detail::set_actor_iteration_index({});",
-                iter_advance
+                "{}pipit::detail::set_actor_iteration_index(_iter_idx++);",
+                indent
             );
-            self.emit_param_reads(task_name, task_graph, "        ");
-            "        "
+        } else {
+            // Set current index first, then advance — compound assignment
+            // (_iter_idx += N) would pass the *new* value, skipping index 0.
+            let _ = writeln!(
+                self.out,
+                "{}pipit::detail::set_actor_iteration_index(_iter_idx);",
+                indent
+            );
+            let _ = writeln!(self.out, "{}_iter_idx += {};", indent, stride);
         }
+        self.emit_param_reads(task_name, task_graph, indent);
+        indent
     }
 
     fn emit_task_schedule_dispatch(
