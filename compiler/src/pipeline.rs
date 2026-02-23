@@ -15,6 +15,7 @@ use std::time::Instant;
 use crate::analyze::AnalyzedProgram;
 use crate::ast::Program;
 use crate::codegen::{CodegenOptions, GeneratedCode};
+use crate::diag::codes;
 use crate::graph::ProgramGraph;
 use crate::hir::HirProgram;
 use crate::id::IdAllocator;
@@ -256,7 +257,8 @@ pub fn run_pipeline(
                         DiagLevel::Error,
                         state.upstream.hir.as_ref().unwrap().program_span,
                         format!("HIR verification failed: {}", failed.join(", ")),
-                    )];
+                    )
+                    .with_code(codes::E0600)];
                     finish_pass(
                         state,
                         PassId::BuildHir,
@@ -299,11 +301,14 @@ pub fn run_pipeline(
                 let elapsed = t.elapsed();
                 let mut diags = result.diagnostics;
                 if !result.cert.all_pass() {
-                    diags.push(Diagnostic::new(
-                        DiagLevel::Error,
-                        state.upstream.hir.as_ref().unwrap().program_span,
-                        "lowering verification failed (L1-L5 obligations not met)",
-                    ));
+                    diags.push(
+                        Diagnostic::new(
+                            DiagLevel::Error,
+                            state.upstream.hir.as_ref().unwrap().program_span,
+                            "lowering verification failed (L1-L5 obligations not met)",
+                        )
+                        .with_code(codes::E0601),
+                    );
                 }
                 state.upstream.cert = Some(result.cert);
                 state.upstream.lowered = Some(result.lowered);
@@ -405,11 +410,14 @@ fn run_thir_and_downstream(
                 .filter(|(_, ok)| !ok)
                 .map(|(name, _)| *name)
                 .collect();
-            diags.push(Diagnostic::new(
-                DiagLevel::Error,
-                thir.hir.program_span,
-                format!("schedule verification failed: {}", failed.join(", ")),
-            ));
+            diags.push(
+                Diagnostic::new(
+                    DiagLevel::Error,
+                    thir.hir.program_span,
+                    format!("schedule verification failed: {}", failed.join(", ")),
+                )
+                .with_code(codes::E0602),
+            );
         }
         finish_pass_core(
             &mut state.diagnostics,
@@ -447,7 +455,8 @@ fn run_thir_and_downstream(
                 DiagLevel::Error,
                 thir.hir.program_span,
                 format!("LIR verification failed: {}", failed.join(", ")),
-            )];
+            )
+            .with_code(codes::E0603)];
             finish_pass_core(
                 &mut state.diagnostics,
                 &mut state.has_error,

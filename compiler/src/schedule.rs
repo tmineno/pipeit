@@ -19,8 +19,9 @@ use chumsky::span::Span as _;
 
 use crate::analyze::AnalyzedProgram;
 use crate::ast::*;
+use crate::diag::codes;
 use crate::graph::*;
-use crate::resolve::{DiagLevel, Diagnostic};
+use crate::resolve::{DiagCode, DiagLevel, Diagnostic};
 use crate::thir::ThirContext;
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -231,14 +232,14 @@ impl<'a> ScheduleCtx<'a> {
         }
     }
 
-    fn error(&mut self, span: Span, message: String) {
+    fn error(&mut self, code: DiagCode, span: Span, message: String) {
         self.diagnostics
-            .push(Diagnostic::new(DiagLevel::Error, span, message));
+            .push(Diagnostic::new(DiagLevel::Error, span, message).with_code(code));
     }
 
-    fn warning(&mut self, span: Span, message: String) {
+    fn warning(&mut self, code: DiagCode, span: Span, message: String) {
         self.diagnostics
-            .push(Diagnostic::new(DiagLevel::Warning, span, message));
+            .push(Diagnostic::new(DiagLevel::Warning, span, message).with_code(code));
     }
 
     fn build_result(self) -> ScheduleResult {
@@ -313,6 +314,7 @@ impl<'a> ScheduleCtx<'a> {
         let period_ns = 1_000_000_000.0 / timer_hz;
         if period_ns < 10_000.0 {
             self.warning(
+                codes::W0400,
                 freq_span,
                 format!(
                     "effective tick period is {:.0}ns ({:.0}Hz); \
@@ -410,6 +412,7 @@ impl<'a> ScheduleCtx<'a> {
                 .filter(|id| !scheduled.contains(id))
                 .collect();
             self.error(
+                codes::E0400,
                 Span::new((), 0..0),
                 format!(
                     "cannot schedule subgraph '{}' of task '{}': {} node(s) in \

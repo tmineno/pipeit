@@ -19,10 +19,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use chumsky::span::Span as _;
 
 use crate::ast::*;
+use crate::diag::codes;
 use crate::graph::*;
 use crate::hir::{HirSwitchSource, HirTaskBody};
 use crate::registry::{ActorMeta, ParamKind, ParamType, PipitType, PortShape, TokenCount};
-use crate::resolve::{DiagLevel, Diagnostic};
+use crate::resolve::{DiagCode, DiagLevel, Diagnostic};
 use crate::subgraph_index::{
     build_global_node_index, build_subgraph_indices, find_node, subgraph_key, subgraphs_of,
     GraphQueryCtx, SubgraphIndex,
@@ -188,19 +189,25 @@ impl<'a> AnalyzeCtx<'a> {
         }
     }
 
-    fn error(&mut self, span: Span, message: String) {
+    fn error(&mut self, code: DiagCode, span: Span, message: String) {
         self.diagnostics
-            .push(Diagnostic::new(DiagLevel::Error, span, message));
+            .push(Diagnostic::new(DiagLevel::Error, span, message).with_code(code));
     }
 
-    fn error_with_hint(&mut self, span: Span, message: String, hint: String) {
-        self.diagnostics
-            .push(Diagnostic::new(DiagLevel::Error, span, message).with_hint(hint));
+    fn error_with_hint(&mut self, code: DiagCode, span: Span, message: String, hint: String) {
+        self.diagnostics.push(
+            Diagnostic::new(DiagLevel::Error, span, message)
+                .with_code(code)
+                .with_hint(hint),
+        );
     }
 
-    fn warning_with_hint(&mut self, span: Span, message: String, hint: String) {
-        self.diagnostics
-            .push(Diagnostic::new(DiagLevel::Warning, span, message).with_hint(hint));
+    fn warning_with_hint(&mut self, code: DiagCode, span: Span, message: String, hint: String) {
+        self.diagnostics.push(
+            Diagnostic::new(DiagLevel::Warning, span, message)
+                .with_code(code)
+                .with_hint(hint),
+        );
     }
 
     fn build_result(self) -> AnalysisResult {
@@ -1099,7 +1106,7 @@ impl<'a> AnalyzeCtx<'a> {
         }
 
         for (span, message, hint) in pending {
-            self.error_with_hint(span, message, hint);
+            self.error_with_hint(codes::E0302, span, message, hint);
         }
     }
 
@@ -1130,6 +1137,7 @@ impl<'a> AnalyzeCtx<'a> {
         }
 
         self.error_with_hint(
+            codes::E0300,
             node.span,
             format!(
                 "unresolved frame dimension '{}' at actor '{}'",
@@ -1142,7 +1150,7 @@ impl<'a> AnalyzeCtx<'a> {
     fn check_edge_shape_conflicts(&mut self, sub: &Subgraph) {
         for edge in &sub.edges {
             if let Some((span, message)) = self.find_shape_conflict_on_edge(sub, edge) {
-                self.error(span, message);
+                self.error(codes::E0301, span, message);
             }
         }
 
@@ -1180,7 +1188,7 @@ impl<'a> AnalyzeCtx<'a> {
             }
         }
         for (span, msg) in conflicts {
-            self.error(span, msg);
+            self.error(codes::E0302, span, msg);
         }
     }
 
@@ -1288,6 +1296,7 @@ impl<'a> AnalyzeCtx<'a> {
                         .collect::<Vec<_>>()
                         .join(", ");
                     self.warning_with_hint(
+                        codes::W0300,
                         node.span,
                         format!(
                             "actor '{}' declares inferred dimension PARAM(s) [{}] before non-dimension parameters",
@@ -1361,6 +1370,7 @@ impl<'a> AnalyzeCtx<'a> {
                     let src_name = node_display_name(src_node);
                     let tgt_name = node_display_name(tgt_node);
                     self.error_with_hint(
+                        codes::E0303,
                         edge.span,
                         format!(
                             "type mismatch at pipe '{} -> {}': {} outputs {}, but {} expects {}",
@@ -1544,6 +1554,7 @@ impl<'a> AnalyzeCtx<'a> {
         let src_name = src.map(node_display_name).unwrap_or("?".into());
         let tgt_name = tgt.map(node_display_name).unwrap_or("?".into());
         self.error(
+            codes::E0304,
             edge.span,
             format!(
                 "SDF balance equation unsolvable at edge '{} -> {}' in task '{}': \
@@ -1583,6 +1594,7 @@ impl<'a> AnalyzeCtx<'a> {
                     .map(|n| n.span)
                     .unwrap_or(Span::new((), 0..0));
                 self.error_with_hint(
+                    codes::E0305,
                     span,
                     format!("feedback loop detected at '{}' with no delay", cycle_desc),
                     "insert delay(N, init) to break the cycle".to_string(),
@@ -1654,7 +1666,7 @@ impl<'a> AnalyzeCtx<'a> {
                             edge.reader_task,
                             reader_rate,
                         );
-                        self.error(span, msg);
+                        self.error(codes::E0306, span, msg);
                     }
                 }
             }
@@ -1702,6 +1714,7 @@ impl<'a> AnalyzeCtx<'a> {
                 "default mem (64MB)"
             };
             self.error(
+                codes::E0307,
                 span,
                 format!(
                     "shared memory pool exceeded: required {} bytes, available {} bytes ({})",
@@ -1767,6 +1780,7 @@ impl<'a> AnalyzeCtx<'a> {
         if let Some(inferred_type) = inferred {
             if !param_type_compatible(&inferred_type, &expected_type) {
                 self.error(
+                    codes::E0308,
                     span,
                     format!(
                         "param '{}' type mismatch: actor '{}' expects RUNTIME_PARAM({:?}), \
@@ -1797,6 +1811,7 @@ impl<'a> AnalyzeCtx<'a> {
                     let inferred = infer_param_type(&param.default_value);
                     if inferred != Some(ParamType::Int) {
                         self.error_with_hint(
+                            codes::E0309,
                             *span,
                             format!(
                                 "switch param '${}' in task '{}' has non-int32 default; \
@@ -1820,6 +1835,7 @@ impl<'a> AnalyzeCtx<'a> {
                         if let Some(wire_type) = self.trace_type_backward(node.id, control_sub) {
                             if wire_type != PipitType::Int32 {
                                 self.error_with_hint(
+                                    codes::E0310,
                                     node.span,
                                     format!(
                                         "ctrl buffer '{}' in task '{}' has type {}, \

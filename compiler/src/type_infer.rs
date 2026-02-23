@@ -15,6 +15,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::ast::{Arg, Scalar, Span, Value};
+use crate::diag::codes;
 use crate::hir::{
     HirActorCall, HirPipeElem, HirPipeExpr, HirPipeSource, HirPipeline, HirProgram, HirTask,
     HirTaskBody,
@@ -365,6 +366,7 @@ impl<'a> TypeInferEngine<'a> {
                             *type_span,
                             format!("unknown type '{}'", type_name),
                         )
+                        .with_code(codes::E0100)
                         .with_hint(
                             "valid types: int8, int16, int32, float, double, cfloat, cdouble",
                         ),
@@ -428,6 +430,7 @@ impl<'a> TypeInferEngine<'a> {
                         call.call_span,
                         format!("ambiguous polymorphic actor call '{}'", call.name),
                     )
+                    .with_code(codes::E0101)
                     .with_hint(format!(
                         "specify type arguments explicitly, e.g. {}<float>({})",
                         call.name,
@@ -452,6 +455,7 @@ impl<'a> TypeInferEngine<'a> {
                             call.call_span,
                             format!("ambiguous polymorphic actor call '{}'", call.name),
                         )
+                        .with_code(codes::E0102)
                         .with_hint(format!(
                             "specify type arguments explicitly, e.g. {}<float>({})",
                             call.name,

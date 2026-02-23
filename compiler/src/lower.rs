@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 
 use crate::ast::Span;
+use crate::diag::codes;
 use crate::hir::{
     HirActorCall, HirPipeElem, HirPipeExpr, HirPipeSource, HirPipeline, HirProgram, HirTask,
     HirTaskBody,
@@ -349,7 +350,7 @@ impl<'a> LowerEngine<'a> {
                         "lowering verification failed (L1 type consistency): edge type mismatch {} -> {}",
                         src_type, tgt_type
                     ),
-                ));
+                ).with_code(codes::E0200));
                 ok = false;
             }
         }
@@ -373,6 +374,7 @@ impl<'a> LowerEngine<'a> {
                             wn.from_type, wn.to_type
                         ),
                     )
+                    .with_code(codes::E0201)
                     .with_hint(
                         "allowed chains: int8->int16->int32->float->double, cfloat->cdouble",
                     ),
@@ -393,12 +395,15 @@ impl<'a> LowerEngine<'a> {
                 let in_count = &tgt_meta.in_count;
                 if let TokenCount::Literal(n) = in_count {
                     if *n == 0 {
-                        self.diagnostics.push(Diagnostic::new(
-                            DiagLevel::Error,
-                            wn.target_span,
-                            "lowering verification failed (L3 rate/shape preservation): \
+                        self.diagnostics.push(
+                            Diagnostic::new(
+                                DiagLevel::Error,
+                                wn.target_span,
+                                "lowering verification failed (L3 rate/shape preservation): \
                                  widening target has zero-rate input",
-                        ));
+                            )
+                            .with_code(codes::E0202),
+                        );
                         ok = false;
                     }
                 }
@@ -461,6 +466,7 @@ impl<'a> LowerEngine<'a> {
                                     call.name
                                 ),
                             )
+                            .with_code(codes::E0203)
                             .with_hint("specify type arguments explicitly"),
                         );
                         *ok = false;
@@ -476,6 +482,7 @@ impl<'a> LowerEngine<'a> {
                                 call.name
                             ),
                         )
+                        .with_code(codes::E0204)
                         .with_hint("specify type arguments explicitly"),
                     );
                     *ok = false;
@@ -500,27 +507,33 @@ impl<'a> LowerEngine<'a> {
                     Span::new((), 0..0)
                 });
             if !meta.in_type.is_concrete() {
-                self.diagnostics.push(Diagnostic::new(
-                    DiagLevel::Error,
-                    span,
-                    format!(
-                        "lowering verification failed (L5 no fallback typing): \
+                self.diagnostics.push(
+                    Diagnostic::new(
+                        DiagLevel::Error,
+                        span,
+                        format!(
+                            "lowering verification failed (L5 no fallback typing): \
                          actor '{}' has unresolved input type '{}'",
-                        meta.name, meta.in_type
-                    ),
-                ));
+                            meta.name, meta.in_type
+                        ),
+                    )
+                    .with_code(codes::E0205),
+                );
                 ok = false;
             }
             if !meta.out_type.is_concrete() {
-                self.diagnostics.push(Diagnostic::new(
-                    DiagLevel::Error,
-                    span,
-                    format!(
-                        "lowering verification failed (L5 no fallback typing): \
+                self.diagnostics.push(
+                    Diagnostic::new(
+                        DiagLevel::Error,
+                        span,
+                        format!(
+                            "lowering verification failed (L5 no fallback typing): \
                          actor '{}' has unresolved output type '{}'",
-                        meta.name, meta.out_type
-                    ),
-                ));
+                            meta.name, meta.out_type
+                        ),
+                    )
+                    .with_code(codes::E0206),
+                );
                 ok = false;
             }
         }
