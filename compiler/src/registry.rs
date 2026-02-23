@@ -391,18 +391,32 @@ impl Registry {
         Ok(count)
     }
 
-    /// Generate a JSON manifest string from the current registry contents.
+    /// Generate a pretty-printed JSON manifest string for display and `--emit manifest`.
     pub fn generate_manifest(&self) -> String {
+        let manifest = self.build_manifest();
+        serde_json::to_string_pretty(&manifest).expect("manifest serialization should not fail")
+    }
+
+    /// Generate compact canonical JSON for fingerprint computation.
+    ///
+    /// Uses `serde_json::to_string()` (no whitespace) to ensure the hash
+    /// is independent of display formatting. Same sorting/collection logic
+    /// as `generate_manifest()`.
+    pub fn canonical_json(&self) -> String {
+        let manifest = self.build_manifest();
+        serde_json::to_string(&manifest).expect("manifest serialization should not fail")
+    }
+
+    fn build_manifest(&self) -> Manifest {
         let actors: Vec<&ActorMeta> = {
             let mut v: Vec<_> = self.actors.values().map(|(m, _)| m).collect();
             v.sort_by(|a, b| a.name.cmp(&b.name));
             v
         };
-        let manifest = Manifest {
+        Manifest {
             schema: 1,
             actors: actors.into_iter().cloned().collect(),
-        };
-        serde_json::to_string_pretty(&manifest).expect("manifest serialization should not fail")
+        }
     }
 }
 

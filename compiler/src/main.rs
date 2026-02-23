@@ -23,6 +23,8 @@ enum EmitStage {
     GraphDot,
     Schedule,
     TimingChart,
+    Manifest,
+    BuildInfo,
 }
 
 #[derive(Parser, Debug)]
@@ -32,12 +34,12 @@ enum EmitStage {
     about = "Pipit Compiler Collection — compiles .pdl pipeline definitions to native executables"
 )]
 struct Cli {
-    /// Input .pdl source file
-    source: PathBuf,
+    /// Input .pdl source file (not required for --emit manifest)
+    source: Option<PathBuf>,
 
-    /// Output file path
-    #[arg(short, long, default_value = "a.out")]
-    output: PathBuf,
+    /// Output file path (default: stdout for text stages, a.out for exe)
+    #[arg(short, long)]
+    output: Option<PathBuf>,
 
     /// Actor header file or search directory (repeatable)
     #[arg(short = 'I', long = "include")]
@@ -80,20 +82,66 @@ fn main() {
     let cli = Cli::parse();
 
     if cli.verbose {
-        eprintln!("pcc: source = {}", cli.source.display());
-        eprintln!("pcc: output = {}", cli.output.display());
+        if let Some(ref src) = cli.source {
+            eprintln!("pcc: source = {}", src.display());
+        }
+        if let Some(ref out) = cli.output {
+            eprintln!("pcc: output = {}", out.display());
+        }
         eprintln!("pcc: emit   = {:?}", cli.emit);
     }
 
-    // ── Read and parse source ──
-    let source = match std::fs::read_to_string(&cli.source) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: {}: {}", cli.source.display(), e);
+    // ── --emit manifest: early exit before source reading ──
+    if matches!(cli.emit, EmitStage::Manifest) {
+        if cli.actor_meta.is_some() {
+            eprintln!("error: cannot combine --emit manifest with --actor-meta");
+            std::process::exit(EXIT_USAGE_ERROR);
+        }
+        let (registry, _headers) = match load_actor_registry_from_headers(&cli) {
+            Ok(v) => v,
+            Err((msg, code)) => {
+                eprintln!("error: {}", msg);
+                std::process::exit(code);
+            }
+        };
+        let manifest_json = registry.generate_manifest();
+        emit_output(&cli.output, &manifest_json);
+        std::process::exit(EXIT_OK);
+    }
+
+    // ── Validate source is provided for all other stages ──
+    let source_path = match cli.source {
+        Some(ref p) => p.clone(),
+        None => {
+            eprintln!("error: source file is required for --emit {:?}", cli.emit);
             std::process::exit(EXIT_USAGE_ERROR);
         }
     };
 
+    // ── Read source ──
+    let source = match std::fs::read_to_string(&source_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {}: {}", source_path.display(), e);
+            std::process::exit(EXIT_USAGE_ERROR);
+        }
+    };
+
+    // ── --emit build-info: early exit before parsing ──
+    if matches!(cli.emit, EmitStage::BuildInfo) {
+        let (registry, _headers) = match load_actor_registry(&cli) {
+            Ok(v) => v,
+            Err((msg, code)) => {
+                eprintln!("error: {}", msg);
+                std::process::exit(code);
+            }
+        };
+        let provenance = pcc::pipeline::compute_provenance(&source, &registry);
+        emit_output(&cli.output, &provenance.to_json());
+        std::process::exit(EXIT_OK);
+    }
+
+    // ── Parse source ──
     let diag_format = cli.diagnostic_format;
     let parse_result = pcc::parser::parse(&source);
     if !parse_result.errors.is_empty() {
@@ -110,7 +158,7 @@ fn main() {
                 print_span_diagnostic(
                     "error",
                     &format!("{}", err),
-                    &cli.source,
+                    &source_path,
                     &source,
                     span.start,
                     span.end,
@@ -153,7 +201,7 @@ fn main() {
 
     // ── Map EmitStage to terminal PassId ──
     let terminal = match cli.emit {
-        EmitStage::Ast => unreachable!(), // handled above
+        EmitStage::Ast | EmitStage::Manifest | EmitStage::BuildInfo => unreachable!(),
         EmitStage::GraphDot => pcc::pass::PassId::BuildGraph,
         EmitStage::Graph | EmitStage::Schedule | EmitStage::TimingChart => {
             pcc::pass::PassId::Schedule
@@ -174,7 +222,7 @@ fn main() {
         &codegen_options,
         cli.verbose,
         |_pass_id, diags| {
-            has_errors |= print_pipeline_diags(&cli.source, &source, diags, diag_format);
+            has_errors |= print_pipeline_diags(&source_path, &source, diags, diag_format);
         },
     );
 
@@ -184,7 +232,7 @@ fn main() {
 
     // ── Emit-specific output ──
     match cli.emit {
-        EmitStage::Ast => unreachable!(),
+        EmitStage::Ast | EmitStage::Manifest | EmitStage::BuildInfo => unreachable!(),
         EmitStage::GraphDot => {
             print!(
                 "{}",
@@ -219,19 +267,17 @@ fn main() {
         }
         EmitStage::Cpp => {
             let cpp_source = &state.downstream.generated.as_ref().unwrap().cpp_source;
-            if cli.output == Path::new("-") {
-                print!("{}", cpp_source);
-            } else if let Err(e) = std::fs::write(&cli.output, cpp_source) {
-                eprintln!("error: failed to write {}: {}", cli.output.display(), e);
-                std::process::exit(EXIT_SYSTEM_ERROR);
-            }
-
+            emit_output(&cli.output, cpp_source);
             if cli.verbose {
-                eprintln!("pcc: wrote {}", cli.output.display());
+                if let Some(ref out) = cli.output {
+                    eprintln!("pcc: wrote {}", out.display());
+                }
             }
             std::process::exit(EXIT_OK);
         }
         EmitStage::Exe => {
+            let exe_output = cli.output.clone().unwrap_or_else(|| PathBuf::from("a.out"));
+
             // Write generated C++ to temp file
             let tmp_dir = std::env::temp_dir();
             let tmp_cpp = tmp_dir.join(format!("pcc_generated_{}.cpp", std::process::id()));
@@ -290,7 +336,7 @@ fn main() {
             }
 
             cmd.arg("-lpthread");
-            cmd.arg("-o").arg(&cli.output);
+            cmd.arg("-o").arg(&exe_output);
             cmd.arg(&tmp_cpp);
 
             if cli.verbose {
@@ -315,10 +361,25 @@ fn main() {
             }
 
             if cli.verbose {
-                eprintln!("pcc: wrote {}", cli.output.display());
+                eprintln!("pcc: wrote {}", exe_output.display());
             }
 
             std::process::exit(EXIT_OK);
+        }
+    }
+}
+
+/// Write content to the specified output path, or stdout if None / "-".
+fn emit_output(output: &Option<PathBuf>, content: &str) {
+    match output {
+        Some(path) if path != Path::new("-") => {
+            if let Err(e) = std::fs::write(path, content) {
+                eprintln!("error: failed to write {}: {}", path.display(), e);
+                std::process::exit(EXIT_SYSTEM_ERROR);
+            }
+        }
+        _ => {
+            print!("{}", content);
         }
     }
 }

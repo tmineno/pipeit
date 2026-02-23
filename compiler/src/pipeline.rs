@@ -51,13 +51,80 @@ pub struct DownstreamArtifacts {
     pub generated: Option<GeneratedCode>,
 }
 
-/// Provenance metadata for future cache-key use.
-/// Fields are NOT computed in this phase — struct is defined for API stability.
-/// Actual hash computation deferred to Phase 3b when caching is implemented.
+/// Provenance metadata for hermetic builds and cache-key use.
+///
+/// `source_hash`: SHA-256 of the raw `.pdl` source text.
+/// `registry_fingerprint`: SHA-256 of canonical compact JSON from `Registry::canonical_json()`.
+/// `compiler_version`: crate version from `Cargo.toml`.
 pub struct Provenance {
     pub source_hash: [u8; 32],
     pub registry_fingerprint: [u8; 32],
     pub compiler_version: &'static str,
+}
+
+impl Provenance {
+    /// Hex string of the source hash (64 characters).
+    pub fn source_hash_hex(&self) -> String {
+        bytes_to_hex(&self.source_hash)
+    }
+
+    /// Hex string of the registry fingerprint (64 characters).
+    pub fn registry_fingerprint_hex(&self) -> String {
+        bytes_to_hex(&self.registry_fingerprint)
+    }
+
+    /// Serialize provenance as a JSON string for `--emit build-info`.
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\n  \"source_hash\": \"{}\",\n  \"registry_fingerprint\": \"{}\",\n  \"manifest_schema_version\": 1,\n  \"compiler_version\": \"{}\"\n}}\n",
+            self.source_hash_hex(),
+            self.registry_fingerprint_hex(),
+            self.compiler_version,
+        )
+    }
+}
+
+fn bytes_to_hex(bytes: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(s, "{:02x}", b);
+    }
+    s
+}
+
+/// Compute provenance from source text and registry.
+///
+/// Uses SHA-256 for both hashes. The registry fingerprint is computed from
+/// `Registry::canonical_json()` (compact JSON, no whitespace) to ensure
+/// stability independent of display formatting.
+pub fn compute_provenance(source: &str, registry: &Registry) -> Provenance {
+    use sha2::{Digest, Sha256};
+
+    let source_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(source.as_bytes());
+        let result = hasher.finalize();
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&result);
+        hash
+    };
+
+    let registry_fingerprint = {
+        let canonical = registry.canonical_json();
+        let mut hasher = Sha256::new();
+        hasher.update(canonical.as_bytes());
+        let result = hasher.finalize();
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&result);
+        hash
+    };
+
+    Provenance {
+        source_hash,
+        registry_fingerprint,
+        compiler_version: env!("CARGO_PKG_VERSION"),
+    }
 }
 
 /// Holds all compilation artifacts and accumulated diagnostics.
