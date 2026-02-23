@@ -507,20 +507,56 @@ fn print_pipeline_diags(
     let mut has_error = false;
 
     for diag in diags {
-        let (level, is_error) = match diag.level {
+        let (level_str, is_error) = match diag.level {
             pcc::resolve::DiagLevel::Error => ("error", true),
             pcc::resolve::DiagLevel::Warning => ("warning", false),
         };
 
+        // Format level with code prefix: "error[E0001]" or plain "error"
+        let level = match &diag.code {
+            Some(code) => format!("{}[{}]", level_str, code),
+            None => level_str.to_string(),
+        };
+
         print_span_diagnostic(
-            level,
+            &level,
             &diag.message,
             source_path,
             source,
             diag.span.start,
             diag.span.end,
-            None,
+            diag.hint.as_deref(),
         );
+
+        // Display related spans
+        for rel in &diag.related_spans {
+            print_span_diagnostic(
+                "note",
+                &rel.label,
+                source_path,
+                source,
+                rel.span.start,
+                rel.span.end,
+                None,
+            );
+        }
+
+        // Display cause chain
+        for cause in &diag.cause_chain {
+            if let Some(span) = cause.span {
+                print_span_diagnostic(
+                    "cause",
+                    &cause.message,
+                    source_path,
+                    source,
+                    span.start,
+                    span.end,
+                    None,
+                );
+            } else {
+                eprintln!("  cause: {}", cause.message);
+            }
+        }
 
         has_error |= is_error;
     }
