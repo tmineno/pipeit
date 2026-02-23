@@ -344,14 +344,20 @@ impl<'a> LowerEngine<'a> {
             }
 
             if src_type != tgt_type {
-                self.diagnostics.push(Diagnostic::new(
-                    DiagLevel::Error,
-                    tgt.call_span,
-                    format!(
-                        "lowering verification failed (L1 type consistency): edge type mismatch {} -> {}",
-                        src_type, tgt_type
-                    ),
-                ).with_code(codes::E0200));
+                self.diagnostics.push(
+                    Diagnostic::new(
+                        DiagLevel::Error,
+                        tgt.call_span,
+                        format!(
+                            "lowering verification failed (L1 type consistency): \
+                             edge type mismatch {} -> {}",
+                            src_type, tgt_type
+                        ),
+                    )
+                    .with_code(codes::E0200)
+                    .with_related(src.call_span, format!("{} outputs {}", src.name, src_type))
+                    .with_related(tgt.call_span, format!("{} expects {}", tgt.name, tgt_type)),
+                );
                 ok = false;
             }
         }
@@ -803,6 +809,19 @@ mod tests {
             "L1 should fail for mismatched types"
         );
         assert!(engine.diagnostics.iter().any(|d| d.message.contains("L1")));
+        // Enriched diagnostic should have related_spans for source and target actors
+        let l1_diag = engine
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("L1"))
+            .unwrap();
+        assert_eq!(
+            l1_diag.related_spans.len(),
+            2,
+            "L1 diagnostic should have 2 related spans (src + tgt)"
+        );
+        assert!(l1_diag.related_spans[0].label.contains("outputs"));
+        assert!(l1_diag.related_spans[1].label.contains("expects"));
     }
 
     #[test]

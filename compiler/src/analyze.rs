@@ -1369,18 +1369,30 @@ impl<'a> AnalyzeCtx<'a> {
                 if st != tt {
                     let src_name = node_display_name(src_node);
                     let tgt_name = node_display_name(tgt_node);
-                    self.error_with_hint(
-                        codes::E0303,
+                    let mut d = Diagnostic::new(
+                        DiagLevel::Error,
                         edge.span,
                         format!(
                             "type mismatch at pipe '{} -> {}': {} outputs {}, but {} expects {}",
                             src_name, tgt_name, src_name, st, tgt_name, tt
                         ),
-                        format!(
-                            "insert a conversion actor between {} and {} (e.g. c2r, mag)",
-                            src_name, tgt_name
-                        ),
+                    )
+                    .with_code(codes::E0303)
+                    .with_hint(format!(
+                        "insert a conversion actor between {} and {} (e.g. c2r, mag)",
+                        src_name, tgt_name
+                    ))
+                    .with_related(src_node.span, format!("{} produces {}", src_name, st))
+                    .with_related(tgt_node.span, format!("{} expects {}", tgt_name, tt));
+                    d = d.with_cause(
+                        format!("{} output type is {}", src_name, st),
+                        Some(src_node.span),
                     );
+                    d = d.with_cause(
+                        format!("{} input type is {}", tgt_name, tt),
+                        Some(tgt_node.span),
+                    );
+                    self.diagnostics.push(d);
                 }
             }
         }
@@ -1553,21 +1565,45 @@ impl<'a> AnalyzeCtx<'a> {
         let tgt = self.node_in_subgraph(sub, edge.target);
         let src_name = src.map(node_display_name).unwrap_or("?".into());
         let tgt_name = tgt.map(node_display_name).unwrap_or("?".into());
-        self.error(
-            codes::E0304,
+        let src_rep = *rv.get(&edge.source).unwrap_or(&0);
+        let tgt_rep = *rv.get(&edge.target).unwrap_or(&0);
+        let mut d = Diagnostic::new(
+            DiagLevel::Error,
             edge.span,
             format!(
                 "SDF balance equation unsolvable at edge '{} -> {}' in task '{}': \
                  {}×{} ≠ {}×{}",
-                src_name,
-                tgt_name,
-                task_name,
-                rv.get(&edge.source).unwrap_or(&0),
-                p,
-                rv.get(&edge.target).unwrap_or(&0),
-                c
+                src_name, tgt_name, task_name, src_rep, p, tgt_rep, c
             ),
+        )
+        .with_code(codes::E0304);
+        if let Some(s) = src {
+            d = d.with_related(s.span, format!("producer {}: out_count={}", src_name, p));
+        }
+        if let Some(t) = tgt {
+            d = d.with_related(t.span, format!("consumer {}: in_count={}", tgt_name, c));
+        }
+        d = d.with_cause(
+            format!(
+                "{} produces {}×{} = {} tokens per cycle",
+                src_name,
+                src_rep,
+                p,
+                src_rep as u64 * p as u64
+            ),
+            src.map(|n| n.span),
         );
+        d = d.with_cause(
+            format!(
+                "{} consumes {}×{} = {} tokens per cycle",
+                tgt_name,
+                tgt_rep,
+                c,
+                tgt_rep as u64 * c as u64
+            ),
+            tgt.map(|n| n.span),
+        );
+        self.diagnostics.push(d);
     }
 
     // ── Phase 3: Feedback loop delay verification ───────────────────────
