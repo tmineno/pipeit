@@ -15,6 +15,7 @@ use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::diag::codes;
+use crate::diag::{DiagCode, DiagLevel, Diagnostic};
 use crate::id::{CallId, DefId, IdAllocator, TaskId};
 use crate::registry::Registry;
 
@@ -125,8 +126,6 @@ pub struct ProbeEntry {
     pub span: Span,
     pub context: String,
 }
-
-pub use crate::diag::{DiagCode, DiagLevel, Diagnostic};
 
 // ── Public entry point ──────────────────────────────────────────────────────
 

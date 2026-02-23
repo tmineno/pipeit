@@ -14,13 +14,14 @@ use std::collections::HashMap;
 
 use crate::ast::Span;
 use crate::diag::codes;
+use crate::diag::{DiagLevel, Diagnostic};
 use crate::hir::{
     HirActorCall, HirPipeElem, HirPipeExpr, HirPipeSource, HirPipeline, HirProgram, HirTask,
     HirTaskBody,
 };
 use crate::id::CallId;
 use crate::registry::{ActorMeta, PipitType, Registry, TokenCount};
-use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
+use crate::resolve::ResolvedProgram;
 use crate::type_infer::{can_widen, TypedProgram};
 
 // ── Output types ────────────────────────────────────────────────────────────
@@ -1122,8 +1123,8 @@ mod tests {
     // ── Regression tests for Phase 2c ──────────────────────────────────
 
     fn lower_source(source: &str) -> LowerResult {
+        use crate::diag::DiagLevel;
         use crate::registry::Registry;
-        use crate::resolve::DiagLevel;
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()

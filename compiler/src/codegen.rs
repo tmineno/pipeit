@@ -14,13 +14,13 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+use crate::diag::Diagnostic;
 use crate::graph::*;
 use crate::lir::{
     LirActorArg, LirActorFiring, LirBufferIo, LirConstValue, LirCtrlSource, LirFiring,
     LirFiringGroup, LirFiringKind, LirFusedChain, LirHoistedActor, LirModalBody, LirProbeFiring,
     LirProgram, LirSubgraph, LirTaskBody, LirTimerSpin,
 };
-use crate::resolve::Diagnostic;
 use crate::schedule::*;
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -1541,8 +1541,9 @@ fn build_lir_output_ptr(actor: &LirActorFiring, rep: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diag::DiagLevel;
     use crate::registry::Registry;
-    use crate::resolve::{self, DiagLevel};
+    use crate::resolve;
     use std::path::PathBuf;
 
     fn test_registry() -> Registry {

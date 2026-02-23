@@ -54,7 +54,7 @@ fn full_pipeline_cpp(source: &str, registry: &pcc::registry::Registry) -> String
         resolve_result
             .diagnostics
             .iter()
-            .all(|d| d.level != pcc::resolve::DiagLevel::Error),
+            .all(|d| d.level != pcc::diag::DiagLevel::Error),
         "resolve errors: {:?}",
         resolve_result.diagnostics
     );
@@ -69,7 +69,7 @@ fn full_pipeline_cpp(source: &str, registry: &pcc::registry::Registry) -> String
         type_result
             .diagnostics
             .iter()
-            .all(|d| d.level != pcc::resolve::DiagLevel::Error),
+            .all(|d| d.level != pcc::diag::DiagLevel::Error),
         "type_infer errors: {:?}",
         type_result.diagnostics
     );
@@ -91,7 +91,7 @@ fn full_pipeline_cpp(source: &str, registry: &pcc::registry::Registry) -> String
         graph_result
             .diagnostics
             .iter()
-            .all(|d| d.level != pcc::resolve::DiagLevel::Error),
+            .all(|d| d.level != pcc::diag::DiagLevel::Error),
         "graph errors: {:?}",
         graph_result.diagnostics
     );
@@ -109,7 +109,7 @@ fn full_pipeline_cpp(source: &str, registry: &pcc::registry::Registry) -> String
         analysis_result
             .diagnostics
             .iter()
-            .all(|d| d.level != pcc::resolve::DiagLevel::Error),
+            .all(|d| d.level != pcc::diag::DiagLevel::Error),
         "analysis errors: {:?}",
         analysis_result.diagnostics
     );
@@ -120,7 +120,7 @@ fn full_pipeline_cpp(source: &str, registry: &pcc::registry::Registry) -> String
         schedule_result
             .diagnostics
             .iter()
-            .all(|d| d.level != pcc::resolve::DiagLevel::Error),
+            .all(|d| d.level != pcc::diag::DiagLevel::Error),
         "schedule errors: {:?}",
         schedule_result.diagnostics
     );
@@ -141,7 +141,7 @@ fn full_pipeline_cpp(source: &str, registry: &pcc::registry::Registry) -> String
         codegen_result
             .diagnostics
             .iter()
-            .all(|d| d.level != pcc::resolve::DiagLevel::Error),
+            .all(|d| d.level != pcc::diag::DiagLevel::Error),
         "codegen errors: {:?}",
         codegen_result.diagnostics
     );

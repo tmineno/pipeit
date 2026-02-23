@@ -17,13 +17,14 @@ use std::fmt;
 
 use crate::ast::*;
 use crate::diag::codes;
+use crate::diag::{DiagCode, DiagLevel, Diagnostic};
 use crate::hir::{
     HirActorCall, HirPipeElem, HirPipeExpr, HirPipeSource, HirPipeline, HirProgram, HirTask,
     HirTaskBody,
 };
 use crate::id::CallId;
 use crate::registry::Registry;
-use crate::resolve::{DiagCode, DiagLevel, Diagnostic, ResolvedProgram};
+use crate::resolve::ResolvedProgram;
 
 // ── Public types ────────────────────────────────────────────────────────────
 

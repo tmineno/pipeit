@@ -499,17 +499,13 @@ fn map_registry_error(e: pcc::registry::RegistryError) -> (String, i32) {
     }
 }
 
-fn print_pipeline_diags(
-    source_path: &Path,
-    source: &str,
-    diags: &[pcc::resolve::Diagnostic],
-) -> bool {
+fn print_pipeline_diags(source_path: &Path, source: &str, diags: &[pcc::diag::Diagnostic]) -> bool {
     let mut has_error = false;
 
     for diag in diags {
         let (level_str, is_error) = match diag.level {
-            pcc::resolve::DiagLevel::Error => ("error", true),
-            pcc::resolve::DiagLevel::Warning => ("warning", false),
+            pcc::diag::DiagLevel::Error => ("error", true),
+            pcc::diag::DiagLevel::Warning => ("warning", false),
         };
 
         // Format level with code prefix: "error[E0001]" or plain "error"

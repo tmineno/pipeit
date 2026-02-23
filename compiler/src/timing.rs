@@ -243,6 +243,7 @@ fn find_node(sub: &Subgraph, id: NodeId) -> Option<&Node> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diag;
     use crate::registry::Registry;
     use crate::resolve;
     use std::path::PathBuf;
@@ -285,7 +286,7 @@ mod tests {
             resolve_result
                 .diagnostics
                 .iter()
-                .all(|d| d.level != resolve::DiagLevel::Error),
+                .all(|d| d.level != diag::DiagLevel::Error),
             "resolve errors: {:?}",
             resolve_result.diagnostics
         );
@@ -300,7 +301,7 @@ mod tests {
             graph_result
                 .diagnostics
                 .iter()
-                .all(|d| d.level != resolve::DiagLevel::Error),
+                .all(|d| d.level != diag::DiagLevel::Error),
             "graph errors: {:?}",
             graph_result.diagnostics
         );
@@ -325,7 +326,7 @@ mod tests {
             analysis_result
                 .diagnostics
                 .iter()
-                .all(|d| d.level != resolve::DiagLevel::Error),
+                .all(|d| d.level != diag::DiagLevel::Error),
             "analysis errors: {:?}",
             analysis_result.diagnostics
         );
@@ -335,7 +336,7 @@ mod tests {
             schedule_result
                 .diagnostics
                 .iter()
-                .all(|d| d.level != resolve::DiagLevel::Error),
+                .all(|d| d.level != diag::DiagLevel::Error),
             "schedule errors: {:?}",
             schedule_result.diagnostics
         );

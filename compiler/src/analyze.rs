@@ -20,10 +20,10 @@ use chumsky::span::Span as _;
 
 use crate::ast::*;
 use crate::diag::codes;
+use crate::diag::{DiagCode, DiagLevel, Diagnostic};
 use crate::graph::*;
 use crate::hir::{HirSwitchSource, HirTaskBody};
 use crate::registry::{ActorMeta, ParamKind, ParamType, PipitType, PortShape, TokenCount};
-use crate::resolve::{DiagCode, DiagLevel, Diagnostic};
 use crate::subgraph_index::{
     build_global_node_index, build_subgraph_indices, find_node, subgraph_key, subgraphs_of,
     GraphQueryCtx, SubgraphIndex,

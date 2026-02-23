@@ -16,6 +16,7 @@ use crate::analyze::AnalyzedProgram;
 use crate::ast::Program;
 use crate::codegen::{CodegenOptions, GeneratedCode};
 use crate::diag::codes;
+use crate::diag::{DiagLevel, Diagnostic};
 use crate::graph::ProgramGraph;
 use crate::hir::HirProgram;
 use crate::id::IdAllocator;
@@ -23,7 +24,7 @@ use crate::lir::LirProgram;
 use crate::lower::{Cert, LoweredProgram};
 use crate::pass::{descriptor, required_passes, PassId, StageCert};
 use crate::registry::Registry;
-use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
+use crate::resolve::ResolvedProgram;
 use crate::schedule::ScheduledProgram;
 use crate::type_infer::TypedProgram;
 

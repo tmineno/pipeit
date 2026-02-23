@@ -16,13 +16,14 @@ use std::collections::HashMap;
 
 use crate::ast::{Arg, Scalar, Span, Value};
 use crate::diag::codes;
+use crate::diag::{DiagLevel, Diagnostic};
 use crate::hir::{
     HirActorCall, HirPipeElem, HirPipeExpr, HirPipeSource, HirPipeline, HirProgram, HirTask,
     HirTaskBody,
 };
 use crate::id::CallId;
 use crate::registry::{ActorMeta, PipitType, Registry, TypeExpr};
-use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
+use crate::resolve::ResolvedProgram;
 
 // ── Widening chains (spec §3.4) ─────────────────────────────────────────────
 

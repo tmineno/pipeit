@@ -118,13 +118,13 @@ fn create_loaded_registry() -> registry::Registry {
     reg
 }
 
-fn has_errors(diags: &[resolve::Diagnostic]) -> bool {
+fn has_errors(diags: &[diag::Diagnostic]) -> bool {
     diags
         .iter()
-        .any(|d| matches!(d.level, resolve::DiagLevel::Error))
+        .any(|d| matches!(d.level, diag::DiagLevel::Error))
 }
 
-fn assert_no_errors(stage: &str, diags: &[resolve::Diagnostic]) {
+fn assert_no_errors(stage: &str, diags: &[diag::Diagnostic]) {
     assert!(
         !has_errors(diags),
         "{stage} produced diagnostics: {diags:#?}"

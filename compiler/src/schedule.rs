@@ -20,8 +20,8 @@ use chumsky::span::Span as _;
 use crate::analyze::AnalyzedProgram;
 use crate::ast::*;
 use crate::diag::codes;
+use crate::diag::{DiagCode, DiagLevel, Diagnostic};
 use crate::graph::*;
-use crate::resolve::{DiagCode, DiagLevel, Diagnostic};
 use crate::thir::ThirContext;
 
 // ── Public types ────────────────────────────────────────────────────────────
