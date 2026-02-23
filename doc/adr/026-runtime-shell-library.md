@@ -58,9 +58,9 @@ The `static FILE* _probe_output_file = nullptr;` global is always generated, eve
 
 ## Exit criteria
 
-- [ ] `pipit_shell.h` header with descriptor types and `shell_main()` implementation
-- [ ] All 7 example PDL files compile through new codegen path
-- [ ] C++ unit tests for `shell_main()` covering CLI parsing, probe validation, duration, stats
-- [ ] Release mode: `--probe` and `--probe-output` accepted without error
-- [ ] Snapshot tests updated with new generated output format
-- [ ] Generated code compiles with `-fsyntax-only` for all examples (debug and release)
+- [x] `pipit_shell.h` header with descriptor types and `shell_main()` implementation
+- [x] All 7 example PDL files compile through new codegen path
+- [x] C++ unit tests for `shell_main()` covering CLI parsing, probe validation, duration, stats
+- [x] Release mode: `--probe` and `--probe-output` accepted without error
+- [x] Snapshot tests updated with new generated output format
+- [x] Generated code compiles with `-fsyntax-only` for all examples (debug and release)

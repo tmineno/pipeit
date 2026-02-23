@@ -227,11 +227,14 @@
 
 ### Phase 6: Backend/Runtime Boundary Refactor
 
-- [ ] Move generic runtime shell logic (CLI parsing, probe init, duration wait, stats printing, thread launch policy) from generated C++ into runtime API
-- [ ] Make codegen emit compact program data/config + actor wiring rather than large hand-built runtime scaffolding
-- [ ] Keep runtime behavior compatibility for `--duration`, `--param`, `--probe`, `--probe-output`, `--stats`
-- [ ] Reduce generated C++ volume and compile overhead by eliminating duplicated boilerplate emission
-- [ ] Preserve deterministic generated symbol layout for test stability
+- [x] Move generic runtime shell logic (CLI parsing, probe init, duration wait, stats printing, thread launch policy) from generated C++ into `pipit_shell.h` runtime library
+- [x] Make codegen emit compact descriptor tables (ParamDesc, TaskDesc, BufferStatsDesc, ProbeDesc) + `pipit::shell_main()` call
+- [x] Keep runtime behavior compatibility for `--duration`, `--param`, `--probe`, `--probe-output`, `--stats`
+- [x] Reduce generated C++ volume (~90-120 LOC saved per pipeline; `main()` from ~150 LOC to ~25 LOC descriptor tables)
+- [x] Preserve deterministic generated symbol layout for test stability (7 snapshots updated, task function bodies unchanged)
+- [x] ADR-026: Runtime Shell Library design decision documented
+- [x] C++ unit tests for `shell_main()` (12 test cases)
+- [x] E2E release regression tests (release codegen compiles with `-fsyntax-only`)
 
 ### Phase 7: Registry Determinism and Hermetic Build Inputs
 
@@ -498,6 +501,9 @@
 - **v0.4.0 Phase 2c** complete — `type_infer` and `lower` migrated from raw AST to HIR; define body recursion eliminated (~70 LOC); widening matching upgraded from span-based to CallId-based; CallId aliasing fixed for define expansions; param type resolution bug fixed for define-expanded calls; 519 tests passing
 - **v0.4.0 Phase 3** (partial) — pass registry (`pass.rs`: 9 PassIds, 11 ArtifactIds, dependency resolution), pipeline orchestration (`pipeline.rs`: borrow-split `CompilationState`, `run_pipeline()` with `on_pass_complete` callback), `main.rs` migrated to `run_pipeline()` (parse/`--emit ast` remain outside runner); `--emit graph-dot` now skips type_infer/lower; 526 tests passing, byte-identical C++ output. Invalidation hashing and caching deferred to Phase 3b/3c.
 - **New modules (Phase 3)**: `pass.rs` (pass descriptors + dependency resolution), `pipeline.rs` (compilation state + pass orchestration + provenance stubs)
+- **v0.4.0 Phase 6** complete — runtime shell library (`pipit_shell.h`): descriptor table + `shell_main()` replaces ~150 LOC inline shell per pipeline; codegen emits compact ParamDesc/TaskDesc/BufferStatsDesc/ProbeDesc arrays; preamble 13 includes → 3; 4 emit methods removed (~180 LOC net reduction in codegen.rs); `_probe_output_file` always generated; probe init gate is `probes.empty()` (no `#ifndef NDEBUG`); 12 C++ shell unit tests + 2 E2E release regression tests; 552 tests passing
+- **New files (Phase 6)**: `runtime/libpipit/include/pipit_shell.h` (shell orchestration library), `runtime/tests/test_shell.cpp` (shell unit tests)
+- **ADR-026**: Runtime Shell Library design (descriptor table approach, probe gate simplification, always-emit `_probe_output_file`)
 - **v0.5.x** open items are currently deferred
 - Performance characterization should inform optimization priorities (measure before optimizing)
 - Spec files renamed to versioned names (`pipit-lang-spec-v0.3.0.md`, `pcc-spec-v0.3.0.md`); `v0.2.0` specs are frozen from tag `v0.2.2`
