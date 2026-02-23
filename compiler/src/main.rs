@@ -386,6 +386,18 @@ fn emit_output(output: &Option<PathBuf>, content: &str) {
     }
 }
 
+/// Load actor registry using the appropriate source.
+///
+/// ## Overlay / Precedence Rules
+///
+/// - **`--actor-meta <manifest>`**: Actor metadata loaded from manifest only
+///   (no header scanning for metadata). `-I` / `--actor-path` still collect
+///   headers for C++ `-include` flags.
+/// - **Header scanning mode** (no `--actor-meta`): `--actor-path` actors form
+///   the base registry; `-I` actors overlay with higher precedence (replace on
+///   name conflict).
+/// - **`--emit manifest` + `--actor-meta`**: Usage error (exit code 2).
+///   Validated before this function is called.
 fn load_actor_registry(
     cli: &Cli,
 ) -> Result<(pcc::registry::Registry, Vec<PathBuf>), (String, i32)> {
