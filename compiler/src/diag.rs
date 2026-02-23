@@ -131,6 +131,96 @@ impl fmt::Display for Diagnostic {
     }
 }
 
+// ── Stable diagnostic code registry ──────────────────────────────────
+
+/// Stable diagnostic code constants.
+///
+/// Compatibility policy:
+/// - Once assigned, a code must never be reassigned to a different meaning.
+/// - Removed diagnostics retire their code permanently.
+/// - Changing semantics requires a new code + deprecation note.
+/// - See `doc/DIAGNOSTIC_CODES.md` for the full registry.
+pub mod codes {
+    use super::DiagCode;
+
+    // ── Resolve (E0001-E0099, W0001-W0099) ───────────────────────────
+    pub const E0001: DiagCode = DiagCode("E0001"); // duplicate const
+    pub const E0002: DiagCode = DiagCode("E0002"); // duplicate param
+    pub const E0003: DiagCode = DiagCode("E0003"); // duplicate define
+    pub const E0004: DiagCode = DiagCode("E0004"); // duplicate task
+    pub const E0005: DiagCode = DiagCode("E0005"); // cross-namespace collision
+    pub const E0006: DiagCode = DiagCode("E0006"); // tap declared but never consumed
+    pub const E0007: DiagCode = DiagCode("E0007"); // duplicate mode
+    pub const E0008: DiagCode = DiagCode("E0008"); // undefined tap
+    pub const E0009: DiagCode = DiagCode("E0009"); // duplicate tap
+    pub const E0010: DiagCode = DiagCode("E0010"); // multiple writers to shared buffer
+    pub const E0011: DiagCode = DiagCode("E0011"); // unknown actor or define
+    pub const E0012: DiagCode = DiagCode("E0012"); // non-polymorphic actor with type args
+    pub const E0013: DiagCode = DiagCode("E0013"); // wrong number of type arguments
+    pub const E0014: DiagCode = DiagCode("E0014"); // undefined param
+    pub const E0015: DiagCode = DiagCode("E0015"); // undefined const
+    pub const E0016: DiagCode = DiagCode("E0016"); // runtime param in frame dimension
+    pub const E0017: DiagCode = DiagCode("E0017"); // unknown name in shape constraint
+    pub const E0018: DiagCode = DiagCode("E0018"); // undefined param in switch source
+    pub const E0019: DiagCode = DiagCode("E0019"); // switch references undefined mode
+    pub const E0020: DiagCode = DiagCode("E0020"); // mode not listed in switch
+    pub const E0021: DiagCode = DiagCode("E0021"); // mode listed multiple times in switch
+    pub const E0022: DiagCode = DiagCode("E0022"); // undefined tap as actor input
+    pub const E0023: DiagCode = DiagCode("E0023"); // shared buffer has no writer
+    pub const W0001: DiagCode = DiagCode("W0001"); // define shadows actor
+    pub const W0002: DiagCode = DiagCode("W0002"); // deprecated switch default clause
+
+    // ── Type infer (E0100-E0199) ─────────────────────────────────────
+    pub const E0100: DiagCode = DiagCode("E0100"); // unknown type
+    pub const E0101: DiagCode = DiagCode("E0101"); // ambiguous polymorphic call (upstream context)
+    pub const E0102: DiagCode = DiagCode("E0102"); // ambiguous polymorphic call (no context)
+
+    // ── Lower (E0200-E0299) ──────────────────────────────────────────
+    pub const E0200: DiagCode = DiagCode("E0200"); // L1 type consistency
+    pub const E0201: DiagCode = DiagCode("E0201"); // L2 widening safety
+    pub const E0202: DiagCode = DiagCode("E0202"); // L3 rate/shape preservation
+    pub const E0203: DiagCode = DiagCode("E0203"); // L4 not fully monomorphized
+    pub const E0204: DiagCode = DiagCode("E0204"); // L4 no concrete instance
+    pub const E0205: DiagCode = DiagCode("E0205"); // L5 unresolved input type
+    pub const E0206: DiagCode = DiagCode("E0206"); // L5 unresolved output type
+
+    // ── Analyze (E0300-E0399, W0300-W0399) ───────────────────────────
+    pub const E0300: DiagCode = DiagCode("E0300"); // unresolved frame dimension
+    pub const E0301: DiagCode = DiagCode("E0301"); // conflicting frame constraint (upstream)
+    pub const E0302: DiagCode = DiagCode("E0302"); // conflicting dimension (span vs edge)
+    pub const E0303: DiagCode = DiagCode("E0303"); // type mismatch at pipe
+    pub const E0304: DiagCode = DiagCode("E0304"); // SDF balance unsolvable
+    pub const E0305: DiagCode = DiagCode("E0305"); // feedback loop with no delay
+    pub const E0306: DiagCode = DiagCode("E0306"); // shared buffer rate mismatch
+    pub const E0307: DiagCode = DiagCode("E0307"); // shared memory pool exceeded
+    pub const E0308: DiagCode = DiagCode("E0308"); // param type mismatch
+    pub const E0309: DiagCode = DiagCode("E0309"); // switch param non-int32 default
+    pub const E0310: DiagCode = DiagCode("E0310"); // ctrl buffer type mismatch
+    pub const W0300: DiagCode = DiagCode("W0300"); // inferred dim param ordering
+
+    // ── Schedule (E0400-E0499, W0400-W0499) ──────────────────────────
+    pub const E0400: DiagCode = DiagCode("E0400"); // unresolvable cycle
+    pub const W0400: DiagCode = DiagCode("W0400"); // unsustainable tick rate
+
+    // ── Graph (E0500-E0599) ──────────────────────────────────────────
+    pub const E0500: DiagCode = DiagCode("E0500"); // tap not found in graph
+
+    // ── Pipeline certs (E0600-E0699) ─────────────────────────────────
+    pub const E0600: DiagCode = DiagCode("E0600"); // HIR verification failed
+    pub const E0601: DiagCode = DiagCode("E0601"); // lowering verification failed
+    pub const E0602: DiagCode = DiagCode("E0602"); // schedule verification failed
+    pub const E0603: DiagCode = DiagCode("E0603"); // LIR verification failed
+
+    /// All assigned codes for uniqueness enforcement.
+    pub const ALL_CODES: &[DiagCode] = &[
+        E0001, E0002, E0003, E0004, E0005, E0006, E0007, E0008, E0009, E0010, E0011, E0012, E0013,
+        E0014, E0015, E0016, E0017, E0018, E0019, E0020, E0021, E0022, E0023, W0001, W0002, E0100,
+        E0101, E0102, E0200, E0201, E0202, E0203, E0204, E0205, E0206, E0300, E0301, E0302, E0303,
+        E0304, E0305, E0306, E0307, E0308, E0309, E0310, W0300, E0400, W0400, E0500, E0600, E0601,
+        E0602, E0603,
+    ];
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +255,45 @@ mod tests {
         assert_eq!(d.hint.as_deref(), Some("insert a conversion actor"));
         assert_eq!(d.related_spans.len(), 1);
         assert_eq!(d.cause_chain.len(), 1);
+    }
+
+    #[test]
+    fn code_uniqueness() {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        for code in codes::ALL_CODES {
+            assert!(seen.insert(code.0), "duplicate diagnostic code: {}", code.0);
+        }
+    }
+
+    #[test]
+    fn code_format_valid() {
+        for code in codes::ALL_CODES {
+            let s = code.0;
+            assert!(
+                s.len() == 5,
+                "code '{}' must be 5 chars (E/W + 4 digits)",
+                s
+            );
+            let prefix = s.as_bytes()[0];
+            assert!(
+                prefix == b'E' || prefix == b'W',
+                "code '{}' must start with E or W",
+                s
+            );
+            assert!(
+                s[1..].chars().all(|c| c.is_ascii_digit()),
+                "code '{}' suffix must be 4 digits",
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn code_count() {
+        // 23 resolve errors + 2 resolve warnings
+        // + 3 type_infer + 7 lower + 11 analyze errors + 1 analyze warning
+        // + 1 schedule error + 1 schedule warning + 1 graph + 4 pipeline
+        assert_eq!(codes::ALL_CODES.len(), 54);
     }
 }
