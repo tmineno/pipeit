@@ -10,6 +10,8 @@
 
 use std::fmt;
 
+use serde::Serialize;
+
 use crate::ast::Span;
 
 // ── Diagnostic code ──────────────────────────────────────────────────────
@@ -128,6 +130,103 @@ impl fmt::Display for Diagnostic {
             write!(f, "\n  hint: {}", hint)?;
         }
         Ok(())
+    }
+}
+
+// ── JSON serialization ──────────────────────────────────────────────
+
+/// Unified JSON representation for both semantic and parse diagnostics.
+///
+/// Output format: one JSON object per line (JSONL) to stderr.
+/// Both semantic and parse errors emit the same top-level schema.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiagnosticJson {
+    pub kind: &'static str,
+    pub level: &'static str,
+    pub code: Option<&'static str>,
+    pub message: String,
+    pub span: SpanJson,
+    pub hint: Option<String>,
+    pub related_spans: Vec<RelatedSpanJson>,
+    pub cause_chain: Vec<CauseRecordJson>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SpanJson {
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RelatedSpanJson {
+    pub span: SpanJson,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CauseRecordJson {
+    pub message: String,
+    pub span: Option<SpanJson>,
+}
+
+impl Diagnostic {
+    /// Convert to the unified JSON representation (kind = "semantic").
+    pub fn to_json(&self) -> DiagnosticJson {
+        DiagnosticJson {
+            kind: "semantic",
+            level: match self.level {
+                DiagLevel::Error => "error",
+                DiagLevel::Warning => "warning",
+            },
+            code: self.code.map(|c| c.0),
+            message: self.message.clone(),
+            span: SpanJson {
+                start: self.span.start,
+                end: self.span.end,
+            },
+            hint: self.hint.clone(),
+            related_spans: self
+                .related_spans
+                .iter()
+                .map(|r| RelatedSpanJson {
+                    span: SpanJson {
+                        start: r.span.start,
+                        end: r.span.end,
+                    },
+                    label: r.label.clone(),
+                })
+                .collect(),
+            cause_chain: self
+                .cause_chain
+                .iter()
+                .map(|c| CauseRecordJson {
+                    message: c.message.clone(),
+                    span: c.span.map(|s| SpanJson {
+                        start: s.start,
+                        end: s.end,
+                    }),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl DiagnosticJson {
+    /// Create a parse-error JSON diagnostic from chumsky error info.
+    pub fn from_parse_error(message: String, span_start: usize, span_end: usize) -> Self {
+        DiagnosticJson {
+            kind: "parse",
+            level: "error",
+            code: None,
+            message,
+            span: SpanJson {
+                start: span_start,
+                end: span_end,
+            },
+            hint: None,
+            related_spans: Vec::new(),
+            cause_chain: Vec::new(),
+        }
     }
 }
 
@@ -287,6 +386,38 @@ mod tests {
                 s
             );
         }
+    }
+
+    #[test]
+    fn json_roundtrip_semantic() {
+        let d = Diagnostic::new(DiagLevel::Error, dummy_span(), "type mismatch")
+            .with_code(codes::E0200)
+            .with_hint("insert a conversion actor")
+            .with_related(dummy_span(), "source actor here")
+            .with_cause("inferred float from upstream", Some(dummy_span()));
+        let json = d.to_json();
+        assert_eq!(json.kind, "semantic");
+        assert_eq!(json.level, "error");
+        assert_eq!(json.code, Some("E0200"));
+        assert_eq!(json.message, "type mismatch");
+        assert_eq!(json.hint.as_deref(), Some("insert a conversion actor"));
+        assert_eq!(json.related_spans.len(), 1);
+        assert_eq!(json.cause_chain.len(), 1);
+        // Verify it serializes without error
+        let text = serde_json::to_string(&json).unwrap();
+        assert!(text.contains("\"kind\":\"semantic\""));
+    }
+
+    #[test]
+    fn json_parse_error() {
+        let json = DiagnosticJson::from_parse_error("unexpected token".into(), 10, 15);
+        assert_eq!(json.kind, "parse");
+        assert_eq!(json.level, "error");
+        assert!(json.code.is_none());
+        assert_eq!(json.span.start, 10);
+        assert_eq!(json.span.end, 15);
+        let text = serde_json::to_string(&json).unwrap();
+        assert!(text.contains("\"kind\":\"parse\""));
     }
 
     #[test]

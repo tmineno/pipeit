@@ -8,6 +8,12 @@ const EXIT_COMPILE_ERROR: i32 = 1;
 const EXIT_USAGE_ERROR: i32 = 2;
 const EXIT_SYSTEM_ERROR: i32 = 3;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum DiagnosticFormat {
+    Human,
+    Json,
+}
+
 #[derive(Debug, Clone, clap::ValueEnum)]
 enum EmitStage {
     Exe,
@@ -64,6 +70,10 @@ struct Cli {
     /// Print compiler phases and timing
     #[arg(long)]
     verbose: bool,
+
+    /// Diagnostic output format
+    #[arg(long, value_enum, default_value_t = DiagnosticFormat::Human)]
+    diagnostic_format: DiagnosticFormat,
 }
 
 fn main() {
@@ -84,19 +94,29 @@ fn main() {
         }
     };
 
+    let diag_format = cli.diagnostic_format;
     let parse_result = pcc::parser::parse(&source);
     if !parse_result.errors.is_empty() {
         for err in &parse_result.errors {
             let span = err.span();
-            print_span_diagnostic(
-                "error",
-                &format!("{}", err),
-                &cli.source,
-                &source,
-                span.start,
-                span.end,
-                None,
-            );
+            if diag_format == DiagnosticFormat::Json {
+                let json = pcc::diag::DiagnosticJson::from_parse_error(
+                    format!("{}", err),
+                    span.start,
+                    span.end,
+                );
+                eprintln!("{}", serde_json::to_string(&json).unwrap());
+            } else {
+                print_span_diagnostic(
+                    "error",
+                    &format!("{}", err),
+                    &cli.source,
+                    &source,
+                    span.start,
+                    span.end,
+                    None,
+                );
+            }
         }
         std::process::exit(EXIT_COMPILE_ERROR);
     }
@@ -154,7 +174,7 @@ fn main() {
         &codegen_options,
         cli.verbose,
         |_pass_id, diags| {
-            has_errors |= print_pipeline_diags(&cli.source, &source, diags);
+            has_errors |= print_pipeline_diags(&cli.source, &source, diags, diag_format);
         },
     );
 
@@ -499,58 +519,69 @@ fn map_registry_error(e: pcc::registry::RegistryError) -> (String, i32) {
     }
 }
 
-fn print_pipeline_diags(source_path: &Path, source: &str, diags: &[pcc::diag::Diagnostic]) -> bool {
+fn print_pipeline_diags(
+    source_path: &Path,
+    source: &str,
+    diags: &[pcc::diag::Diagnostic],
+    format: DiagnosticFormat,
+) -> bool {
     let mut has_error = false;
 
     for diag in diags {
-        let (level_str, is_error) = match diag.level {
-            pcc::diag::DiagLevel::Error => ("error", true),
-            pcc::diag::DiagLevel::Warning => ("warning", false),
-        };
+        let is_error = diag.level == pcc::diag::DiagLevel::Error;
 
-        // Format level with code prefix: "error[E0001]" or plain "error"
-        let level = match &diag.code {
-            Some(code) => format!("{}[{}]", level_str, code),
-            None => level_str.to_string(),
-        };
+        if format == DiagnosticFormat::Json {
+            let json = diag.to_json();
+            eprintln!("{}", serde_json::to_string(&json).unwrap());
+        } else {
+            // Format level with code prefix: "error[E0001]" or plain "error"
+            let level_str = match diag.level {
+                pcc::diag::DiagLevel::Error => "error",
+                pcc::diag::DiagLevel::Warning => "warning",
+            };
+            let level = match &diag.code {
+                Some(code) => format!("{}[{}]", level_str, code),
+                None => level_str.to_string(),
+            };
 
-        print_span_diagnostic(
-            &level,
-            &diag.message,
-            source_path,
-            source,
-            diag.span.start,
-            diag.span.end,
-            diag.hint.as_deref(),
-        );
-
-        // Display related spans
-        for rel in &diag.related_spans {
             print_span_diagnostic(
-                "note",
-                &rel.label,
+                &level,
+                &diag.message,
                 source_path,
                 source,
-                rel.span.start,
-                rel.span.end,
-                None,
+                diag.span.start,
+                diag.span.end,
+                diag.hint.as_deref(),
             );
-        }
 
-        // Display cause chain
-        for cause in &diag.cause_chain {
-            if let Some(span) = cause.span {
+            // Display related spans
+            for rel in &diag.related_spans {
                 print_span_diagnostic(
-                    "cause",
-                    &cause.message,
+                    "note",
+                    &rel.label,
                     source_path,
                     source,
-                    span.start,
-                    span.end,
+                    rel.span.start,
+                    rel.span.end,
                     None,
                 );
-            } else {
-                eprintln!("  cause: {}", cause.message);
+            }
+
+            // Display cause chain
+            for cause in &diag.cause_chain {
+                if let Some(span) = cause.span {
+                    print_span_diagnostic(
+                        "cause",
+                        &cause.message,
+                        source_path,
+                        source,
+                        span.start,
+                        span.end,
+                        None,
+                    );
+                } else {
+                    eprintln!("  cause: {}", cause.message);
+                }
             }
         }
 
