@@ -79,6 +79,49 @@ fn run_pcc(pdl_input: &Path, include_paths: &[&Path]) -> (std::process::Output, 
     (output, cpp_out)
 }
 
+/// Run pcc in release mode on a PDL input file.
+fn run_pcc_release(pdl_input: &Path, include_paths: &[&Path]) -> (std::process::Output, PathBuf) {
+    let cpp_out = temp_path("pipit_gen", "cpp");
+    let pcc = pcc_binary();
+    let mut cmd = Command::new(&pcc);
+    cmd.arg(pdl_input.to_str().unwrap());
+    cmd.arg("--release");
+    for path in include_paths {
+        cmd.arg("-I").arg(path.to_str().unwrap());
+    }
+    cmd.arg("--emit")
+        .arg("cpp")
+        .arg("-o")
+        .arg(cpp_out.to_str().unwrap());
+    let output = cmd.output().expect("failed to run pcc");
+    (output, cpp_out)
+}
+
+/// Generate C++ from inline PDL source in release mode.
+fn generate_release_cpp_from_inline(
+    pdl_source: &str,
+    test_name: &str,
+    include_paths: &[&Path],
+) -> String {
+    let pdl_file = temp_path("pipit_pdl", "pdl");
+    std::fs::write(&pdl_file, pdl_source).expect("write pdl temp");
+
+    let (gen, cpp_out) = run_pcc_release(&pdl_file, include_paths);
+    let _ = std::fs::remove_file(&pdl_file);
+
+    assert!(
+        gen.status.success(),
+        "pcc --release failed for '{}':\n{}",
+        test_name,
+        String::from_utf8_lossy(&gen.stderr)
+    );
+
+    let cpp = std::fs::read_to_string(&cpp_out).expect("failed to read generated cpp");
+    let _ = std::fs::remove_file(&cpp_out);
+    assert!(!cpp.is_empty(), "empty output for '{}'", test_name);
+    cpp
+}
+
 /// Write inline PDL source to temp file, run pcc, and return generated C++ string.
 /// Panics if pcc fails or produces empty output.
 fn generate_cpp_from_inline(pdl_source: &str, test_name: &str, include_paths: &[&Path]) -> String {
@@ -1680,5 +1723,64 @@ fn poly_chain_explicit() {
     assert_poly_inline_compiles(
         "clock 1kHz t { constant(0.0) | poly_pass<float>() | poly_scale<float>(3.0) | stdout() }",
         "poly_chain",
+    );
+}
+
+// ── Release mode E2E tests ─────────────────────────────────────────────────
+
+#[test]
+fn release_probe_compiles() {
+    // Release codegen with probes: probe descriptors absent, but code compiles
+    let cxx = match find_cxx_compiler() {
+        Some(c) => c,
+        None => return,
+    };
+    let runtime_include = runtime_include_dir();
+    let cpp = generate_release_cpp_from_inline(
+        "clock 1kHz t { constant(0.0) | ?debug | stdout() }",
+        "release_probe",
+        &[&runtime_include],
+    );
+    // Probe descriptors should NOT be present in release output
+    assert!(
+        !cpp.contains("_probe_debug_enabled"),
+        "release should not contain probe enable flag"
+    );
+    assert!(
+        cpp.contains("pipit::shell_main("),
+        "release should call shell_main"
+    );
+    compile_cpp(
+        &cxx,
+        &cpp,
+        "release_probe",
+        &runtime_include,
+        &project_root().join("examples"),
+    );
+}
+
+#[test]
+fn release_no_probes_compiles() {
+    // Release codegen without probes: simplest release path
+    let cxx = match find_cxx_compiler() {
+        Some(c) => c,
+        None => return,
+    };
+    let runtime_include = runtime_include_dir();
+    let cpp = generate_release_cpp_from_inline(
+        "clock 1kHz t { constant(0.0) | stdout() }",
+        "release_no_probes",
+        &[&runtime_include],
+    );
+    assert!(
+        cpp.contains("pipit::shell_main("),
+        "release should call shell_main"
+    );
+    compile_cpp(
+        &cxx,
+        &cpp,
+        "release_no_probes",
+        &runtime_include,
+        &project_root().join("examples"),
     );
 }
