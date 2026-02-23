@@ -56,6 +56,7 @@ pub struct DownstreamArtifacts {
 /// `source_hash`: SHA-256 of the raw `.pdl` source text.
 /// `registry_fingerprint`: SHA-256 of canonical compact JSON from `Registry::canonical_json()`.
 /// `compiler_version`: crate version from `Cargo.toml`.
+#[derive(Debug, Clone)]
 pub struct Provenance {
     pub source_hash: [u8; 32],
     pub registry_fingerprint: [u8; 32],

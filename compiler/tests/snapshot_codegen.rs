@@ -128,6 +128,7 @@ fn full_pipeline_cpp(source: &str, registry: &pcc::registry::Registry) -> String
     let opts = pcc::codegen::CodegenOptions {
         release: false,
         include_paths: vec![],
+        provenance: None,
     };
     let lir = pcc::lir::build_lir(
         &thir,

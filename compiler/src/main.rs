@@ -210,9 +210,11 @@ fn main() {
     };
 
     // ── Run pipeline ──
+    let provenance = pcc::pipeline::compute_provenance(&source, &registry);
     let codegen_options = pcc::codegen::CodegenOptions {
         release: cli.release,
         include_paths: loaded_headers.clone(),
+        provenance: Some(provenance),
     };
     let mut state = pcc::pipeline::CompilationState::new(program, registry);
     let mut has_errors = false;
