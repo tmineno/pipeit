@@ -269,6 +269,57 @@
 
 ---
 
+## v0.4.1 - Bind-Based External Integration (Spec v0.4.0 Implementation)
+
+**Goal**: Implement `bind`-first external integration with compiler-generated stable IDs and iteration-boundary-safe runtime rebind.
+
+### Phase 1: Frontend & IR Wiring (Mechanical)
+
+- [ ] Add `bind` to lexer/parser/AST (`bind <name> = <endpoint>`) with source-span diagnostics
+- [ ] Thread bind declarations into HIR/THIR/LIR as first-class artifacts (no ad-hoc side tables)
+- [ ] Add deterministic serialization format for endpoint options (`udp("host:port", chan=10)`)
+
+### Phase 2: Semantic Inference & Validation (Behavior Change)
+
+- [ ] Implement bind direction inference (`->name` => out, `@name` only => in, otherwise error)
+- [ ] Implement bind contract inference (dtype/shape/rate derivation from existing graph semantics)
+- [ ] Add compile-time diagnostics for bind failures (unknown target, direction inference failure, in-bind contract ambiguity, duplicate bind)
+- [ ] Enforce "bind does not alter SDF schedule/FIFO semantics" invariants via verifier checks
+
+### Phase 3: Stable ID & Interface Manifest
+
+- [ ] Generate deterministic bind `stable_id` from semantic IDs (not source span/name text)
+- [ ] Emit `pipeline.interface.json` with `stable_id`, `name`, `direction`, `dtype`, `shape`, `rate_hz`, `endpoint`
+- [ ] Add reproducibility tests: same semantic graph and config => identical interface manifest
+
+### Phase 4: Runtime Control Plane & Rebind
+
+- [ ] Add runtime control-plane API (`list_bindings`, `rebind(stable_id, endpoint)`)
+- [ ] Apply rebind atomically at iteration boundary (no mid-iteration endpoint swap)
+- [ ] Keep I/O non-blocking behavior equivalent to current socket actors
+- [ ] Add CLI override `--bind <name>=<endpoint>` and precedence rules vs DSL defaults
+
+### Phase 5: Codegen Lowering & Backward Compatibility
+
+- [ ] Lower bind declarations to runtime I/O adapter wiring in generated C++ (without requiring explicit `socket_write/read` in PDL)
+- [ ] Keep `socket_write`/`socket_read` source compatibility for existing v0.3 programs
+- [ ] Add compatibility gate tests covering mixed mode (`bind` + legacy socket actors)
+
+### Phase 6: Test & Acceptance Gate
+
+- [ ] Add parser/analyze/codegen unit tests for bind grammar and inference matrix
+- [ ] Add integration tests for rebind correctness across multiple tasks/clocks
+- [ ] Add runtime tests for iteration-boundary atomicity and fail-safe rejection on invalid rebind
+- [ ] CI gate: format -> lint -> typecheck -> test all green
+
+### Exit Criteria
+
+- [ ] `bind`-only programs compile and run without explicit socket actor wiring
+- [ ] UI/client can enumerate bindings via `stable_id` and safely rebind at runtime
+- [ ] No regressions in existing v0.3 external I/O behavior and tests
+
+---
+
 ## v0.5.x - Ecosystem & Quality of Life
 
 **Goal**: Make Pipit easier to use and deploy in real projects.
