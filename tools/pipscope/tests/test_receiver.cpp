@@ -6,6 +6,7 @@
 //
 
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -866,6 +867,93 @@ TEST(e2e_chunked_firings) {
         ASSERT_EQ(snaps[0].samples[i], static_cast<float>(i));
     }
 
+    rx.stop();
+}
+
+// ── Phase continuity test (~60s of sine wave via socket) ─────────────────────
+//
+// Simulates a sine → socket_write → PpktReceiver pipeline for ~60 seconds
+// and verifies that every received sample matches the reference sine with
+// no phase discontinuities.  This catches codegen iteration_index bugs
+// and frame assembly ordering issues.
+
+TEST(e2e_phase_continuity_60s) {
+    const double sample_rate = 48000.0;
+    const float freq = 1000.0f;
+    const float amp = 0.8f;
+    const int block_size = 256;
+    const double duration_sec = 60.0;
+    const size_t total_samples =
+        static_cast<size_t>(sample_rate * duration_sec) / block_size * block_size;
+    const size_t total_blocks = total_samples / block_size;
+
+    printf("    sending %zu blocks (%zu samples, %.0fs at %.0f Hz)...\n", total_blocks,
+           total_samples, duration_sec, sample_rate);
+
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(total_samples + block_size);
+    ASSERT_TRUE(rx.start(port));
+    usleep(5000);
+
+    DatagramSender tx;
+    char addr[32];
+    snprintf(addr, sizeof(addr), "localhost:%u", port);
+    ASSERT_TRUE(tx.open(addr, strlen(addr)));
+
+    PpktHeader hdr = ppkt_make_header(DTYPE_F32, 0);
+    hdr.sample_rate_hz = sample_rate;
+
+    uint64_t iter_idx = 0;
+    for (size_t b = 0; b < total_blocks; b++) {
+        hdr.flags = (b == 0) ? FLAG_FIRST_FRAME : static_cast<uint8_t>(0);
+        hdr.timestamp_ns = 1000 + b;
+        hdr.iteration_index = iter_idx;
+
+        float samples[256];
+        for (int i = 0; i < block_size; i++) {
+            double t = static_cast<double>(iter_idx + i) / sample_rate;
+            samples[i] = amp * static_cast<float>(std::sin(2.0 * M_PI * freq * t));
+        }
+
+        ppkt_send_chunked(tx, hdr, samples, block_size);
+        iter_idx += block_size;
+
+        // Pace sends to avoid kernel buffer overflow on localhost.
+        // 50µs per packet × 11250 packets ≈ 0.56s total — fast and lossless.
+        usleep(50);
+    }
+
+    // Wait for receiver to process remaining packets
+    usleep(200000);
+
+    auto snaps = rx.snapshot(total_samples);
+    ASSERT_EQ(snaps.size(), 1);
+    printf("    received %zu samples (expected %zu)\n", snaps[0].samples.size(), total_samples);
+    ASSERT_EQ(snaps[0].samples.size(), total_samples);
+    ASSERT_EQ(snaps[0].stats.dropped_frames, 0);
+
+    // Verify every sample matches the reference sine
+    size_t errors = 0;
+    for (size_t i = 0; i < total_samples; i++) {
+        double t = static_cast<double>(i) / sample_rate;
+        float expected = amp * static_cast<float>(std::sin(2.0 * M_PI * freq * t));
+        float diff = std::abs(snaps[0].samples[i] - expected);
+        if (diff > 1e-4f) {
+            if (errors < 10) {
+                fprintf(stderr, "    sample %zu: expected=%f got=%f diff=%e\n", i, expected,
+                        snaps[0].samples[i], diff);
+            }
+            errors++;
+        }
+    }
+
+    if (errors > 0) {
+        fprintf(stderr, "FAIL: %zu / %zu samples deviate from reference sine\n", errors,
+                total_samples);
+        exit(1);
+    }
+
+    printf("    all %zu samples match reference sine (0 discontinuities)\n", total_samples);
     rx.stop();
 }
 
