@@ -213,13 +213,17 @@
 - [x] Add regression corpus (`verify_regression.rs`: 7 example files + negative test)
 - [x] Keep existing L1-L5 guarantees as strict subset (`impl StageCert for Cert`)
 
-### Phase 5: Diagnostics Architecture Upgrade
+### Phase 5: Diagnostics Architecture Upgrade ✅
 
-- [ ] Introduce unified diagnostic payload: `code`, `level`, `message`, primary span, related spans, hint, cause chain
-- [ ] Record provenance through type + shape constraint solving to explain contradiction paths
-- [ ] Add stable diagnostic codes and compatibility policy for tests/tooling
-- [ ] Add machine-readable diagnostics mode (JSON) while preserving current human-readable output
-- [ ] Improve ambiguity and mismatch diagnostics with candidate and remediation suggestions
+- [x] Introduce unified diagnostic payload: `code`, `level`, `message`, primary span, related spans, hint, cause chain (`diag.rs`)
+- [x] Add stable diagnostic codes (54 codes: E0001-E0603, W0001-W0400) and compatibility policy (`DIAGNOSTIC_CODES.md`, uniqueness test)
+- [x] Assign codes to all ~51 emission sites across 7 phase modules
+- [x] Fix hint-dropping bug in `print_pipeline_diags()` (main.rs)
+- [x] Add machine-readable diagnostics mode (`--diagnostic-format json`) with unified JSONL schema for both semantic and parse errors
+- [x] Add exemplar `related_spans` and `cause_chain` for propagated constraint failures (E0200 L1 type consistency, E0303 type mismatch, E0304 SDF balance)
+- [x] Migrate all diagnostic imports from `crate::resolve` to `crate::diag`
+- [ ] Full provenance tracing through constraint solver (deferred to Phase 6+)
+- [ ] Improve ambiguity and mismatch diagnostics with candidate and remediation suggestions (deferred to v0.5.x)
 
 ### Phase 6: Backend/Runtime Boundary Refactor
 
