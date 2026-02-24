@@ -360,6 +360,278 @@ fn check_firing_actor(firing: &LirFiring) -> bool {
     true
 }
 
+// ── Display ─────────────────────────────────────────────────────────────────
+
+impl std::fmt::Display for LirProgram {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "LirProgram ({} consts, {} params, {} inter-task bufs, {} tasks, {} probes)",
+            self.consts.len(),
+            self.params.len(),
+            self.inter_task_buffers.len(),
+            self.tasks.len(),
+            self.probes.len()
+        )?;
+
+        // Consts
+        for c in &self.consts {
+            match &c.value {
+                LirConstValue::Scalar { literal } => {
+                    writeln!(f, "  const {} = {}", c.name, literal)?;
+                }
+                LirConstValue::Array {
+                    elem_type,
+                    elements,
+                } => {
+                    writeln!(
+                        f,
+                        "  const {}: {}[{}] = [{}]",
+                        c.name,
+                        elem_type,
+                        elements.len(),
+                        elements.join(", ")
+                    )?;
+                }
+            }
+        }
+
+        // Params
+        for p in &self.params {
+            writeln!(
+                f,
+                "  param {}: {} = \"{}\" (cli: {})",
+                p.name, p.cpp_type, p.default_literal, p.cli_converter
+            )?;
+        }
+
+        // Directives
+        let timer = match &self.directives.timer_spin {
+            LirTimerSpin::Fixed(n) => format!("Fixed({})", n),
+            LirTimerSpin::Adaptive => "Adaptive".to_string(),
+        };
+        writeln!(
+            f,
+            "  directives: mem={}, overrun={}, timer={}",
+            self.directives.mem_bytes, self.directives.overrun_policy, timer
+        )?;
+
+        // Inter-task buffers
+        for buf in &self.inter_task_buffers {
+            writeln!(
+                f,
+                "  inter-task {}: {}[{}] readers={} [{}]{}",
+                buf.name,
+                buf.cpp_type,
+                buf.capacity_tokens,
+                buf.reader_count,
+                buf.reader_tasks.join(", "),
+                if buf.skip_writes { " skip_writes" } else { "" }
+            )?;
+        }
+
+        // Tasks
+        for task in &self.tasks {
+            fmt_lir_task(f, task, "  ")?;
+        }
+
+        // Probes
+        for probe in &self.probes {
+            writeln!(f, "  probe {}", probe.name)?;
+        }
+
+        Ok(())
+    }
+}
+
+fn fmt_lir_task(f: &mut std::fmt::Formatter<'_>, task: &LirTask, indent: &str) -> std::fmt::Result {
+    writeln!(
+        f,
+        "{}task '{}' @ {}Hz K={}",
+        indent, task.name, task.freq_hz, task.k_factor
+    )?;
+
+    // Feedback buffers
+    for fb in &task.feedback_buffers {
+        writeln!(
+            f,
+            "{}  feedback {}: {}[{}] init={}",
+            indent, fb.var_name, fb.cpp_type, fb.tokens, fb.init_val
+        )?;
+    }
+
+    match &task.body {
+        LirTaskBody::Pipeline(sub) => {
+            fmt_lir_subgraph(f, sub, &format!("{}  ", indent))?;
+        }
+        LirTaskBody::Modal(modal) => {
+            writeln!(
+                f,
+                "{}  ctrl: {}",
+                indent,
+                fmt_ctrl_source(&modal.ctrl_source)
+            )?;
+            writeln!(f, "{}  control subgraph:", indent)?;
+            fmt_lir_subgraph(f, &modal.control, &format!("{}    ", indent))?;
+            for (i, (mode_name, sub)) in modal.modes.iter().enumerate() {
+                write!(f, "{}  mode '{}'", indent, mode_name)?;
+                if let Some(resets) = modal.mode_feedback_resets.get(i) {
+                    if !resets.is_empty() {
+                        let reset_names: Vec<&str> =
+                            resets.iter().map(|r| r.var_name.as_str()).collect();
+                        write!(f, " resets=[{}]", reset_names.join(", "))?;
+                    }
+                }
+                writeln!(f)?;
+                fmt_lir_subgraph(f, sub, &format!("{}    ", indent))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn fmt_ctrl_source(src: &LirCtrlSource) -> String {
+    match src {
+        LirCtrlSource::Param { name } => format!("param({})", name),
+        LirCtrlSource::EdgeBuffer { var_name } => format!("edge({})", var_name),
+        LirCtrlSource::RingBuffer { name, reader_idx } => {
+            format!("ring({}, reader={})", name, reader_idx)
+        }
+    }
+}
+
+fn fmt_lir_subgraph(
+    f: &mut std::fmt::Formatter<'_>,
+    sub: &LirSubgraph,
+    indent: &str,
+) -> std::fmt::Result {
+    // Edge buffers
+    if !sub.edge_buffers.is_empty() {
+        let bufs: Vec<String> = sub
+            .edge_buffers
+            .iter()
+            .filter(|eb| eb.alias_of.is_none())
+            .map(|eb| {
+                let fb_tag = if eb.is_feedback { " (fb)" } else { "" };
+                format!("{}: {}[{}]{}", eb.var_name, eb.cpp_type, eb.tokens, fb_tag)
+            })
+            .collect();
+        writeln!(f, "{}edge_buffers: {}", indent, bufs.join(", "))?;
+    }
+
+    // Firings
+    writeln!(f, "{}firings:", indent)?;
+    for group in &sub.firings {
+        match group {
+            LirFiringGroup::Single(firing) => {
+                fmt_lir_firing(f, firing, &format!("{}  ", indent))?;
+            }
+            LirFiringGroup::Fused(chain) => {
+                writeln!(f, "{}  fused [x{}]:", indent, chain.repetition)?;
+                for h in &chain.hoisted_actors {
+                    writeln!(
+                        f,
+                        "{}    hoist {} = {}({})",
+                        indent,
+                        h.var_name,
+                        h.cpp_name,
+                        fmt_args(&h.params)
+                    )?;
+                }
+                for firing in &chain.body {
+                    fmt_lir_firing(f, firing, &format!("{}    ", indent))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn fmt_lir_firing(
+    f: &mut std::fmt::Formatter<'_>,
+    firing: &LirFiring,
+    indent: &str,
+) -> std::fmt::Result {
+    let rep = if firing.repetition > 1 {
+        format!("[x{}] ", firing.repetition)
+    } else {
+        String::new()
+    };
+    match &firing.kind {
+        LirFiringKind::Actor(actor) => {
+            let inputs: Vec<&str> = actor.inputs.iter().map(|e| e.buffer_var.as_str()).collect();
+            let outputs: Vec<&str> = actor
+                .outputs
+                .iter()
+                .map(|e| e.buffer_var.as_str())
+                .collect();
+            writeln!(
+                f,
+                "{}{}{}<{}>({}){} -> [{}]",
+                indent,
+                rep,
+                actor.cpp_name,
+                actor.out_type,
+                fmt_args(&actor.params),
+                if inputs.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", inputs.join(", "))
+                },
+                outputs.join(", ")
+            )
+        }
+        LirFiringKind::Fork(fork) => {
+            writeln!(f, "{}{}fork(~{})", indent, rep, fork.tap_name)
+        }
+        LirFiringKind::Probe(probe) => {
+            writeln!(
+                f,
+                "{}{}probe(?{}) {} tokens={}",
+                indent, rep, probe.probe_name, probe.src_var, probe.tokens
+            )
+        }
+        LirFiringKind::BufferRead(io) => {
+            writeln!(
+                f,
+                "{}{}buf_read({}) -> {} tokens={}{}",
+                indent,
+                rep,
+                io.buffer_name,
+                io.edge_var,
+                io.total_tokens,
+                if io.skip { " skip" } else { "" }
+            )
+        }
+        LirFiringKind::BufferWrite(io) => {
+            writeln!(
+                f,
+                "{}{}buf_write({}) <- {} tokens={}{}",
+                indent,
+                rep,
+                io.buffer_name,
+                io.edge_var,
+                io.total_tokens,
+                if io.skip { " skip" } else { "" }
+            )
+        }
+    }
+}
+
+fn fmt_args(args: &[LirActorArg]) -> String {
+    args.iter()
+        .map(|a| match a {
+            LirActorArg::Literal(lit) => lit.clone(),
+            LirActorArg::ParamRef(name) => format!("${}", name),
+            LirActorArg::ConstScalar(lit) => lit.clone(),
+            LirActorArg::ConstSpan { name, len } => format!(":{}[{}]", name, len),
+            LirActorArg::ConstArrayLen(n) => format!("len({})", n),
+            LirActorArg::DimValue(n) => format!("dim({})", n),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 // ── Builder ────────────────────────────────────────────────────────────────
 
 /// Build a complete LIR program from upstream phase outputs.
