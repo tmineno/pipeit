@@ -1,0 +1,17 @@
+---
+source: compiler/tests/snapshot_thir.rs
+expression: output
+---
+ThirContext summary
+  extracted directives:
+    mem_bytes: 67108864
+    tick_rate_hz: 10000
+    timer_spin: None
+    overrun_policy: drop
+  param_cpp_types:
+    gain -> float
+  indexed entries:
+    tasks: [capture, drain]
+    consts: [coeff, fft_size]
+    params: [gain]
+    sets: [mem, overrun]
