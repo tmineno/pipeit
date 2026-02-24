@@ -10,6 +10,10 @@ pub struct SubgraphIndex {
     incoming_edge_count: HashMap<NodeId, usize>,
     outgoing_edge_count: HashMap<NodeId, usize>,
     edge_exists: HashSet<(NodeId, NodeId)>,
+    /// Adjacency list: NodeId → indices into `Subgraph.edges` for incoming edges.
+    incoming_edge_indices: HashMap<NodeId, Vec<usize>>,
+    /// Adjacency list: NodeId → indices into `Subgraph.edges` for outgoing edges.
+    outgoing_edge_indices: HashMap<NodeId, Vec<usize>>,
 }
 
 const INDEX_MIN_GRAPH_SIZE: usize = 32;
@@ -32,6 +36,16 @@ impl SubgraphIndex {
             *index.incoming_edge_count.entry(edge.target).or_insert(0) += 1;
             *index.outgoing_edge_count.entry(edge.source).or_insert(0) += 1;
             index.edge_exists.insert((edge.source, edge.target));
+            index
+                .incoming_edge_indices
+                .entry(edge.target)
+                .or_default()
+                .push(i);
+            index
+                .outgoing_edge_indices
+                .entry(edge.source)
+                .or_default()
+                .push(i);
         }
         index
     }
@@ -62,6 +76,22 @@ impl SubgraphIndex {
 
     pub fn has_edge(&self, src: NodeId, tgt: NodeId) -> bool {
         self.edge_exists.contains(&(src, tgt))
+    }
+
+    /// Return all incoming edges to a node, using the precomputed adjacency list.
+    pub fn incoming_edges<'a>(&self, sub: &'a Subgraph, id: NodeId) -> Vec<&'a Edge> {
+        match self.incoming_edge_indices.get(&id) {
+            Some(indices) => indices.iter().filter_map(|&i| sub.edges.get(i)).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Return all outgoing edges from a node, using the precomputed adjacency list.
+    pub fn outgoing_edges<'a>(&self, sub: &'a Subgraph, id: NodeId) -> Vec<&'a Edge> {
+        match self.outgoing_edge_indices.get(&id) {
+            Some(indices) => indices.iter().filter_map(|&i| sub.edges.get(i)).collect(),
+            None => Vec::new(),
+        }
     }
 }
 
@@ -212,5 +242,19 @@ impl<'a> GraphQueryCtx<'a> {
         self.subgraph_index(sub)
             .map(|idx| idx.outgoing_count(id))
             .unwrap_or_else(|| sub.edges.iter().filter(|e| e.source == id).count())
+    }
+
+    /// Return all incoming edges to a node, using the index when available.
+    pub fn incoming_edges<'s>(&self, sub: &'s Subgraph, id: NodeId) -> Vec<&'s Edge> {
+        self.subgraph_index(sub)
+            .map(|idx| idx.incoming_edges(sub, id))
+            .unwrap_or_else(|| sub.edges.iter().filter(|e| e.target == id).collect())
+    }
+
+    /// Return all outgoing edges from a node, using the index when available.
+    pub fn outgoing_edges<'s>(&self, sub: &'s Subgraph, id: NodeId) -> Vec<&'s Edge> {
+        self.subgraph_index(sub)
+            .map(|idx| idx.outgoing_edges(sub, id))
+            .unwrap_or_else(|| sub.edges.iter().filter(|e| e.source == id).collect())
     }
 }

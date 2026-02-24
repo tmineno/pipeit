@@ -667,6 +667,10 @@ struct LirBuilder<'a> {
 }
 
 impl<'a> LirBuilder<'a> {
+    fn query_ctx(&self) -> GraphQueryCtx<'_> {
+        GraphQueryCtx::new(&self.subgraph_indices)
+    }
+
     fn build(&self) -> LirProgram {
         LirProgram {
             consts: self.build_consts(),
@@ -1081,7 +1085,8 @@ impl<'a> LirBuilder<'a> {
         sched: &SubgraphSchedule,
     ) -> LirSubgraph {
         let back_edges = identify_back_edges(sub, &self.graph.cycles);
-        let aliases = build_passthrough_aliases(sub);
+        let qctx = self.query_ctx();
+        let aliases = build_passthrough_aliases(sub, &qctx);
         let edge_buffers = self.build_edge_buffers(sub, sched, &back_edges, &aliases);
 
         // Build name map for edge buffer variable names
@@ -1417,10 +1422,11 @@ impl<'a> LirBuilder<'a> {
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
         incoming: bool,
     ) -> Vec<LirEdgeRef> {
+        let qctx = self.query_ctx();
         let edges: Vec<&Edge> = if incoming {
-            sub.edges.iter().filter(|e| e.target == node_id).collect()
+            qctx.incoming_edges(sub, node_id)
         } else {
-            sub.edges.iter().filter(|e| e.source == node_id).collect()
+            qctx.outgoing_edges(sub, node_id)
         };
 
         edges
@@ -1650,16 +1656,13 @@ impl<'a> LirBuilder<'a> {
     ) -> HashMap<String, u32> {
         let mut overrides = HashMap::new();
         let rep = firing_repetition(sched, node_id);
-        let incoming_override = consistent_dim_override_from_edges(
-            sched,
-            rep,
-            sub.edges.iter().filter(|e| e.target == node_id),
-        );
-        let outgoing_override = consistent_dim_override_from_edges(
-            sched,
-            rep,
-            sub.edges.iter().filter(|e| e.source == node_id),
-        );
+        let qctx = self.query_ctx();
+        let in_edges = qctx.incoming_edges(sub, node_id);
+        let incoming_override =
+            consistent_dim_override_from_edges(sched, rep, in_edges.iter().copied());
+        let out_edges = qctx.outgoing_edges(sub, node_id);
+        let outgoing_override =
+            consistent_dim_override_from_edges(sched, rep, out_edges.iter().copied());
         let symbolic_sides = symbolic_shape_sides(meta);
         let provided_params = provided_param_names(meta, args);
 
@@ -1718,7 +1721,7 @@ impl<'a> LirBuilder<'a> {
         probe_name: &str,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
     ) -> LirProbeFiring {
-        let incoming: Vec<&Edge> = sub.edges.iter().filter(|e| e.target == node.id).collect();
+        let incoming: Vec<&Edge> = self.query_ctx().incoming_edges(sub, node.id);
         if let Some(in_edge) = incoming.first() {
             if let Some(src_buf) = edge_bufs.get(&(in_edge.source, in_edge.target)) {
                 let wire_type = self.infer_edge_wire_type(sub, in_edge.source);
@@ -1758,7 +1761,7 @@ impl<'a> LirBuilder<'a> {
         buffer_name: &str,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
     ) -> LirBufferIo {
-        let outgoing: Vec<&Edge> = sub.edges.iter().filter(|e| e.source == node.id).collect();
+        let outgoing: Vec<&Edge> = self.query_ctx().outgoing_edges(sub, node.id);
         let (edge_var, total_tokens) = if let Some(out_edge) = outgoing.first() {
             let var = edge_bufs
                 .get(&(out_edge.source, out_edge.target))
@@ -1803,7 +1806,7 @@ impl<'a> LirBuilder<'a> {
         buffer_name: &str,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
     ) -> LirBufferIo {
-        let incoming: Vec<&Edge> = sub.edges.iter().filter(|e| e.target == node.id).collect();
+        let incoming: Vec<&Edge> = self.query_ctx().incoming_edges(sub, node.id);
         let (edge_var, total_tokens) = if let Some(in_edge) = incoming.first() {
             let var = edge_bufs
                 .get(&(in_edge.source, in_edge.target))
@@ -2158,17 +2161,20 @@ fn fmt_spec_for_cpp_type(cpp_type: &str) -> &'static str {
     }
 }
 
-fn build_passthrough_aliases(sub: &Subgraph) -> HashMap<(NodeId, NodeId), (NodeId, NodeId)> {
+fn build_passthrough_aliases(
+    sub: &Subgraph,
+    qctx: &GraphQueryCtx,
+) -> HashMap<(NodeId, NodeId), (NodeId, NodeId)> {
     let mut aliases = HashMap::new();
     for node in &sub.nodes {
         let is_passthrough = matches!(node.kind, NodeKind::Fork { .. } | NodeKind::Probe { .. });
         if !is_passthrough {
             continue;
         }
-        let incoming: Vec<&Edge> = sub.edges.iter().filter(|e| e.target == node.id).collect();
+        let incoming = qctx.incoming_edges(sub, node.id);
         if let Some(in_edge) = incoming.first() {
             let src_key = (in_edge.source, in_edge.target);
-            for out_edge in sub.edges.iter().filter(|e| e.source == node.id) {
+            for out_edge in qctx.outgoing_edges(sub, node.id) {
                 aliases.insert((out_edge.source, out_edge.target), src_key);
             }
         }

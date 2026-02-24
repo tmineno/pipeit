@@ -14,6 +14,7 @@ use std::fmt::Write;
 
 use crate::graph::*;
 use crate::schedule::*;
+use crate::subgraph_index::find_node;
 
 /// Emit the PASS schedule as a Mermaid Gantt chart string.
 ///
@@ -232,10 +233,6 @@ fn sanitize(name: &str) -> String {
             }
         })
         .collect()
-}
-
-fn find_node(sub: &Subgraph, id: NodeId) -> Option<&Node> {
-    sub.nodes.iter().find(|n| n.id == id)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
