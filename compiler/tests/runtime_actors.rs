@@ -123,3 +123,15 @@ fn runtime_timer_adaptive() {
     let build_dir = ensure_runtime_tests_built().expect("Failed to build runtime tests");
     run_test(build_dir, "test_timer").expect("Timer adaptive tests failed");
 }
+
+#[test]
+fn runtime_shell_tests() {
+    let build_dir = ensure_runtime_tests_built().expect("Failed to build runtime tests");
+    run_test(build_dir, "test_shell").expect("Shell tests failed");
+}
+
+#[test]
+fn runtime_waveform_actors() {
+    let build_dir = ensure_runtime_tests_built().expect("Failed to build runtime tests");
+    run_test(build_dir, "test_waveform").expect("Waveform tests failed");
+}
