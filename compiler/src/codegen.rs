@@ -798,7 +798,7 @@ impl<'a> CodegenCtx<'a> {
             }
             let _ = writeln!(
                 self.out,
-                "{}static {} {}[{}];",
+                "{}alignas(64) static {} {}[{}];",
                 indent, eb.cpp_type, eb.var_name, eb.tokens
             );
         }
