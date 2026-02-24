@@ -8,6 +8,7 @@
 //        pipscope [-p <port>] [-a <addr>]
 //
 
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -21,6 +22,8 @@
 #include <imgui_impl_opengl3.h>
 #include <implot.h>
 
+#include "cli.h"
+#include "decimate.h"
 #include "ppkt_receiver.h"
 #include "trigger.h"
 
@@ -30,60 +33,9 @@ static volatile sig_atomic_t g_shutdown = 0;
 
 static void signal_handler(int) { g_shutdown = 1; }
 
-// ── CLI parsing ──────────────────────────────────────────────────────────────
+// ── CLI parsing (implemented in cli.h) ───────────────────────────────────────
 
-static void print_usage(const char *argv0) {
-    fprintf(stderr, "Usage: %s [--port <port>] [--address <addr>]\n", argv0);
-    fprintf(stderr, "       %s [-p <port>] [-a <addr>]\n", argv0);
-    fprintf(stderr, "\n");
-    fprintf(stderr, "  -p, --port <port>       Listen on 0.0.0.0:<port> (UDP)\n");
-    fprintf(stderr, "  -a, --address <addr>    Listen on <addr> (e.g. localhost:9100)\n");
-    fprintf(stderr, "  -h, --help              Show this help message\n");
-    fprintf(stderr, "\nIf no address is given, starts with GUI address input.\n");
-}
-
-struct CliArgs {
-    char address[128] = {};
-    bool has_address = false;
-    bool error = false;
-};
-
-static CliArgs parse_args(int argc, char **argv) {
-    CliArgs args{};
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            print_usage(argv[0]);
-            exit(0);
-        }
-        if ((strcmp(argv[i], "--port") == 0 || strcmp(argv[i], "-p") == 0) && i + 1 < argc) {
-            int port = atoi(argv[i + 1]);
-            if (port > 0 && port <= 65535) {
-                snprintf(args.address, sizeof(args.address), "0.0.0.0:%d", port);
-                args.has_address = true;
-            } else {
-                fprintf(stderr, "Error: invalid port '%s'\n", argv[i + 1]);
-                args.error = true;
-            }
-            i++;
-            continue;
-        }
-        if ((strcmp(argv[i], "--address") == 0 || strcmp(argv[i], "-a") == 0) && i + 1 < argc) {
-            size_t len = strlen(argv[i + 1]);
-            if (len > 0 && len < sizeof(args.address)) {
-                strncpy(args.address, argv[i + 1], sizeof(args.address) - 1);
-                args.has_address = true;
-            } else {
-                fprintf(stderr, "Error: invalid address '%s'\n", argv[i + 1]);
-                args.error = true;
-            }
-            i++;
-            continue;
-        }
-    }
-    return args;
-}
-
-static bool init_window(GLFWwindow *&window) {
+static bool init_window(GLFWwindow *&window, bool vsync = false) {
     if (!glfwInit()) {
         fprintf(stderr, "Error: failed to initialize GLFW.\n"
                         "Is a display server running (WSLg/X11/Wayland)?\n");
@@ -102,7 +54,7 @@ static bool init_window(GLFWwindow *&window) {
     }
 
     glfwMakeContextCurrent(window);
-    glfwSwapInterval(1);
+    glfwSwapInterval(vsync ? 1 : 0);
     return true;
 }
 
@@ -151,6 +103,20 @@ struct AppState {
     double last_rate_time = 0.0;
     float refresh_rate_hz = 0.0f;
 
+    // Persistent raw snapshot buffer (reused across frames to avoid allocation)
+    std::vector<pipscope::ChannelSnapshot> raw_snapshots;
+
+    // Receiver metrics (1-second windowed, same cadence as refresh_rate_hz)
+    uint64_t prev_recv_packets = 0;
+    uint64_t prev_recv_bytes = 0;
+    float recv_pps = 0.0f;
+    float recv_mbps = 0.0f;
+    float snapshot_ms = 0.0f;
+
+    // Snapshot rate limiting
+    int snapshot_hz = 0;
+    double last_snapshot_time = 0.0;
+
     size_t buffer_capacity = 1'000'000;
 };
 
@@ -176,6 +142,7 @@ static void do_connect(AppState &state, pipscope::PpktReceiver &receiver) {
     receiver.stop();
     receiver.clear_channels();
     state.snapshots.clear();
+    state.raw_snapshots.clear();
 
     if (receiver.start(state.address_buf)) {
         state.conn_status = ConnStatus::Connected;
@@ -224,18 +191,30 @@ static void render_toolbar(AppState &state, pipscope::PpktReceiver &receiver) {
     }
     ImGui::TextColored(status_color, "%s", state.status_msg);
 
-    // Compute refresh rate (updates/sec) over 1-second windows
+    // Compute refresh rate + receiver metrics over 1-second windows
     {
         double now = ImGui::GetTime();
         double elapsed = now - state.last_rate_time;
         if (elapsed >= 1.0) {
             state.refresh_rate_hz = static_cast<float>(state.update_count / elapsed);
             state.update_count = 0;
+
+            auto m = receiver.metrics();
+            uint64_t dpkt = m.recv_packets - state.prev_recv_packets;
+            uint64_t dbytes = m.recv_bytes - state.prev_recv_bytes;
+            state.recv_pps = static_cast<float>(dpkt / elapsed);
+            state.recv_mbps = static_cast<float>(dbytes / elapsed / (1024.0 * 1024.0));
+            state.prev_recv_packets = m.recv_packets;
+            state.prev_recv_bytes = m.recv_bytes;
+
             state.last_rate_time = now;
         }
     }
     ImGui::SameLine();
     ImGui::Text("| Refresh: %.0f Hz", state.refresh_rate_hz);
+    ImGui::SameLine();
+    ImGui::Text("| recv: %.1fk pps  %.1f MB/s | snap: %.2f ms", state.recv_pps / 1000.0f,
+                state.recv_mbps, state.snapshot_ms);
 
     // ── Trigger controls (row 2) ─────────────────────────────────────────
     ImGui::Checkbox("Trigger", &state.trigger.enabled);
@@ -309,7 +288,9 @@ static void extract_window(std::vector<pipscope::ChannelSnapshot> &dst,
             end = avail;
         int n = end - start;
         if (n > 0) {
-            dst[c].samples.assign(src[c].samples.begin() + start, src[c].samples.begin() + end);
+            dst[c].samples.resize(static_cast<size_t>(n));
+            std::memcpy(dst[c].samples.data(), src[c].samples.data() + start,
+                        static_cast<size_t>(n) * sizeof(float));
         } else {
             dst[c].samples.clear();
         }
@@ -328,7 +309,9 @@ static void take_tail(std::vector<pipscope::ChannelSnapshot> &dst,
         int avail = static_cast<int>(src[c].samples.size());
         int n = count < avail ? count : avail;
         if (n > 0) {
-            dst[c].samples.assign(src[c].samples.end() - n, src[c].samples.end());
+            dst[c].samples.resize(static_cast<size_t>(n));
+            std::memcpy(dst[c].samples.data(), src[c].samples.data() + (avail - n),
+                        static_cast<size_t>(n) * sizeof(float));
         } else {
             dst[c].samples.clear();
         }
@@ -351,10 +334,24 @@ static void update_snapshots(AppState &state, pipscope::PpktReceiver &receiver) 
     if (state.paused)
         return;
 
+    // Rate-limit snapshots when snapshot_hz is set
+    if (state.snapshot_hz > 0) {
+        double now = ImGui::GetTime();
+        if (now - state.last_snapshot_time < 1.0 / state.snapshot_hz)
+            return;
+        state.last_snapshot_time = now;
+    }
+
     int ds = state.display_samples;
     size_t request_size =
         state.trigger.enabled ? static_cast<size_t>(ds) * 2 : static_cast<size_t>(ds);
-    auto raw = receiver.snapshot(request_size);
+
+    auto snap_t0 = std::chrono::steady_clock::now();
+    receiver.snapshot_into(state.raw_snapshots, request_size);
+    auto snap_t1 = std::chrono::steady_clock::now();
+    state.snapshot_ms = std::chrono::duration<float, std::milli>(snap_t1 - snap_t0).count();
+
+    const auto &raw = state.raw_snapshots;
 
     if (state.trigger.enabled) {
         // Find trigger source channel by chan_id
@@ -453,8 +450,24 @@ static void render_channel_plot(const pipscope::ChannelSnapshot &channel, bool a
 
         if (!channel.samples.empty()) {
             double dt = channel.sample_rate_hz > 0 ? 1.0 / channel.sample_rate_hz : 1.0;
-            int n = static_cast<int>(channel.samples.size());
-            ImPlot::PlotLine("signal", channel.samples.data(), n, dt, 0.0);
+            size_t n = channel.samples.size();
+            static constexpr size_t kMaxPlotPoints = 4000;
+
+            if (n > kMaxPlotPoints) {
+                int factor = static_cast<int>(n / (kMaxPlotPoints / 2));
+                // thread_local buffers avoid per-frame allocation
+                thread_local std::vector<float> dec_x, dec_y;
+                size_t max_out = 2 * ((n + factor - 1) / factor);
+                dec_x.resize(max_out);
+                dec_y.resize(max_out);
+                size_t dn = pipscope::decimate_minmax(channel.samples.data(), n, factor,
+                                                      dec_x.data(), dec_y.data(), dt);
+                if (dn > 0) {
+                    ImPlot::PlotLine("signal", dec_x.data(), dec_y.data(), static_cast<int>(dn));
+                }
+            } else {
+                ImPlot::PlotLine("signal", channel.samples.data(), static_cast<int>(n), dt, 0.0);
+            }
         }
 
         // Trigger level line (draggable, yellow) on the source channel
@@ -534,9 +547,9 @@ static void render_ui(AppState &state, pipscope::PpktReceiver &receiver) {
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 int main(int argc, char **argv) {
-    CliArgs args = parse_args(argc, argv);
+    pipscope::CliArgs args = pipscope::parse_args(argc, argv);
     if (args.error) {
-        print_usage(argv[0]);
+        pipscope::print_usage(argv[0]);
         return 1;
     }
 
@@ -544,7 +557,7 @@ int main(int argc, char **argv) {
     signal(SIGTERM, signal_handler);
 
     GLFWwindow *window = nullptr;
-    if (!init_window(window)) {
+    if (!init_window(window, args.vsync)) {
         return 1;
     }
 
@@ -553,6 +566,7 @@ int main(int argc, char **argv) {
     pipscope::PpktReceiver receiver;
     AppState state;
     state.buffer_capacity = receiver.buffer_capacity();
+    state.snapshot_hz = args.snapshot_hz;
 
     if (args.has_address) {
         strncpy(state.address_buf, args.address, sizeof(state.address_buf) - 1);

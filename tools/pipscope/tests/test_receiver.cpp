@@ -14,6 +14,8 @@
 #include <pipit_net.h>
 #include <unistd.h>
 
+#include "cli.h"
+#include "decimate.h"
 #include "ppkt_receiver.h"
 #include "trigger.h"
 
@@ -206,6 +208,79 @@ TEST(sample_buffer_wraparound_two_pushes) {
     ASSERT_EQ(out[1], 4.0f);
     ASSERT_EQ(out[2], 5.0f);
     ASSERT_EQ(out[3], 6.0f);
+}
+
+TEST(sample_buffer_clear) {
+    pipscope::SampleBuffer buf(8);
+
+    // Push some data
+    float d1[5] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
+    buf.push(d1, 5);
+    ASSERT_EQ(buf.count, 5u);
+
+    // Clear resets count without reallocating
+    buf.clear();
+    ASSERT_EQ(buf.count, 0u);
+    ASSERT_EQ(buf.head, 0u);
+
+    // snapshot returns 0 after clear
+    float out[8] = {};
+    ASSERT_EQ(buf.snapshot(out, 8), 0u);
+
+    // Push again works correctly after clear
+    float d2[3] = {10.0f, 20.0f, 30.0f};
+    buf.push(d2, 3);
+    ASSERT_EQ(buf.count, 3u);
+    size_t n = buf.snapshot(out, 8);
+    ASSERT_EQ(n, 3u);
+    ASSERT_EQ(out[0], 10.0f);
+    ASSERT_EQ(out[1], 20.0f);
+    ASSERT_EQ(out[2], 30.0f);
+}
+
+TEST(sample_buffer_push_large_batch_exceeding_capacity) {
+    pipscope::SampleBuffer buf(4);
+
+    // Push 10 samples into capacity-4 buffer — should keep last 4
+    float data[10] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    buf.push(data, 10);
+
+    ASSERT_EQ(buf.count, 4u);
+    float out[4] = {};
+    size_t n = buf.snapshot(out, 4);
+    ASSERT_EQ(n, 4u);
+    ASSERT_EQ(out[0], 7.0f);
+    ASSERT_EQ(out[1], 8.0f);
+    ASSERT_EQ(out[2], 9.0f);
+    ASSERT_EQ(out[3], 10.0f);
+}
+
+TEST(sample_buffer_push_wrap_boundary) {
+    pipscope::SampleBuffer buf(8);
+
+    // Push 6 samples (head at 6)
+    float d1[6] = {1, 2, 3, 4, 5, 6};
+    buf.push(d1, 6);
+    ASSERT_EQ(buf.head, 6u);
+
+    // Push 5 more — wraps around boundary (6+5=11, 11%8=3)
+    float d2[5] = {7, 8, 9, 10, 11};
+    buf.push(d2, 5);
+    ASSERT_EQ(buf.head, 3u);
+    ASSERT_EQ(buf.count, 8u);
+
+    // Should get last 8: 4,5,6,7,8,9,10,11
+    float out[8] = {};
+    size_t n = buf.snapshot(out, 8);
+    ASSERT_EQ(n, 8u);
+    ASSERT_EQ(out[0], 4.0f);
+    ASSERT_EQ(out[1], 5.0f);
+    ASSERT_EQ(out[2], 6.0f);
+    ASSERT_EQ(out[3], 7.0f);
+    ASSERT_EQ(out[4], 8.0f);
+    ASSERT_EQ(out[5], 9.0f);
+    ASSERT_EQ(out[6], 10.0f);
+    ASSERT_EQ(out[7], 11.0f);
 }
 
 // ── convert_to_float tests ───────────────────────────────────────────────────
@@ -1200,6 +1275,143 @@ TEST(receiver_is_running) {
     ASSERT_FALSE(rx.is_running());
 }
 
+TEST(receiver_batch_burst) {
+    // Send 32 packets with no delay and verify all arrive via recvmmsg drain loop.
+    // Use a single DatagramSender to avoid per-packet socket overhead.
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(65536);
+    ASSERT_TRUE(rx.start(port));
+
+    DatagramSender tx;
+    char addr[32];
+    snprintf(addr, sizeof(addr), "localhost:%u", port);
+    ASSERT_TRUE(tx.open(addr, strlen(addr)));
+
+    const int kBurstSize = 32;
+    uint64_t iter = 0;
+    for (int i = 0; i < kBurstSize; i++) {
+        float sample = static_cast<float>(i + 1);
+        PpktHeader hdr = ppkt_make_header(DTYPE_F32, 0);
+        hdr.flags = FLAG_FRAME_START | FLAG_FRAME_END;
+        if (i == 0)
+            hdr.flags |= FLAG_FIRST_FRAME;
+        hdr.sample_count = 1;
+        hdr.payload_bytes = sizeof(float);
+        hdr.sample_rate_hz = 1000.0;
+        hdr.timestamp_ns = pipit_now_ns();
+        hdr.iteration_index = iter;
+        iter += 1;
+
+        uint8_t pkt[256];
+        std::memcpy(pkt, &hdr, sizeof(PpktHeader));
+        std::memcpy(pkt + sizeof(PpktHeader), &sample, sizeof(float));
+        ASSERT_TRUE(tx.send(pkt, sizeof(PpktHeader) + sizeof(float)));
+    }
+
+    usleep(200000); // 200ms for recv thread to process
+
+    auto snap = rx.snapshot(65536);
+    rx.stop();
+
+    ASSERT_TRUE(snap.size() > 0);
+    // All 32 single-sample frames should be accepted with no inter-frame gaps
+    ASSERT_EQ(snap[0].stats.inter_frame_gaps, 0u);
+    ASSERT_EQ(snap[0].stats.accepted_frames, static_cast<uint64_t>(kBurstSize));
+    ASSERT_EQ(snap[0].samples.size(), static_cast<size_t>(kBurstSize));
+    ASSERT_EQ(snap[0].samples.back(), static_cast<float>(kBurstSize));
+}
+
+TEST(concurrent_snapshot_during_receive) {
+    // Send packets rapidly while taking concurrent snapshots for 1s.
+    // Verifies lock-split correctness: no corruption or crashes.
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(8192);
+    ASSERT_TRUE(rx.start(port));
+
+    std::atomic<bool> done{false};
+    std::thread sender([&]() {
+        DatagramSender tx;
+        char addr[32];
+        snprintf(addr, sizeof(addr), "localhost:%u", port);
+        if (!tx.open(addr, strlen(addr)))
+            return;
+
+        uint64_t iter = 0;
+        float samples[64];
+        while (!done.load()) {
+            for (int i = 0; i < 64; i++)
+                samples[i] = static_cast<float>(iter + i);
+
+            PpktHeader hdr = ppkt_make_header(DTYPE_F32, 0);
+            hdr.flags = FLAG_FRAME_START | FLAG_FRAME_END;
+            if (iter == 0)
+                hdr.flags |= FLAG_FIRST_FRAME;
+            hdr.sample_count = 64;
+            hdr.payload_bytes = 64 * sizeof(float);
+            hdr.sample_rate_hz = 48000.0;
+            hdr.timestamp_ns = pipit_now_ns();
+            hdr.iteration_index = iter;
+            iter += 64;
+
+            uint8_t pkt[65536];
+            std::memcpy(pkt, &hdr, sizeof(PpktHeader));
+            std::memcpy(pkt + sizeof(PpktHeader), samples, hdr.payload_bytes);
+            tx.send(pkt, sizeof(PpktHeader) + hdr.payload_bytes);
+        }
+    });
+
+    // Take snapshots for ~500ms while sender is active
+    int snapshot_count = 0;
+    for (int i = 0; i < 500; i++) {
+        auto snap = rx.snapshot(4096);
+        snapshot_count++;
+        usleep(1000); // 1ms between snapshots
+    }
+
+    done.store(true);
+    sender.join();
+    rx.stop();
+
+    printf("    snapshots taken: %d\n", snapshot_count);
+    ASSERT_TRUE(snapshot_count > 100); // should have taken many snapshots
+}
+
+TEST(reconnect_clears_recv_state) {
+    // Verify that stop → clear_channels → start resets recv-thread-local state,
+    // so sending with a new iteration_index doesn't produce false inter_frame_gaps.
+    uint16_t port = next_test_port();
+    pipscope::PpktReceiver rx(8192);
+    ASSERT_TRUE(rx.start(port));
+
+    // Send first batch starting at iteration_index=0
+    float sample = 1.0f;
+    send_ppkt(port, 0, &sample, 1, 1000.0, 0, FLAG_FIRST_FRAME);
+    usleep(50000);
+
+    auto snap1 = rx.snapshot(8192);
+    ASSERT_TRUE(snap1.size() > 0);
+    ASSERT_EQ(snap1[0].stats.accepted_frames, 1u);
+    ASSERT_EQ(snap1[0].stats.inter_frame_gaps, 0u);
+
+    // Reconnect
+    rx.stop();
+    rx.clear_channels();
+    ASSERT_TRUE(rx.start(port));
+
+    // Send with new iteration_index starting from 1000 (big gap from previous)
+    // Without recv_state reset, this would trigger an inter_frame_gap
+    float sample2 = 2.0f;
+    send_ppkt(port, 0, &sample2, 1, 1000.0, 1000, FLAG_FIRST_FRAME);
+    usleep(50000);
+
+    auto snap2 = rx.snapshot(8192);
+    rx.stop();
+
+    ASSERT_TRUE(snap2.size() > 0);
+    ASSERT_EQ(snap2[0].stats.accepted_frames, 1u);
+    ASSERT_EQ(snap2[0].stats.inter_frame_gaps, 0u); // no false gap
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // Trigger search tests (pure function — no receiver or GUI dependency)
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1271,6 +1483,73 @@ TEST(trigger_empty_buffer) {
     float samples[1] = {0.0f};
     ASSERT_EQ(pipscope::find_trigger(nullptr, 0, 0.0f, pipscope::TriggerConfig::Rising, 0, 0), -1);
     ASSERT_EQ(pipscope::find_trigger(samples, 1, 0.0f, pipscope::TriggerConfig::Rising, 0, 0), -1);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Decimation tests (decimate.h)
+// ══════════════════════════════════════════════════════════════════════════════
+
+TEST(decimate_minmax_preserves_extremes) {
+    // 12 samples, factor=4 → 3 buckets → 6 output points
+    // Points are emitted in chronological order (whichever extreme comes first)
+    float in[12] = {1, 5, 2, 3, -1, 0, 4, 2, 10, 7, 8, 6};
+    float out_x[8] = {};
+    float out_y[8] = {};
+    double dt = 0.001; // 1 kHz
+
+    size_t n = pipscope::decimate_minmax(in, 12, 4, out_x, out_y, dt);
+    ASSERT_EQ(n, 6u);
+
+    // Bucket 0 [1,5,2,3]: min=1@0, max=5@1 → min first (chronological)
+    ASSERT_EQ(out_y[0], 1.0f);
+    ASSERT_EQ(out_y[1], 5.0f);
+    ASSERT_EQ(out_x[0], static_cast<float>(0 * dt));
+    ASSERT_EQ(out_x[1], static_cast<float>(1 * dt));
+
+    // Bucket 1 [-1,0,4,2]: min=-1@4, max=4@6 → min first (chronological)
+    ASSERT_EQ(out_y[2], -1.0f);
+    ASSERT_EQ(out_y[3], 4.0f);
+    ASSERT_EQ(out_x[2], static_cast<float>(4 * dt));
+    ASSERT_EQ(out_x[3], static_cast<float>(6 * dt));
+
+    // Bucket 2 [10,7,8,6]: max=10@8, min=6@11 → max first (chronological)
+    ASSERT_EQ(out_y[4], 10.0f);
+    ASSERT_EQ(out_y[5], 6.0f);
+    ASSERT_EQ(out_x[4], static_cast<float>(8 * dt));
+    ASSERT_EQ(out_x[5], static_cast<float>(11 * dt));
+}
+
+TEST(decimate_minmax_factor_1_returns_0) {
+    float in[4] = {1, 2, 3, 4};
+    float out_x[4] = {};
+    float out_y[4] = {};
+    size_t n = pipscope::decimate_minmax(in, 4, 1, out_x, out_y, 0.001);
+    ASSERT_EQ(n, 0u);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CLI parsing tests (cli.h)
+// ══════════════════════════════════════════════════════════════════════════════
+
+TEST(parse_args_defaults) {
+    char *argv[] = {(char *)"pipscope", nullptr};
+    auto args = pipscope::parse_args(1, argv);
+    ASSERT_FALSE(args.has_address);
+    ASSERT_FALSE(args.error);
+    ASSERT_FALSE(args.vsync);
+    ASSERT_EQ(args.snapshot_hz, 0);
+}
+
+TEST(parse_args_vsync_flag) {
+    char *argv[] = {(char *)"pipscope", (char *)"--vsync", nullptr};
+    auto args = pipscope::parse_args(2, argv);
+    ASSERT_TRUE(args.vsync);
+}
+
+TEST(parse_args_snapshot_hz) {
+    char *argv[] = {(char *)"pipscope", (char *)"--snapshot-hz", (char *)"30", nullptr};
+    auto args = pipscope::parse_args(3, argv);
+    ASSERT_EQ(args.snapshot_hz, 30);
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
