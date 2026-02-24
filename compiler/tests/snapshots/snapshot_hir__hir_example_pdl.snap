@@ -1,0 +1,15 @@
+---
+source: compiler/tests/snapshot_hir.rs
+expression: output
+---
+HirProgram (2 consts, 1 params, 2 directives, 2 tasks)
+  const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]
+  const fft_size = 256
+  param gain = 1
+  set mem = 67108864B
+  set overrun = drop
+  task 'capture' @ 10000000 (pipeline)
+    constant(0)[256] | mul($gain) | fft(:fft_size) | ~raw | c2r() | fir(:coeff) | ?filtered -> signal
+    ^raw | mag() | stdout()
+  task 'drain' @ 10000000 (pipeline)
+    buffer_read(signal) | decimate(256) | csvwrite("output.csv")

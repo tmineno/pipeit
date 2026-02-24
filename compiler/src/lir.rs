@@ -2084,8 +2084,8 @@ mod tests {
 
     #[test]
     fn scalar_literal_float() {
-        let s = Scalar::Number(3.14, span(), false);
-        assert_eq!(scalar_literal(&s), "3.14f");
+        let s = Scalar::Number(2.75, span(), false);
+        assert_eq!(scalar_literal(&s), "2.75f");
     }
 
     #[test]

@@ -1,0 +1,18 @@
+---
+source: compiler/tests/snapshot_hir.rs
+expression: output
+---
+HirProgram (2 consts, 0 params, 2 directives, 2 tasks)
+  const sync_coeff = [1, -1, 1, -1]
+  const data_coeff = [0.1, 0.2, 0.4, 0.2, 0.1]
+  set mem = 134217728B
+  set overrun = drop
+  task 'receiver' @ 10000000 (modal, ctrl=buffer:ctrl)
+    control:
+      constant(0) | correlate() | detect() -> ctrl
+    mode 'sync':
+      constant(0) | fir(:sync_coeff) | ?sync_out -> sync_result
+    mode 'data':
+      constant(0) | fft(256) | c2r() | fir(:data_coeff) | ?data_out -> payload
+  task 'logger' @ 1000 (pipeline)
+    buffer_read(payload) | decimate(2560000) | csvwrite("received.csv")

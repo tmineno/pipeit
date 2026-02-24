@@ -1,0 +1,11 @@
+---
+source: compiler/tests/snapshot_hir.rs
+expression: output
+---
+HirProgram (0 consts, 1 params, 2 directives, 1 tasks)
+  param alpha = 0.5
+  set mem = 16777216B
+  set overrun = drop
+  task 'iir' @ 1000 (pipeline)
+    constant(0) | add(^fb) | mul($alpha) | ~out | ?tap | stdout()
+    ^out | delay(1, 0) | ~fb

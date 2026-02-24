@@ -1,0 +1,8 @@
+---
+source: compiler/tests/snapshot_hir.rs
+expression: output
+---
+HirProgram (0 consts, 1 params, 0 directives, 1 tasks)
+  param gain = 2.5
+  task 'audio' @ 48000 (pipeline)
+    constant(0) | mul($gain) | mul($gain) | stdout()
