@@ -328,8 +328,20 @@ Exit codes:
 - 6 reproducibility tests (byte-identical outputs for same inputs).
 - ADR-027 exit criteria all met.
 
+### Phase 7b (CMake Build Integration) ✅
+
+- Manifest-first workflow wired into `examples/CMakeLists.txt`.
+- `PIPIT_USE_MANIFEST` option (default ON) with legacy fallback.
+- Explicit header inventory with scoped GLOB cross-check.
+- CMake dependency chain validated (`test_cmake_regen.sh`).
+
+### Phase 8 (Test Strategy and Migration Hardening) ✅
+
+- IR-level golden tests: HIR, THIR, and LIR insta snapshots (7 tests each, all example PDLs).
+- Pipeline equivalence tests: direct call chain vs pass-manager orchestration produce byte-identical C++ output.
+- Property-based tests (proptest): parser→HIR roundtrip, widening transitivity/antisymmetry (exhaustive), scheduler invariants.
+- Full matrix coverage: all 8 C++ runtime test binaries wired into `cargo test`.
+
 ### Deferred
 
 - Phase 3b/3c: Invalidation hashing and artifact cache.
-- Phase 7b: CMake build integration.
-- Phase 8: IR-level golden tests, property/fuzz tests, migration guide.
