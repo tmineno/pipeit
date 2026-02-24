@@ -391,18 +391,32 @@ impl Registry {
         Ok(count)
     }
 
-    /// Generate a JSON manifest string from the current registry contents.
+    /// Generate a pretty-printed JSON manifest string for display and `--emit manifest`.
     pub fn generate_manifest(&self) -> String {
+        let manifest = self.build_manifest();
+        serde_json::to_string_pretty(&manifest).expect("manifest serialization should not fail")
+    }
+
+    /// Generate compact canonical JSON for fingerprint computation.
+    ///
+    /// Uses `serde_json::to_string()` (no whitespace) to ensure the hash
+    /// is independent of display formatting. Same sorting/collection logic
+    /// as `generate_manifest()`.
+    pub fn canonical_json(&self) -> String {
+        let manifest = self.build_manifest();
+        serde_json::to_string(&manifest).expect("manifest serialization should not fail")
+    }
+
+    fn build_manifest(&self) -> Manifest {
         let actors: Vec<&ActorMeta> = {
             let mut v: Vec<_> = self.actors.values().map(|(m, _)| m).collect();
             v.sort_by(|a, b| a.name.cmp(&b.name));
             v
         };
-        let manifest = Manifest {
+        Manifest {
             schema: 1,
             actors: actors.into_iter().cloned().collect(),
-        };
-        serde_json::to_string_pretty(&manifest).expect("manifest serialization should not fail")
+        }
     }
 }
 
@@ -1679,5 +1693,115 @@ ACTOR(scale, IN(T, N), OUT(T, N), PARAM(T, gain) PARAM(int, N)) {
         assert_eq!(a2.params[0].param_type, ParamType::TypeParam("T".into()));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Overlay tests ────────────────────────────────────────────────────
+
+    fn simple_meta(name: &str, in_type: PipitType, out_type: PipitType) -> ActorMeta {
+        ActorMeta {
+            name: name.into(),
+            type_params: vec![],
+            in_type: TypeExpr::Concrete(in_type),
+            in_count: TokenCount::Literal(1),
+            in_shape: PortShape::rank1(TokenCount::Literal(1)),
+            out_type: TypeExpr::Concrete(out_type),
+            out_count: TokenCount::Literal(1),
+            out_shape: PortShape::rank1(TokenCount::Literal(1)),
+            params: vec![],
+        }
+    }
+
+    #[test]
+    fn overlay_from_replaces_existing() {
+        let mut base = Registry::new();
+        base.actors.insert(
+            "Gain".into(),
+            (
+                simple_meta("Gain", PipitType::Float, PipitType::Float),
+                PathBuf::from("old.h"),
+            ),
+        );
+
+        let mut overlay = Registry::new();
+        overlay.actors.insert(
+            "Gain".into(),
+            (
+                simple_meta("Gain", PipitType::Cfloat, PipitType::Cfloat),
+                PathBuf::from("new.h"),
+            ),
+        );
+
+        base.overlay_from(&overlay);
+        let meta = base.lookup("Gain").unwrap();
+        assert_eq!(meta.in_type, PipitType::Cfloat, "overlay should replace");
+    }
+
+    #[test]
+    fn overlay_from_preserves_non_conflicting() {
+        let mut base = Registry::new();
+        base.actors.insert(
+            "A".into(),
+            (
+                simple_meta("A", PipitType::Float, PipitType::Float),
+                PathBuf::from("a.h"),
+            ),
+        );
+
+        let mut overlay = Registry::new();
+        overlay.actors.insert(
+            "B".into(),
+            (
+                simple_meta("B", PipitType::Float, PipitType::Float),
+                PathBuf::from("b.h"),
+            ),
+        );
+
+        base.overlay_from(&overlay);
+        assert!(base.lookup("A").is_some(), "base actor A preserved");
+        assert!(base.lookup("B").is_some(), "overlay actor B added");
+        assert_eq!(base.len(), 2);
+    }
+
+    // ── Canonical JSON tests ─────────────────────────────────────────────
+
+    #[test]
+    fn canonical_json_is_compact() {
+        let mut reg = Registry::new();
+        reg.actors.insert(
+            "Gain".into(),
+            (
+                simple_meta("Gain", PipitType::Float, PipitType::Float),
+                PathBuf::from("gain.h"),
+            ),
+        );
+
+        let json = reg.canonical_json();
+        assert!(
+            !json.contains('\n'),
+            "canonical JSON should be compact (no newlines)"
+        );
+        assert!(
+            !json.contains("  "),
+            "canonical JSON should have no indentation"
+        );
+    }
+
+    #[test]
+    fn canonical_json_stable() {
+        let mut reg = Registry::new();
+        reg.actors.insert(
+            "Gain".into(),
+            (
+                simple_meta("Gain", PipitType::Float, PipitType::Float),
+                PathBuf::from("gain.h"),
+            ),
+        );
+
+        let first = reg.canonical_json();
+        let second = reg.canonical_json();
+        assert_eq!(
+            first, second,
+            "canonical JSON should be stable across calls"
+        );
     }
 }

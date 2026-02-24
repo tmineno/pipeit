@@ -87,3 +87,79 @@ fn unknown_actor_produces_error() {
     );
     let _ = std::fs::remove_file(&pdl_path);
 }
+
+/// JSON output for semantic errors: each line is valid JSON with the unified schema.
+#[test]
+fn json_output_semantic_error() {
+    let tmp_dir = std::env::temp_dir();
+    let pdl_path = tmp_dir.join("verify_regression_json_semantic.pdl");
+    std::fs::write(
+        &pdl_path,
+        "clock 1kHz t {\n    nonexistent_actor_xyz() | stdout()\n}\n",
+    )
+    .expect("write tmp pdl");
+
+    let actors_dir = project_root().join("runtime/libpipit/include");
+    let output = Command::new(pcc_binary())
+        .arg("--emit")
+        .arg("cpp")
+        .arg("--diagnostic-format")
+        .arg("json")
+        .arg("-I")
+        .arg(&actors_dir)
+        .arg(&pdl_path)
+        .output()
+        .expect("failed to run pcc");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Each non-empty line should be valid JSONL
+    for line in stderr.lines().filter(|l| !l.is_empty()) {
+        let v: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("invalid JSON line: {e}\nline: {line}"));
+        assert_eq!(v["kind"], "semantic", "expected kind=semantic, got: {v}");
+        assert!(
+            !v["code"].is_null(),
+            "semantic diagnostic should have a code: {v}"
+        );
+    }
+    let _ = std::fs::remove_file(&pdl_path);
+}
+
+/// JSON output for parse errors: each line uses the unified schema with kind=parse.
+#[test]
+fn json_output_parse_error() {
+    let tmp_dir = std::env::temp_dir();
+    let pdl_path = tmp_dir.join("verify_regression_json_parse.pdl");
+    // Syntactically invalid: unclosed brace
+    std::fs::write(&pdl_path, "clock 1kHz t {\n    stdout()\n").expect("write tmp pdl");
+
+    let actors_dir = project_root().join("runtime/libpipit/include");
+    let output = Command::new(pcc_binary())
+        .arg("--emit")
+        .arg("cpp")
+        .arg("--diagnostic-format")
+        .arg("json")
+        .arg("-I")
+        .arg(&actors_dir)
+        .arg(&pdl_path)
+        .output()
+        .expect("failed to run pcc");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut found_parse = false;
+    for line in stderr.lines().filter(|l| !l.is_empty()) {
+        let v: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("invalid JSON line: {e}\nline: {line}"));
+        assert_eq!(v["kind"], "parse", "expected kind=parse for parse error");
+        assert!(v["code"].is_null(), "parse error should have null code");
+        assert!(v["span"].is_object(), "parse error should have span object");
+        found_parse = true;
+    }
+    assert!(
+        found_parse,
+        "expected at least one parse error in JSON output"
+    );
+    let _ = std::fs::remove_file(&pdl_path);
+}

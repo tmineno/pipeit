@@ -16,13 +16,15 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::ast::*;
+use crate::diag::codes;
+use crate::diag::{DiagCode, DiagLevel, Diagnostic};
 use crate::hir::{
     HirActorCall, HirPipeElem, HirPipeExpr, HirPipeSource, HirPipeline, HirProgram, HirTask,
     HirTaskBody,
 };
 use crate::id::CallId;
 use crate::registry::Registry;
-use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
+use crate::resolve::ResolvedProgram;
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -277,13 +279,9 @@ impl<'a> GraphBuilder<'a> {
         }
     }
 
-    fn error(&mut self, span: Span, message: String) {
-        self.diagnostics.push(Diagnostic {
-            level: DiagLevel::Error,
-            span,
-            message,
-            hint: None,
-        });
+    fn error(&mut self, code: DiagCode, span: Span, message: String) {
+        self.diagnostics
+            .push(Diagnostic::new(DiagLevel::Error, span, message).with_code(code));
     }
 
     // ── Build all tasks ─────────────────────────────────────────────────
@@ -449,6 +447,7 @@ impl<'a> GraphBuilder<'a> {
                 ctx.add_edge(fork_id, actor_id, span);
             } else {
                 self.error(
+                    codes::E0500,
                     span,
                     format!("internal error: tap ':{tap_name}' not found in graph"),
                 );

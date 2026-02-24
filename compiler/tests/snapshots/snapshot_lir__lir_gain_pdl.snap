@@ -1,0 +1,14 @@
+---
+source: compiler/tests/snapshot_lir.rs
+expression: output
+---
+LirProgram (0 consts, 1 params, 0 inter-task bufs, 1 tasks, 0 probes)
+  param gain: float = "2.5f" (cli: std::stof)
+  directives: mem=67108864, overrun=drop, timer=Fixed(10000)
+  task 'audio' @ 48000Hz K=5
+    edge_buffers: _e0_1: float[1], _e1_2: float[1], _e2_3: float[1]
+    firings:
+      Actor_constant<float><float>(0, dim(1)) -> [_e0_1]
+      Actor_mul<float><float>($gain, dim(1)) [_e0_1] -> [_e1_2]
+      Actor_mul<float><float>($gain, dim(1)) [_e1_2] -> [_e2_3]
+      Actor_stdout<float><void>() [_e2_3] -> []

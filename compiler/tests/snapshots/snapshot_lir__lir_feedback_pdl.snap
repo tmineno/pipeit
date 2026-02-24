@@ -1,0 +1,20 @@
+---
+source: compiler/tests/snapshot_lir.rs
+expression: output
+---
+LirProgram (0 consts, 1 params, 0 inter-task bufs, 1 tasks, 1 probes)
+  param alpha: float = "0.5f" (cli: std::stof)
+  directives: mem=16777216, overrun=drop, timer=Fixed(10000)
+  task 'iir' @ 1000Hz K=1
+    feedback _fb_6_7: float[1] init=0
+    edge_buffers: _e0_1: float[1], _e1_2: float[1], _e2_3: float[1], _fb_6_7: [1] (fb)
+    firings:
+      Actor_constant<float><float>(0, dim(1)) -> [_e0_1]
+      fork(~fb)
+      Actor_add<float><float>() [_e0_1, _fb_6_7] -> [_e1_2]
+      Actor_mul<float><float>($alpha, dim(1)) [_e1_2] -> [_e2_3]
+      fork(~out)
+      probe(?tap) _e2_3 tokens=1
+      Actor_delay<float><float>(1, 0) [_e2_3] -> [_fb_6_7]
+      Actor_stdout<float><void>() [_e2_3] -> []
+  probe tap

@@ -15,7 +15,8 @@ pcc <source.pdl> -I <actors.h> [options]
 | `-I <path>` | Actor header file or search directory (C++ with `ACTOR` macros) — repeatable |
 | `--actor-path <dir>` | Search directory for actor headers — repeatable |
 | `-o, --output <path>` | Output file path (default: `a.out` for exe, `-` for other formats) |
-| `--emit <format>` | Output stage: `exe` (default), `cpp`, `schedule`, `graph-dot`, `timing-chart` |
+| `--actor-meta <path>` | Load actor metadata from manifest JSON (hermetic, no header scanning) |
+| `--emit <format>` | Output stage: `exe` (default), `cpp`, `manifest`, `build-info`, `ast`, `schedule`, `graph-dot`, `timing-chart` |
 | `--release` | Strip probe instrumentation for zero-cost production builds |
 | `--cc <compiler>` | C++ compiler command (default: `c++`) |
 | `--cflags <flags>` | Additional C++ compiler flags (overrides default `-O2`) |
@@ -50,6 +51,36 @@ pcc examples/gain.pdl --actor-path examples -o gain
 
 # Release build with custom compiler flags
 pcc examples/gain.pdl -I examples/actors.h --release --cflags "-O3 -march=native" -o gain
+```
+
+## Manifest-first Workflow
+
+For hermetic, reproducible builds, use `--emit manifest` to generate actor metadata
+separately from compilation:
+
+```bash
+# Step 1: Generate actor metadata from headers
+pcc --emit manifest -I runtime/libpipit/include -I examples/ -o actors.meta.json
+
+# Step 2: Compile using manifest (hermetic — no header scanning)
+pcc source.pdl --actor-meta actors.meta.json --emit cpp -o source.cpp
+
+# Step 3: Inspect build provenance
+pcc --emit build-info source.pdl --actor-meta actors.meta.json
+```
+
+**`--emit manifest`** scans headers and outputs canonical `actors.meta.json`.
+Does not require a `.pdl` source file. Cannot be combined with `--actor-meta` (usage error).
+
+**`--emit build-info`** outputs provenance JSON (source hash, registry fingerprint,
+compiler version). Does not require a valid parse — provenance is about "what went in",
+not "does it compile".
+
+**Provenance in generated C++**: When compiling, the first line of generated C++
+includes a machine-parsable provenance comment:
+
+```cpp
+// pcc provenance: source_hash=<hex> registry_fingerprint=<hex> version=0.1.2
 ```
 
 ## Generated Binary Usage

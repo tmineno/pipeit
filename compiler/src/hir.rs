@@ -157,6 +157,179 @@ pub struct HirSetDirective {
     pub span: Span,
 }
 
+// ── Display ─────────────────────────────────────────────────────────────────
+
+use std::fmt;
+
+impl fmt::Display for HirProgram {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "HirProgram ({} consts, {} params, {} directives, {} tasks)",
+            self.consts.len(),
+            self.params.len(),
+            self.set_directives.len(),
+            self.tasks.len()
+        )?;
+        for c in &self.consts {
+            writeln!(f, "  const {} = {}", c.name, fmt_value(&c.value))?;
+        }
+        for p in &self.params {
+            writeln!(f, "  param {} = {}", p.name, fmt_scalar(&p.default_value))?;
+        }
+        for d in &self.set_directives {
+            writeln!(f, "  set {} = {}", d.name, fmt_set_value(&d.value))?;
+        }
+        for task in &self.tasks {
+            fmt_task(f, task)?;
+        }
+        Ok(())
+    }
+}
+
+fn fmt_task(f: &mut fmt::Formatter<'_>, task: &HirTask) -> fmt::Result {
+    match &task.body {
+        HirTaskBody::Pipeline(pipeline) => {
+            writeln!(f, "  task '{}' @ {} (pipeline)", task.name, task.freq_hz)?;
+            fmt_pipeline(f, pipeline, "    ")?;
+        }
+        HirTaskBody::Modal(modal) => {
+            let ctrl = match &modal.switch {
+                HirSwitchSource::Buffer(name, _) => format!("buffer:{}", name),
+                HirSwitchSource::Param(name, _) => format!("param:{}", name),
+            };
+            writeln!(
+                f,
+                "  task '{}' @ {} (modal, ctrl={})",
+                task.name, task.freq_hz, ctrl
+            )?;
+            writeln!(f, "    control:")?;
+            fmt_pipeline(f, &modal.control, "      ")?;
+            for (mode_name, pipeline) in &modal.modes {
+                writeln!(f, "    mode '{}':", mode_name)?;
+                fmt_pipeline(f, pipeline, "      ")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn fmt_pipeline(f: &mut fmt::Formatter<'_>, pipeline: &HirPipeline, indent: &str) -> fmt::Result {
+    for pipe in &pipeline.pipes {
+        write!(f, "{}", indent)?;
+        fmt_pipe_source(f, &pipe.source)?;
+        for elem in &pipe.elements {
+            write!(f, " | ")?;
+            fmt_pipe_elem(f, elem)?;
+        }
+        if let Some(ref sink) = pipe.sink {
+            write!(f, " -> {}", sink.buffer_name)?;
+        }
+        writeln!(f)?;
+    }
+    Ok(())
+}
+
+fn fmt_pipe_source(f: &mut fmt::Formatter<'_>, source: &HirPipeSource) -> fmt::Result {
+    match source {
+        HirPipeSource::ActorCall(call) => fmt_actor_call(f, call),
+        HirPipeSource::BufferRead(name, _) => write!(f, "buffer_read({})", name),
+        HirPipeSource::TapRef(name, _) => write!(f, "^{}", name),
+    }
+}
+
+fn fmt_pipe_elem(f: &mut fmt::Formatter<'_>, elem: &HirPipeElem) -> fmt::Result {
+    match elem {
+        HirPipeElem::ActorCall(call) => fmt_actor_call(f, call),
+        HirPipeElem::Tap(name, _) => write!(f, "~{}", name),
+        HirPipeElem::Probe(name, _) => write!(f, "?{}", name),
+    }
+}
+
+fn fmt_actor_call(f: &mut fmt::Formatter<'_>, call: &HirActorCall) -> fmt::Result {
+    write!(f, "{}", call.name)?;
+    if !call.type_args.is_empty() {
+        write!(f, "<")?;
+        for (i, (ty, _)) in call.type_args.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", ty)?;
+        }
+        write!(f, ">")?;
+    }
+    write!(f, "(")?;
+    for (i, arg) in call.args.iter().enumerate() {
+        if i > 0 {
+            write!(f, ", ")?;
+        }
+        fmt_arg(f, arg)?;
+    }
+    write!(f, ")")?;
+    if let Some(ref sc) = call.shape_constraint {
+        write!(f, "[")?;
+        for (i, dim) in sc.dims.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            match dim {
+                crate::ast::ShapeDim::Literal(n, _) => write!(f, "{}", n)?,
+                crate::ast::ShapeDim::ConstRef(ident) => write!(f, ":{}", ident.name)?,
+            }
+        }
+        write!(f, "]")?;
+    }
+    Ok(())
+}
+
+fn fmt_arg(f: &mut fmt::Formatter<'_>, arg: &Arg) -> fmt::Result {
+    match arg {
+        Arg::Value(val) => write!(f, "{}", fmt_value(val)),
+        Arg::ParamRef(ident) => write!(f, "${}", ident.name),
+        Arg::ConstRef(ident) => write!(f, ":{}", ident.name),
+        Arg::TapRef(ident) => write!(f, "^{}", ident.name),
+    }
+}
+
+fn fmt_value(value: &Value) -> String {
+    match value {
+        Value::Scalar(s) => fmt_scalar(s),
+        Value::Array(elems, _) => {
+            let items: Vec<String> = elems.iter().map(fmt_scalar).collect();
+            format!("[{}]", items.join(", "))
+        }
+    }
+}
+
+fn fmt_scalar(scalar: &Scalar) -> String {
+    match scalar {
+        Scalar::Number(n, _, _) => format_number(*n),
+        Scalar::Freq(hz, _) => format!("{}Hz", hz),
+        Scalar::Size(bytes, _) => format!("{}B", bytes),
+        Scalar::StringLit(s, _) => format!("\"{}\"", s),
+        Scalar::Ident(ident) => ident.name.clone(),
+    }
+}
+
+fn fmt_set_value(val: &SetValue) -> String {
+    match val {
+        SetValue::Number(n, _) => format_number(*n),
+        SetValue::Size(bytes, _) => format!("{}B", bytes),
+        SetValue::Freq(hz, _) => format!("{}Hz", hz),
+        SetValue::StringLit(s, _) => format!("\"{}\"", s),
+        SetValue::Ident(ident) => ident.name.clone(),
+    }
+}
+
+/// Format a number: integers without decimal, floats with decimal.
+fn format_number(n: f64) -> String {
+    if n == (n as i64) as f64 && n.abs() < 1e15 {
+        format!("{}", n as i64)
+    } else {
+        format!("{}", n)
+    }
+}
+
 // ── HIR Verification ────────────────────────────────────────────────────────
 
 use std::collections::HashSet;

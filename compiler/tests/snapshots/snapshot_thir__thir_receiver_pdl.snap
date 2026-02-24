@@ -1,0 +1,17 @@
+---
+source: compiler/tests/snapshot_thir.rs
+expression: output
+---
+ThirContext summary
+  extracted directives:
+    mem_bytes: 134217728
+    tick_rate_hz: 10000
+    timer_spin: None
+    overrun_policy: drop
+  param_cpp_types:
+    (none)
+  indexed entries:
+    tasks: [logger, receiver]
+    consts: [data_coeff, sync_coeff]
+    params: []
+    sets: [mem, overrun]

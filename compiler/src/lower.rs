@@ -13,13 +13,15 @@
 use std::collections::HashMap;
 
 use crate::ast::Span;
+use crate::diag::codes;
+use crate::diag::{DiagLevel, Diagnostic};
 use crate::hir::{
     HirActorCall, HirPipeElem, HirPipeExpr, HirPipeSource, HirPipeline, HirProgram, HirTask,
     HirTaskBody,
 };
 use crate::id::CallId;
 use crate::registry::{ActorMeta, PipitType, Registry, TokenCount};
-use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
+use crate::resolve::ResolvedProgram;
 use crate::type_infer::{can_widen, TypedProgram};
 
 // ── Output types ────────────────────────────────────────────────────────────
@@ -342,15 +344,20 @@ impl<'a> LowerEngine<'a> {
             }
 
             if src_type != tgt_type {
-                self.diagnostics.push(Diagnostic {
-                    level: DiagLevel::Error,
-                    span: tgt.call_span,
-                    message: format!(
-                        "lowering verification failed (L1 type consistency): edge type mismatch {} -> {}",
-                        src_type, tgt_type
-                    ),
-                    hint: None,
-                });
+                self.diagnostics.push(
+                    Diagnostic::new(
+                        DiagLevel::Error,
+                        tgt.call_span,
+                        format!(
+                            "lowering verification failed (L1 type consistency): \
+                             edge type mismatch {} -> {}",
+                            src_type, tgt_type
+                        ),
+                    )
+                    .with_code(codes::E0200)
+                    .with_related(src.call_span, format!("{} outputs {}", src.name, src_type))
+                    .with_related(tgt.call_span, format!("{} expects {}", tgt.name, tgt_type)),
+                );
                 ok = false;
             }
         }
@@ -364,19 +371,21 @@ impl<'a> LowerEngine<'a> {
 
         for wn in &self.widening_nodes {
             if !can_widen(wn.from_type, wn.to_type) {
-                self.diagnostics.push(Diagnostic {
-                    level: DiagLevel::Error,
-                    span: wn.target_span,
-                    message: format!(
-                        "lowering verification failed (L2 widening safety): \
-                         {} -> {} is not a safe widening chain",
-                        wn.from_type, wn.to_type
+                self.diagnostics.push(
+                    Diagnostic::new(
+                        DiagLevel::Error,
+                        wn.target_span,
+                        format!(
+                            "lowering verification failed (L2 widening safety): \
+                             {} -> {} is not a safe widening chain",
+                            wn.from_type, wn.to_type
+                        ),
+                    )
+                    .with_code(codes::E0201)
+                    .with_hint(
+                        "allowed chains: int8->int16->int32->float->double, cfloat->cdouble",
                     ),
-                    hint: Some(
-                        "allowed chains: int8->int16->int32->float->double, cfloat->cdouble"
-                            .to_string(),
-                    ),
-                });
+                );
                 ok = false;
             }
         }
@@ -393,14 +402,15 @@ impl<'a> LowerEngine<'a> {
                 let in_count = &tgt_meta.in_count;
                 if let TokenCount::Literal(n) = in_count {
                     if *n == 0 {
-                        self.diagnostics.push(Diagnostic {
-                            level: DiagLevel::Error,
-                            span: wn.target_span,
-                            message: "lowering verification failed (L3 rate/shape preservation): \
-                                 widening target has zero-rate input"
-                                .to_string(),
-                            hint: None,
-                        });
+                        self.diagnostics.push(
+                            Diagnostic::new(
+                                DiagLevel::Error,
+                                wn.target_span,
+                                "lowering verification failed (L3 rate/shape preservation): \
+                                 widening target has zero-rate input",
+                            )
+                            .with_code(codes::E0202),
+                        );
                         ok = false;
                     }
                 }
@@ -453,29 +463,35 @@ impl<'a> LowerEngine<'a> {
                 let call_id = call.call_id;
                 if let Some(concrete) = self.concrete_actors.get(&call_id) {
                     if concrete.is_polymorphic() {
-                        self.diagnostics.push(Diagnostic {
-                            level: DiagLevel::Error,
-                            span: call.call_span,
-                            message: format!(
-                                "lowering verification failed (L4 monomorphization soundness): \
-                                 polymorphic actor '{}' not fully monomorphized",
-                                call.name
-                            ),
-                            hint: Some("specify type arguments explicitly".to_string()),
-                        });
+                        self.diagnostics.push(
+                            Diagnostic::new(
+                                DiagLevel::Error,
+                                call.call_span,
+                                format!(
+                                    "lowering verification failed (L4 monomorphization soundness): \
+                                     polymorphic actor '{}' not fully monomorphized",
+                                    call.name
+                                ),
+                            )
+                            .with_code(codes::E0203)
+                            .with_hint("specify type arguments explicitly"),
+                        );
                         *ok = false;
                     }
                 } else {
-                    self.diagnostics.push(Diagnostic {
-                        level: DiagLevel::Error,
-                        span: call.call_span,
-                        message: format!(
-                            "lowering verification failed (L4 monomorphization soundness): \
-                             polymorphic actor '{}' has no concrete instance",
-                            call.name
-                        ),
-                        hint: Some("specify type arguments explicitly".to_string()),
-                    });
+                    self.diagnostics.push(
+                        Diagnostic::new(
+                            DiagLevel::Error,
+                            call.call_span,
+                            format!(
+                                "lowering verification failed (L4 monomorphization soundness): \
+                                 polymorphic actor '{}' has no concrete instance",
+                                call.name
+                            ),
+                        )
+                        .with_code(codes::E0204)
+                        .with_hint("specify type arguments explicitly"),
+                    );
                     *ok = false;
                 }
             }
@@ -498,29 +514,33 @@ impl<'a> LowerEngine<'a> {
                     Span::new((), 0..0)
                 });
             if !meta.in_type.is_concrete() {
-                self.diagnostics.push(Diagnostic {
-                    level: DiagLevel::Error,
-                    span,
-                    message: format!(
-                        "lowering verification failed (L5 no fallback typing): \
+                self.diagnostics.push(
+                    Diagnostic::new(
+                        DiagLevel::Error,
+                        span,
+                        format!(
+                            "lowering verification failed (L5 no fallback typing): \
                          actor '{}' has unresolved input type '{}'",
-                        meta.name, meta.in_type
-                    ),
-                    hint: None,
-                });
+                            meta.name, meta.in_type
+                        ),
+                    )
+                    .with_code(codes::E0205),
+                );
                 ok = false;
             }
             if !meta.out_type.is_concrete() {
-                self.diagnostics.push(Diagnostic {
-                    level: DiagLevel::Error,
-                    span,
-                    message: format!(
-                        "lowering verification failed (L5 no fallback typing): \
+                self.diagnostics.push(
+                    Diagnostic::new(
+                        DiagLevel::Error,
+                        span,
+                        format!(
+                            "lowering verification failed (L5 no fallback typing): \
                          actor '{}' has unresolved output type '{}'",
-                        meta.name, meta.out_type
-                    ),
-                    hint: None,
-                });
+                            meta.name, meta.out_type
+                        ),
+                    )
+                    .with_code(codes::E0206),
+                );
                 ok = false;
             }
         }
@@ -789,6 +809,19 @@ mod tests {
             "L1 should fail for mismatched types"
         );
         assert!(engine.diagnostics.iter().any(|d| d.message.contains("L1")));
+        // Enriched diagnostic should have related_spans for source and target actors
+        let l1_diag = engine
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("L1"))
+            .unwrap();
+        assert_eq!(
+            l1_diag.related_spans.len(),
+            2,
+            "L1 diagnostic should have 2 related spans (src + tgt)"
+        );
+        assert!(l1_diag.related_spans[0].label.contains("outputs"));
+        assert!(l1_diag.related_spans[1].label.contains("expects"));
     }
 
     #[test]
@@ -1109,8 +1142,8 @@ mod tests {
     // ── Regression tests for Phase 2c ──────────────────────────────────
 
     fn lower_source(source: &str) -> LowerResult {
+        use crate::diag::DiagLevel;
         use crate::registry::Registry;
-        use crate::resolve::DiagLevel;
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()

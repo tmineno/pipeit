@@ -1,0 +1,36 @@
+---
+source: compiler/tests/snapshot_lir.rs
+expression: output
+---
+LirProgram (2 consts, 1 params, 1 inter-task bufs, 2 tasks, 1 probes)
+  const coeff: float[5] = [0.1f, 0.2f, 0.4f, 0.2f, 0.1f]
+  const fft_size = 256
+  param gain: float = "1" (cli: std::stof)
+  directives: mem=67108864, overrun=drop, timer=Fixed(10000)
+  inter-task signal: float[512] readers=1 [drain]
+  task 'capture' @ 10000000Hz K=1000
+    edge_buffers: _e0_1: float[1280], _e1_2: float[1280], _e2_3: cfloat[1280], _e4_5: float[1280], _e5_6: float[256], _e8_9: float[1280]
+    firings:
+      fused [x5]:
+        hoist _actor_0 = Actor_constant<float>(0, dim(256))
+        hoist _actor_1 = Actor_mul<float>($gain, dim(256))
+        hoist _actor_2 = Actor_fft(256)
+        hoist _actor_4 = Actor_c2r(dim(256))
+        hoist _actor_8 = Actor_mag(dim(256))
+        [x5] Actor_constant<float><float>(0, dim(256)) -> [_e0_1]
+        [x5] Actor_mul<float><float>($gain, dim(256)) [_e0_1] -> [_e1_2]
+        [x5] Actor_fft<cfloat>(256) [_e1_2] -> [_e2_3]
+        [x1280] fork(~raw)
+        [x5] Actor_c2r<float>(dim(256)) [_e2_3] -> [_e4_5]
+        [x5] Actor_mag<float>(dim(256)) [_e2_3] -> [_e8_9]
+      [x256] Actor_fir<float><float>(:coeff[5], dim(5)) [_e4_5] -> [_e5_6]
+      [x1280] Actor_stdout<float><void>() [_e8_9] -> []
+      [x256] probe(?filtered) _e5_6 tokens=256
+      [x256] buf_write(signal) <- _e5_6 tokens=256
+  task 'drain' @ 10000000Hz K=1000
+    edge_buffers: _e10_11: float[256], _e11_12: float[1]
+    firings:
+      [x256] buf_read(signal) -> _e10_11 tokens=256
+      Actor_decimate<float><float>(256) [_e10_11] -> [_e11_12]
+      Actor_csvwrite<void>("output.csv") [_e11_12] -> []
+  probe filtered

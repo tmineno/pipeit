@@ -15,6 +15,8 @@ use std::time::Instant;
 use crate::analyze::AnalyzedProgram;
 use crate::ast::Program;
 use crate::codegen::{CodegenOptions, GeneratedCode};
+use crate::diag::codes;
+use crate::diag::{DiagLevel, Diagnostic};
 use crate::graph::ProgramGraph;
 use crate::hir::HirProgram;
 use crate::id::IdAllocator;
@@ -22,7 +24,7 @@ use crate::lir::LirProgram;
 use crate::lower::{Cert, LoweredProgram};
 use crate::pass::{descriptor, required_passes, PassId, StageCert};
 use crate::registry::Registry;
-use crate::resolve::{DiagLevel, Diagnostic, ResolvedProgram};
+use crate::resolve::ResolvedProgram;
 use crate::schedule::ScheduledProgram;
 use crate::type_infer::TypedProgram;
 
@@ -49,13 +51,81 @@ pub struct DownstreamArtifacts {
     pub generated: Option<GeneratedCode>,
 }
 
-/// Provenance metadata for future cache-key use.
-/// Fields are NOT computed in this phase — struct is defined for API stability.
-/// Actual hash computation deferred to Phase 3b when caching is implemented.
+/// Provenance metadata for hermetic builds and cache-key use.
+///
+/// `source_hash`: SHA-256 of the raw `.pdl` source text.
+/// `registry_fingerprint`: SHA-256 of canonical compact JSON from `Registry::canonical_json()`.
+/// `compiler_version`: crate version from `Cargo.toml`.
+#[derive(Debug, Clone)]
 pub struct Provenance {
     pub source_hash: [u8; 32],
     pub registry_fingerprint: [u8; 32],
     pub compiler_version: &'static str,
+}
+
+impl Provenance {
+    /// Hex string of the source hash (64 characters).
+    pub fn source_hash_hex(&self) -> String {
+        bytes_to_hex(&self.source_hash)
+    }
+
+    /// Hex string of the registry fingerprint (64 characters).
+    pub fn registry_fingerprint_hex(&self) -> String {
+        bytes_to_hex(&self.registry_fingerprint)
+    }
+
+    /// Serialize provenance as a JSON string for `--emit build-info`.
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\n  \"source_hash\": \"{}\",\n  \"registry_fingerprint\": \"{}\",\n  \"manifest_schema_version\": 1,\n  \"compiler_version\": \"{}\"\n}}\n",
+            self.source_hash_hex(),
+            self.registry_fingerprint_hex(),
+            self.compiler_version,
+        )
+    }
+}
+
+fn bytes_to_hex(bytes: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(s, "{:02x}", b);
+    }
+    s
+}
+
+/// Compute provenance from source text and registry.
+///
+/// Uses SHA-256 for both hashes. The registry fingerprint is computed from
+/// `Registry::canonical_json()` (compact JSON, no whitespace) to ensure
+/// stability independent of display formatting.
+pub fn compute_provenance(source: &str, registry: &Registry) -> Provenance {
+    use sha2::{Digest, Sha256};
+
+    let source_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(source.as_bytes());
+        let result = hasher.finalize();
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&result);
+        hash
+    };
+
+    let registry_fingerprint = {
+        let canonical = registry.canonical_json();
+        let mut hasher = Sha256::new();
+        hasher.update(canonical.as_bytes());
+        let result = hasher.finalize();
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&result);
+        hash
+    };
+
+    Provenance {
+        source_hash,
+        registry_fingerprint,
+        compiler_version: env!("CARGO_PKG_VERSION"),
+    }
 }
 
 /// Holds all compilation artifacts and accumulated diagnostics.
@@ -252,12 +322,12 @@ pub fn run_pipeline(
                         .filter(|(_, ok)| !ok)
                         .map(|(name, _)| *name)
                         .collect();
-                    let diags = vec![Diagnostic {
-                        level: DiagLevel::Error,
-                        message: format!("HIR verification failed: {}", failed.join(", ")),
-                        span: state.upstream.hir.as_ref().unwrap().program_span,
-                        hint: None,
-                    }];
+                    let diags = vec![Diagnostic::new(
+                        DiagLevel::Error,
+                        state.upstream.hir.as_ref().unwrap().program_span,
+                        format!("HIR verification failed: {}", failed.join(", ")),
+                    )
+                    .with_code(codes::E0600)];
                     finish_pass(
                         state,
                         PassId::BuildHir,
@@ -300,13 +370,14 @@ pub fn run_pipeline(
                 let elapsed = t.elapsed();
                 let mut diags = result.diagnostics;
                 if !result.cert.all_pass() {
-                    diags.push(Diagnostic {
-                        level: DiagLevel::Error,
-                        message: "lowering verification failed (L1-L5 obligations not met)"
-                            .to_string(),
-                        span: state.upstream.hir.as_ref().unwrap().program_span,
-                        hint: None,
-                    });
+                    diags.push(
+                        Diagnostic::new(
+                            DiagLevel::Error,
+                            state.upstream.hir.as_ref().unwrap().program_span,
+                            "lowering verification failed (L1-L5 obligations not met)",
+                        )
+                        .with_code(codes::E0601),
+                    );
                 }
                 state.upstream.cert = Some(result.cert);
                 state.upstream.lowered = Some(result.lowered);
@@ -408,12 +479,14 @@ fn run_thir_and_downstream(
                 .filter(|(_, ok)| !ok)
                 .map(|(name, _)| *name)
                 .collect();
-            diags.push(Diagnostic {
-                level: DiagLevel::Error,
-                message: format!("schedule verification failed: {}", failed.join(", ")),
-                span: thir.hir.program_span,
-                hint: None,
-            });
+            diags.push(
+                Diagnostic::new(
+                    DiagLevel::Error,
+                    thir.hir.program_span,
+                    format!("schedule verification failed: {}", failed.join(", ")),
+                )
+                .with_code(codes::E0602),
+            );
         }
         finish_pass_core(
             &mut state.diagnostics,
@@ -447,12 +520,12 @@ fn run_thir_and_downstream(
                 .filter(|(_, ok)| !ok)
                 .map(|(name, _)| *name)
                 .collect();
-            let diags = vec![Diagnostic {
-                level: DiagLevel::Error,
-                message: format!("LIR verification failed: {}", failed.join(", ")),
-                span: thir.hir.program_span,
-                hint: None,
-            }];
+            let diags = vec![Diagnostic::new(
+                DiagLevel::Error,
+                thir.hir.program_span,
+                format!("LIR verification failed: {}", failed.join(", ")),
+            )
+            .with_code(codes::E0603)];
             finish_pass_core(
                 &mut state.diagnostics,
                 &mut state.has_error,
