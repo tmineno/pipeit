@@ -11,8 +11,8 @@ LirProgram (0 consts, 2 params, 0 inter-task bufs, 2 tasks, 0 probes)
     firings:
       Actor_socket_read<float>("localhost:9200", dim(1)) -> [_e2_3]
       Actor_stdout<float><void>() [_e2_3] -> []
-  task 'sender' @ 1000000000Hz K=100000
-    edge_buffers: _e0_1: float[1]
+  task 'sender' @ 100000000Hz K=500
+    edge_buffers: _e0_1: float[256]
     firings:
-      Actor_sine<float><float>($freq, $amp, dim(1)) -> [_e0_1]
-      Actor_socket_write<void>("localhost:9100", 0, dim(1)) [_e0_1] -> []
+      Actor_sine<float><float>($freq, $amp, dim(256)) -> [_e0_1]
+      Actor_socket_write<void>("localhost:9100", 0, dim(256)) [_e0_1] -> []

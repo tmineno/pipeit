@@ -15,7 +15,7 @@ LirProgram (2 consts, 0 params, 3 inter-task bufs, 2 tasks, 2 probes)
       [x2560000] buf_read(payload) -> _e14_15 tokens=2560000
       Actor_decimate<float><float>(2560000) [_e14_15] -> [_e15_16]
       Actor_csvwrite<void>("received.csv") [_e15_16] -> []
-  task 'receiver' @ 10000000Hz K=1000
+  task 'receiver' @ 10000000Hz K=500
     ctrl: edge(_e2_3[0])
     control subgraph:
       edge_buffers: _e0_1: float[64], _e1_2: float[1], _e2_3: int32_t[1]

@@ -8,7 +8,7 @@ LirProgram (2 consts, 1 params, 1 inter-task bufs, 2 tasks, 1 probes)
   param gain: float = "1" (cli: std::stof)
   directives: mem=67108864, overrun=drop, timer=Fixed(10000)
   inter-task signal: float[512] readers=1 [drain]
-  task 'capture' @ 10000000Hz K=1000
+  task 'capture' @ 10000000Hz K=500
     edge_buffers: _e0_1: float[1280], _e1_2: float[1280], _e2_3: cfloat[1280], _e4_5: float[1280], _e5_6: float[256], _e8_9: float[1280]
     firings:
       fused [x5]:
@@ -27,7 +27,7 @@ LirProgram (2 consts, 1 params, 1 inter-task bufs, 2 tasks, 1 probes)
       [x1280] Actor_stdout<float><void>() [_e8_9] -> []
       [x256] probe(?filtered) _e5_6 tokens=256
       [x256] buf_write(signal) <- _e5_6 tokens=256
-  task 'drain' @ 10000000Hz K=1000
+  task 'drain' @ 10000000Hz K=500
     edge_buffers: _e10_11: float[256], _e11_12: float[1]
     firings:
       [x256] buf_read(signal) -> _e10_11 tokens=256
