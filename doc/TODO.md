@@ -148,32 +148,85 @@
 
 ---
 
-## v0.4.1 - Release Gate & Deterministic Keys (Low-Medium Complexity)
+## v0.4.1 - Memory Plan: Low-Copy Codegen & SPSC Optimization
 
-**Goal**: Close release-gating uncertainty and establish deterministic invalidation/provenance key behavior for safe patch rollout.
+**Goal**: Move generated C++ toward "pointers + fixed-length arrays" within tasks and "minimal fence + minimal copy" at shared boundaries, targeting IPC/SIMD-dominated execution.
 
-- [ ] Run formal KPI A/B benchmark against v0.3.4 baseline (`compiler_bench_stable.sh --baseline-ref v0.3.4`).
-- [ ] Record release disposition for compile-latency regression after benchmark review.
+> **Reference**: review-0003 (memory plan). Design principle: classify edges into intra-task (no atomics, scalar/local buffer), inter-task (block RingBuffer I/O only), and fork/probe/tap (alias within task, block I/O across boundary).
+
+### Deterministic Keys
+
 - [ ] Implement deterministic `invalidation_key` hashing.
 - [ ] Integrate manifest/header provenance into cache keys and diagnostics.
 
-## v0.4.2 - Cache and Latency Recovery (High Complexity)
+### Phase A: Codegen-Centric Optimization (Minimal Runtime Change)
 
-**Goal**: Recover compile-latency regression and add reusable artifact caching without changing compiler semantics.
+- [ ] Add memory kind annotation to LIR edges (`intra` / `shared` / `alias`)
+- [ ] Scalarize token=1 intra-task edges (`T x` instead of buffer)
+- [ ] Reduce `_in_*` concatenation copies for multi-input actors (direct reference or minimal pack)
+- [ ] Align intra-task edge buffers to `alignas(64)`
+- [ ] Emit `assume_aligned` / `__restrict__` hints in generated code where applicable
+- [ ] Simplify param sync to single-stage load (`write -> local`, one load per tick)
+- [ ] Add locality score to scheduler ready-set selection (within constraint bounds)
 
+> **Risk**: items 2/4/6 are low risk (local, no semantic change); items 3/7 are medium risk (ordering constraints).
+
+### Phase B: SPSC Ring Buffer (Small Runtime Addition, High Impact)
+
+- [ ] Add `Readers=1` specialized SPSC ring buffer implementation in `pipit.h`
+- [ ] Static reader-count detection in codegen; auto-select SPSC path when `reader_count == 1`
+- [ ] Optimize retry/wait strategy for SPSC (spin → yield → backoff tuning)
+- [ ] Evaluate relaxed memory ordering for SPSC self-tail (non-data-visibility fields)
+
+> **Risk**: Medium — performance optimization must preserve ordering guarantees.
+
+### Phase C: Block Pool & Pointer Ring (Experimental)
+
+- [ ] Introduce block pool + index ring (pointer ring) for zero-copy shared transfers
+- [ ] Manage multi-reader reclamation via reference count or epoch-based scheme
+- [ ] Maintain existing data ring as compatibility fallback; staged migration
+- [ ] Gate behind `--experimental` flag; Human Decision required before enabling by default
+
+> **Risk**: High — memory reclamation model correctness is the key difficulty.
+
+### Verification Plan
+
+- Correctness: `cargo test --manifest-path compiler/Cargo.toml`
+- Benchmarks: `./benches/run_all.sh --filter ringbuf --filter e2e --output-dir tmp/bench_memplan`
+- Microarch: `perf stat -e cycles,instructions,LLC-loads,LLC-load-misses,stalled-cycles-backend`
+- Success criteria: LLC miss rate reduction, IPC increase, `read_fail_pct` improvement, e2e throughput maintained or improved
+
+### Human Decision Points
+
+1. Enable Phase A+B by default, or gate behind opt-in flag?
+2. Deploy Phase C under `--experimental` flag first?
+3. SPSC implementation API surface: maintain existing `RingBuffer<T, Cap, Readers>` template compatibility?
+
+### Impact Scope
+
+- **compiler**: `codegen.rs`, `lir.rs`, `schedule.rs`, (if needed) `analyze.rs`
+- **runtime**: `pipit.h` (RingBuffer branching / SPSC addition)
+- **tests/benches**: codegen snapshots, integration, runtime ringbuf/e2e
+
+## v0.4.2 - Diagnostics Completion (Medium Complexity)
+
+**Goal**: Complete diagnostics provenance and ambiguity guidance to improve debuggability and remediation clarity.
+
+- [ ] Add full provenance tracing through the constraint solver.
+- [ ] Improve ambiguity/mismatch diagnostics with candidate and remediation suggestions.
+
+## v0.4.3 - Compiler Latency Profiling & Recovery (High Complexity)
+
+**Goal**: Measure and recover compile-latency regression; add reusable artifact caching without changing compiler semantics.
+
+- [ ] Run formal KPI A/B benchmark against v0.3.4 baseline (`compiler_bench_stable.sh --baseline-ref v0.3.4`).
+- [ ] Record release disposition for compile-latency regression after benchmark review.
 - [ ] Add artifact hashing and reusable cache for heavy phases.
 - [ ] Profile per-phase time (`build_hir`, `build_thir`, `build_lir`, `codegen`) and rank dominant costs.
 - [ ] Reduce allocation/clone overhead in `build_lir`.
 - [ ] Evaluate lazy/on-demand LIR field materialization for codegen-only paths.
 - [ ] Audit `precompute_metadata()` duplication against analysis-owned data.
 - [ ] Re-measure after each optimization; target per-scenario latency within 10% of `7248b44`.
-
-## v0.4.3 - Diagnostics Completion (Medium Complexity)
-
-**Goal**: Complete diagnostics provenance and ambiguity guidance to improve debuggability and remediation clarity.
-
-- [ ] Add full provenance tracing through the constraint solver.
-- [ ] Improve ambiguity/mismatch diagnostics with candidate and remediation suggestions.
 
 ---
 
