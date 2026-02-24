@@ -250,11 +250,11 @@ case "$ID_SOURCE" in
         ;;
 esac
 
-# Skip if HEAD commit does not touch compiler/ files.
+# Skip if HEAD commit does not touch Rust source in compiler/.
 # pre-commit post-commit stage provides no file list, so we check here.
-compiler_changed="$(git -C "$PROJECT_ROOT" diff --name-only HEAD~1 HEAD -- compiler/ 2>/dev/null || true)"
-if [ -z "$compiler_changed" ]; then
-    log "no compiler/ files changed in HEAD — skipping"
+compiler_rs_changed="$(git -C "$PROJECT_ROOT" diff --name-only HEAD~1 HEAD -- 'compiler/src/*.rs' 'compiler/tests/*.rs' 2>/dev/null || true)"
+if [ -z "$compiler_rs_changed" ]; then
+    log "no compiler Rust source changed in HEAD — skipping"
     exit 0
 fi
 
