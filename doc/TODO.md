@@ -126,170 +126,54 @@
 
 ---
 
-## v0.4.0 - Compiler Architecture Rebuild (IR Unification + Pass Manager)
+## v0.4.0 - Compiler Architecture Rebuild (IR Unification + Pass Manager) ✅
 
 **Goal**: Perform a large architecture transition so all downstream phases consume one typed/lowered IR contract, pass execution is dependency-driven, and backend/runtime responsibilities are clearly separated.
 
-> **Execution discipline**: each major phase is split into (1) mechanical reshape, (2) behavior-locked change with tests, (3) optimization/cleanup.
+- [x] Contract freeze completed via `pcc-spec-v0.4.0.md` and ADR-020/021/022/023, including backward-compatibility gate policy.
+- [x] Production pipeline unified to `AST -> HIR -> THIR -> LIR`, with graph/analyze/schedule/codegen consuming the new contracts.
+- [x] Pass manager shipped with minimal-pass evaluation (`required_passes`) and deterministic orchestration.
+- [x] Stage-scoped verification framework integrated into compiler flow and CI.
+- [x] Diagnostics architecture upgraded (stable codes, JSON diagnostics mode, related spans, cause chain).
+- [x] Backend/runtime boundary refactored through runtime shell extraction (`pipit_shell.h`) and descriptor-based codegen.
+- [x] Registry determinism delivered (`--emit manifest`, `--emit build-info`, provenance stamping, manifest-first CMake integration).
+- [x] Migration/test hardening completed (HIR/THIR/LIR snapshots, pipeline equivalence tests, property tests, full matrix green).
+- [x] Major codegen simplification achieved (`codegen.rs`: 5,106 -> 2,630 LOC).
 
-### Baseline Snapshot (2026-02-21)
+### Deferred Follow-up
 
-- Compiler core footprint (`main/resolve/type_infer/lower/graph/analyze/schedule/codegen/registry/dim_resolve/subgraph_index`): **16,986 LOC**
-- Major hotspot files: `codegen.rs` (4,152 LOC), `analyze.rs` (3,264 LOC), `registry.rs` (1,683 LOC), `graph.rs` (1,738 LOC), `resolve.rs` (1,562 LOC)
-- Structural drift resolved: all semantic phases (`type_infer/lower/graph/analyze/schedule/codegen`) now consume HIR/ThirContext/LIR — no direct AST consumption remains
+- Pre-refactor baseline for KPI comparison: `7248b44` (v0.3.4).
+- Post-Phase-2c observed regression point: `e758c03` (simple +14.7%, multitask +31.9%, complex +36.8%, modal +47.7%).
+- Open items are deferred to `v0.4.x` and grouped below by patch-version complexity.
 
-### Phase 0: Spec/ADR Contract Freeze (Design Gate)
+---
 
-- [x] Publish `doc/spec/pcc-spec-v0.4.0.md` with explicit IR boundaries (`AST -> HIR -> THIR -> LIR`) and pass ownership
-- [x] Add ADR: pass manager architecture, artifact model, and cache invalidation rules (`doc/adr/020-pass-manager-artifact-model-and-invalidation.md`)
-- [x] Add ADR: stable semantic IDs (replace span-keyed semantic maps with stable IDs for identity) (`doc/adr/021-stable-semantic-ids-over-span-keys.md`)
-- [x] Add ADR: diagnostics data model (`code`, primary/secondary spans, cause chain, machine-readable payload) (`doc/adr/022-unified-diagnostics-model-with-cause-chain.md`)
-- [x] Backward-compatibility decision gate: keep v0.3 language/CLI behavior unless marked as explicit breaking change (`doc/adr/023-v040-backward-compatibility-gate.md`, `doc/spec/pcc-spec-v0.4.0.md`)
+## v0.4.1 - Release Gate & Deterministic Keys (Low-Medium Complexity)
 
-### Phase 1: Mechanical Foundations (No Behavior Change) ✅
+**Goal**: Close release-gating uncertainty and establish deterministic invalidation/provenance key behavior for safe patch rollout.
 
-- [x] Lock behavior with snapshot tests to guarantee byte-equivalent output before semantic changes (insta snapshots for 7 examples, codegen determinism fix)
-- [x] Centralize graph traversal helpers (`subgraphs`, node/edge lookup, back-edge detection) to remove duplicated local implementations (`subgraph_index.rs` + `GraphQueryCtx`)
-- [x] Add shared program query helpers for `set`/task lookups currently duplicated across phases (`program_query.rs`)
-- [x] Introduce stable IDs (`CallId`/`DefId`/`TaskId`) for calls/nodes/definitions and thread them through resolve/type/lower/graph/analyze/schedule/codegen (`id.rs`)
-- [x] Remove span-as-primary-key usage from semantic tables (`HashMap<Span, ...>` → `HashMap<CallId, ...>` for all 5 semantic maps)
+- [ ] Run formal KPI A/B benchmark against v0.3.4 baseline (`compiler_bench_stable.sh --baseline-ref v0.3.4`).
+- [ ] Record release disposition for compile-latency regression after benchmark review.
+- [ ] Implement deterministic `invalidation_key` hashing.
+- [ ] Integrate manifest/header provenance into cache keys and diagnostics.
 
-### Phase 2: IR Unification (Behavior Change, Diff Locked)
+## v0.4.2 - Cache and Latency Recovery (High Complexity)
 
-#### Phase 2a: HIR + ThirContext + Consumer Migration ✅
+**Goal**: Recover compile-latency regression and add reusable artifact caching without changing compiler semantics.
 
-- [x] Introduce HIR normalization pass (`hir.rs`): define expansion, modal normalization, tap/buffer explicitness; AST+resolved → `HirProgram`
-- [x] Build ThirContext wrapper (`thir.rs`): unified query API over HIR + resolved + typed + lowered + registry + precomputed metadata
-- [x] Migrate `graph` to consume `HirProgram` (remove ~200 LOC define inlining + arg substitution)
-- [x] Migrate `analyze` and `schedule` to consume `ThirContext` instead of `&Program` + `&ResolvedProgram`
-- [x] Migrate dim-resolution queries into ThirContext methods (resolve_port_rate, infer_dim_param_from_span_args, span_arg_length_for_dim)
-- [x] Update pipeline driver (`main.rs`) and all test/bench callers; all 500+ tests passing with byte-identical C++ output
+- [ ] Add artifact hashing and reusable cache for heavy phases.
+- [ ] Profile per-phase time (`build_hir`, `build_thir`, `build_lir`, `codegen`) and rank dominant costs.
+- [ ] Reduce allocation/clone overhead in `build_lir`.
+- [ ] Evaluate lazy/on-demand LIR field materialization for codegen-only paths.
+- [ ] Audit `precompute_metadata()` duplication against analysis-owned data.
+- [ ] Re-measure after each optimization; target per-scenario latency within 10% of `7248b44`.
 
-#### Phase 2b: LIR Introduction + Codegen Migration ✅
+## v0.4.3 - Diagnostics Completion (Medium Complexity)
 
-- [x] Fix ThirContext `overrun_policy` default ("stop" → "drop") to match codegen behavior
-- [x] ADR-025: LIR backend IR design decisions
-- [x] Introduce LIR types (`lir.rs`): `LirProgram`, tasks, firings, actor args, edge buffers, modal/ctrl, directives
-- [x] Implement LIR builder: `build_lir(thir, graph, analysis, schedule) -> LirProgram` (no `&Program` needed)
-- [x] Migrate codegen globals: const/param/buffer/stats/directives read from LIR
-- [x] Migrate codegen task structure: param reads, CLI parsing, probe init, thread launch from LIR
-- [x] Migrate codegen firing emissions: actor calls, fork, probe, buffer I/O, fusion from LIR
-- [x] Migrate codegen modal/ctrl: ctrl source read, mode dispatch, feedback resets from LIR
-- [x] Add `codegen_from_lir()` public API
-- [x] Fix LIR edge cases: probe parenthesization, buffer I/O retry naming, param type inference alignment, loop suppression for passthrough/block-transfer nodes, CLI param ordering
-- [x] Switch pipeline driver (`main.rs`), snapshot tests, and bench to route through `codegen_from_lir`
-- [x] Remove old inline-resolution code paths from codegen: `codegen.rs` 5,106 → 2,630 LOC (48.5% reduction); `codegen_from_lir()` signature narrowed from 9 to 4 params (`graph`, `schedule`, `options`, `lir`)
+**Goal**: Complete diagnostics provenance and ambiguity guidance to improve debuggability and remediation clarity.
 
-#### Phase 2c: Type Infer + Lower Migration ✅
-
-- [x] Preserve type_args spans in `HirActorCall` (`Vec<String>` → `Vec<(String, Span)>`)
-- [x] Reorder pipeline: `build_hir` before `type_infer` and `lower`
-- [x] Migrate `type_infer` to consume `&HirProgram` — remove define body recursion (~70 LOC), add `target_call_id: CallId` to `WideningPoint`
-- [x] Migrate `lower` to consume `&HirProgram` — remove `CallResolution::Define` filtering, match widenings by `CallId` instead of span
-- [x] Fix CallId aliasing: fresh CallIds per define expansion (depth > 0)
-- [x] Fix param type resolution for define-expanded calls (concrete_actors now includes expanded calls)
-- [x] Update all callers (main, tests, bench) and snapshots
-- [x] Regression tests: define polymorphism in two contexts, explicit type args, expanded calls in lower
-
-### Phase 3: Pass Manager + Minimal Evaluation
-
-- [x] Implement pass registry with declared inputs, outputs, invariants, and invalidation keys (`pass.rs`: `PassId`, `ArtifactId`, `PassDescriptor`, dependency resolution)
-- [x] Compute minimal pass subset for each `--emit` target via `required_passes(terminal)` topological walk
-- [x] Pipeline orchestration module (`pipeline.rs`): `CompilationState` with borrow-split artifacts, `run_pipeline()` with `on_pass_complete` callback
-- [x] Migrate `main.rs` to delegate pass execution to `run_pipeline()` (parse + `--emit ast` remain outside runner)
-- [x] Keep deterministic ordering and reproducible outputs (all 7 snapshots byte-identical)
-- [x] Provenance type stubs (`Provenance` struct) for future cache-key use
-- [ ] Implement deterministic `invalidation_key` hashing (deferred to Phase 3b)
-- [ ] Add artifact hashing and reusable cache for heavy phases (deferred to Phase 3c)
-- [ ] Integrate manifest/header provenance into cache keys and diagnostics (type stubs placed; implementation deferred to Phase 3b/3c)
-
-#### Compile Latency Recovery (observed regression post-Phase 2)
-
-> **Baseline**: `7248b44` (v0.3.4, pre-refactor) → `e758c03` (post-Phase 2c merge)
-> Regression: simple +14.7%, multitask +31.9%, complex +36.8%, modal +47.7%
-> Root cause: added IR construction passes (HIR → THIR → LIR) before codegen.
-
-- [ ] Profile per-phase time breakdown (`build_hir`, `build_thir`, `build_lir`, `codegen`) to locate dominant cost
-- [ ] Reduce allocation/clone overhead in LIR builder (`build_lir` constructs full deep copies of actor args, edge buffers, firing metadata)
-- [ ] Evaluate lazy/on-demand LIR field population — skip pre-resolving fields codegen never reads
-- [ ] Audit ThirContext precomputed metadata cost — `precompute_metadata()` may duplicate work already available in analysis
-- [ ] Re-measure after each optimization; target: per-scenario latency within 10% of `7248b44` baseline
-
-### Phase 4: Verification Framework Generalization ✅
-
-- [x] Generalize lower-only `Cert` model into stage-scoped verification framework (`StageCert` trait in `pass.rs`)
-- [x] Add `verify_hir` (H1-H3), `verify_schedule` (S1-S2), `verify_lir` (R1-R2)
-- [x] `verify_thir` not needed — ThirContext is a borrow-aggregation view; correctness validated transitively by upstream certs
-- [x] Wire verification into pipeline runner with cert-failure-through-callback pattern
-- [x] Promote proof obligations to CI gates (verification runs in `cargo test`; debug profile only — release matrix deferred to Phase 8)
-- [x] Add regression corpus (`verify_regression.rs`: 7 example files + negative test)
-- [x] Keep existing L1-L5 guarantees as strict subset (`impl StageCert for Cert`)
-
-### Phase 5: Diagnostics Architecture Upgrade ✅
-
-- [x] Introduce unified diagnostic payload: `code`, `level`, `message`, primary span, related spans, hint, cause chain (`diag.rs`)
-- [x] Add stable diagnostic codes (54 codes: E0001-E0603, W0001-W0400) and compatibility policy (`DIAGNOSTIC_CODES.md`, uniqueness test)
-- [x] Assign codes to all ~51 emission sites across 7 phase modules
-- [x] Fix hint-dropping bug in `print_pipeline_diags()` (main.rs)
-- [x] Add machine-readable diagnostics mode (`--diagnostic-format json`) with unified JSONL schema for both semantic and parse errors
-- [x] Add exemplar `related_spans` and `cause_chain` for propagated constraint failures (E0200 L1 type consistency, E0303 type mismatch, E0304 SDF balance)
-- [x] Migrate all diagnostic imports from `crate::resolve` to `crate::diag`
-- [ ] Full provenance tracing through constraint solver (deferred to Phase 6+)
-- [ ] Improve ambiguity and mismatch diagnostics with candidate and remediation suggestions (deferred to v0.5.x)
-
-### Phase 6: Backend/Runtime Boundary Refactor
-
-- [x] Move generic runtime shell logic (CLI parsing, probe init, duration wait, stats printing, thread launch policy) from generated C++ into `pipit_shell.h` runtime library
-- [x] Make codegen emit compact descriptor tables (ParamDesc, TaskDesc, BufferStatsDesc, ProbeDesc) + `pipit::shell_main()` call
-- [x] Keep runtime behavior compatibility for `--duration`, `--param`, `--probe`, `--probe-output`, `--stats`
-- [x] Reduce generated C++ volume (~90-120 LOC saved per pipeline; `main()` from ~150 LOC to ~25 LOC descriptor tables)
-- [x] Preserve deterministic generated symbol layout for test stability (7 snapshots updated, task function bodies unchanged)
-- [x] ADR-026: Runtime Shell Library design decision documented
-- [x] C++ unit tests for `shell_main()` (12 test cases)
-- [x] E2E release regression tests (release codegen compiles with `-fsyntax-only`)
-
-### Phase 7: Registry Determinism and Hermetic Build Inputs
-
-#### Phase 7a (core) ✅
-
-- [x] `--emit manifest`: scan headers → output canonical `actors.meta.json` (no `.pdl` required)
-- [x] `--emit build-info`: source + registry provenance as JSON (source_hash, registry_fingerprint, manifest_schema_version, compiler_version)
-- [x] Provenance stamping: generated C++ includes `// pcc provenance: source_hash=... registry_fingerprint=... version=...` comment header
-- [x] Canonical fingerprint: SHA-256 of compact JSON (`canonical_json()`), decoupled from display formatting
-- [x] Overlay/precedence rules documented and tested (`--actor-meta` = manifest-only; `-I` > `--actor-path`; `--emit manifest` + `--actor-meta` = usage error)
-- [x] CI reproducibility tests (byte-identical outputs for same inputs; 6 tests)
-- [x] ADR-027: Registry determinism and hermetic build inputs
-
-#### Phase 7b (build integration) ✅
-
-- [x] CMake integration: manifest generation/consumption in examples build graph (`PIPIT_USE_MANIFEST` option, default ON)
-- [x] `add_custom_command` for `actors.meta.json` generation with explicit header inventory + scoped GLOB cross-check
-- [x] `--actor-meta <generated_manifest>` consumption in `add_pdl_example()` targets
-- [x] Dependency tracking: header change → manifest regeneration → recompile (`test_cmake_regen.sh` smoke test)
-- [x] `build.sh` updated with `--no-manifest` flag and pinned PCC path
-- [x] Legacy fallback path (`PIPIT_USE_MANIFEST=OFF`) with corrected DEPENDS (all headers listed)
-- [x] Integration test: `manifest_then_compile_produces_valid_cpp`
-
-### Phase 8: Test Strategy and Migration Hardening ✅
-
-- [x] Introduce IR-level golden tests for HIR/THIR/LIR snapshots (7+7+7 insta snapshots covering all three IR layers)
-- [x] Add pipeline equivalence tests (direct call chain vs pass-manager orchestration; reinterpreted from differential tests since no legacy path exists)
-- [x] Expand property/fuzz tests for parser→HIR + constraint solver + scheduler invariants (proptest: 100+50 cases + exhaustive widening)
-- [x] Keep full matrix green (format, lint, typecheck, unit/integration/runtime tests; all 8 C++ test binaries wired)
-
-### Exit Criteria
-
-- [x] Downstream phases (`graph/analyze/schedule/codegen`) consume unified typed/lowered IR contract in production path — analyze/schedule on ThirContext, codegen on LirProgram, graph on HirProgram (+ResolvedProgram for name lookup)
-- [x] Pass manager resolves all `--emit` modes with minimal-pass evaluation — `required_passes()` topological DFS, `--emit graph-dot` skips type_infer/lower
-- [x] Duplicate helper/inference logic is removed from per-phase local implementations — `dim_resolve.rs` and `program_query.rs` deleted (310 LOC dead code); all live dim-resolution centralized in ThirContext
-- [ ] ~~Compiler core footprint reduced by >=25% from baseline (16,986 LOC)~~ — original modules shrank 8.6% (15,221 LOC after dead code removal); net +25% including new IR/pass/diag modules (5,815 LOC). The 25% target was aspirational for an architecture that intentionally added 3 typed IR layers, a pass manager, and a diagnostics system. Revised to: original module reduction + codegen target met.
-- [x] `codegen.rs` footprint reduced by 48.5% from baseline (5,106 → 2,630 LOC) via LIR introduction — exceeds >=20% target
-- [~] No correctness regressions (606/606 tests pass); KPI regression vs v0.3.4 baseline not yet formally benchmarked — see Next Actions
-- [x] Any breaking behavior is explicitly versioned and documented in spec + ADR — `--emit cpp` stdout change documented in spec §3/§5.2.1; ADR-023 gate policy published
-
-### Next Actions
-
-- [ ] Run formal KPI A/B benchmark against v0.3.4 tag (`compiler_bench_stable.sh --baseline-ref v0.3.4`) to close criterion #6
+- [ ] Add full provenance tracing through the constraint solver.
+- [ ] Improve ambiguity/mismatch diagnostics with candidate and remediation suggestions.
 
 ---
 
@@ -299,7 +183,7 @@
 
 > **Status**: Deferred. All unchecked (`- [ ]`) items in this `v0.5.x` section are deferred.
 
-### Deferred Backlog from v0.3.x (moved pre-v0.4.0 open items)
+### Deferred Backlog from v0.3.x
 
 - [ ] **From v0.3.0**
   - [ ] Narrowing conversion warnings (SHOULD-level, lang-spec §3.4)
@@ -518,27 +402,9 @@
 - **v0.3.2** applies v0.3.0 polymorphism to 11 std actors; begins modular header split (`std_math.h`)
 - **v0.5.x** now includes former v0.3.0 stdlib expansion backlog
 - **pre-v0.4.0 open items** were moved to `v0.5.x` backlog (`Deferred Backlog from v0.3.x`)
-- **v0.4.0** now tracks the compiler architecture rebuild (IR unification, pass manager, diagnostics/verification, backend/runtime boundary refactor)
-- **v0.4.0 Phase 1** complete — snapshot safety net (7 insta tests), centralized graph/program helpers, stable semantic IDs (`CallId`/`DefId`/`TaskId`), span-key removal; all output byte-equivalent
-- **New modules (Phase 1)**: `id.rs` (stable IDs + allocator), `program_query.rs` (shared set-directive helpers)
-- **v0.4.0 Phase 2a** complete — HIR normalization (define expansion), ThirContext unified query wrapper, graph/analyze/schedule migrated off raw AST; all 500+ tests passing, byte-identical C++ output
-- **New modules (Phase 2a)**: `hir.rs` (HIR types + AST→HIR builder with define expansion), `thir.rs` (ThirContext wrapper + precomputed metadata + dim-resolution queries)
-- **ADR-024**: THIR-first IR unification strategy (HIR-first define expansion, ThirContext wrapper pattern, sub-phase ordering)
-- **v0.4.0 Phase 2b** complete — LIR backend IR (`lir.rs`, ~2,050 LOC) pre-resolves all types/rates/dimensions/buffer metadata/actor params; codegen is now syntax-directed (reads LIR, no inference); `codegen.rs` reduced from 5,106 → 2,630 LOC (48.5%); `codegen_from_lir(graph, schedule, options, lir)` is the sole entry point; all 516 tests passing, byte-identical C++ output
-- **New modules (Phase 2b)**: `lir.rs` (LIR types + builder: `build_lir(thir, graph, analysis, schedule) -> LirProgram`)
-- **ADR-025**: LIR backend IR design (self-contained backend IR, structured data over pre-formatted strings, ThirContext-based builder)
-- **v0.4.0 Phase 2c** complete — `type_infer` and `lower` migrated from raw AST to HIR; define body recursion eliminated (~70 LOC); widening matching upgraded from span-based to CallId-based; CallId aliasing fixed for define expansions; param type resolution bug fixed for define-expanded calls; 519 tests passing
-- **v0.4.0 Phase 3** (partial) — pass registry (`pass.rs`: 9 PassIds, 11 ArtifactIds, dependency resolution), pipeline orchestration (`pipeline.rs`: borrow-split `CompilationState`, `run_pipeline()` with `on_pass_complete` callback), `main.rs` migrated to `run_pipeline()` (parse/`--emit ast` remain outside runner); `--emit graph-dot` now skips type_infer/lower; 526 tests passing, byte-identical C++ output. Invalidation hashing and caching deferred to Phase 3b/3c.
-- **New modules (Phase 3)**: `pass.rs` (pass descriptors + dependency resolution), `pipeline.rs` (compilation state + pass orchestration + provenance stubs)
-- **v0.4.0 Phase 6** complete — runtime shell library (`pipit_shell.h`): descriptor table + `shell_main()` replaces ~150 LOC inline shell per pipeline; codegen emits compact ParamDesc/TaskDesc/BufferStatsDesc/ProbeDesc arrays; preamble 13 includes → 3; 4 emit methods removed (~180 LOC net reduction in codegen.rs); `_probe_output_file` always generated; probe init gate is `probes.empty()` (no `#ifndef NDEBUG`); 12 C++ shell unit tests + 2 E2E release regression tests; 552 tests passing
-- **New files (Phase 6)**: `runtime/libpipit/include/pipit_shell.h` (shell orchestration library), `runtime/tests/test_shell.cpp` (shell unit tests)
-- **ADR-026**: Runtime Shell Library design (descriptor table approach, probe gate simplification, always-emit `_probe_output_file`)
-- **v0.4.0 Phase 7a** complete — registry determinism and hermetic build inputs: `--emit manifest` (header scan → canonical JSON, no `.pdl` required), `--emit build-info` (SHA-256 provenance JSON), provenance comment stamped in generated C++ (`// pcc provenance: ...`), canonical fingerprint via `canonical_json()` (compact, decoupled from display formatting), overlay/precedence rules documented and tested, 6 reproducibility tests, 15 integration tests; Phase 7b (CMake integration) deferred
-- **New methods (Phase 7a)**: `Registry::canonical_json()` (compact JSON for fingerprint), `compute_provenance()` (SHA-256 hashing), `Provenance::to_json()` (build-info output)
-- **ADR-027**: Registry determinism and hermetic build inputs (manifest-first workflow, canonical fingerprint, output destination contract, overlay rules)
-- **v0.4.0 Phase 7b** complete — CMake build integration: manifest-first workflow wired into `examples/CMakeLists.txt` (generate `actors.meta.json` once, all PDL targets consume via `--actor-meta`); `PIPIT_USE_MANIFEST` option (default ON) with legacy fallback; explicit `ALL_ACTOR_HEADERS` inventory with scoped GLOB cross-check (warns on unlisted headers, excludes `third_party/`); `build.sh` supports `--no-manifest` with pinned PCC path; `test_cmake_regen.sh` validates CMake dependency chain (header touch → manifest regen → C++ regen); integration test `manifest_then_compile_produces_valid_cpp`; 573 tests passing
-- **v0.4.0 Phase 8** complete — test strategy and migration hardening: HIR/THIR/LIR golden snapshot tests (7+7+7 insta tests), pipeline equivalence tests (direct vs orchestrated, 7 tests), property-based tests (proptest: parser→HIR roundtrip 100 cases, exhaustive widening transitivity/antisymmetry, scheduler invariants 50 cases), full matrix coverage (all 8 C++ runtime test binaries wired into `cargo test`); "differential pipeline tests" reinterpreted as pipeline equivalence (no legacy path exists)
-- **v0.4.0 dead code cleanup** — deleted `dim_resolve.rs` (246 LOC) and `program_query.rs` (64 LOC); all logic previously migrated to `ThirContext` methods; zero callers remained; exit criteria updated
+- **v0.4.0 summary**: architecture rebuild completed across contract freeze, IR unification, pass-manager orchestration, verification/diagnostics upgrade, runtime-shell extraction, registry determinism, and migration hardening.
+- **v0.4.0 delivered artifacts**: HIR/THIR/LIR production pipeline, `codegen_from_lir` path, unified diagnostics with stable codes in `pcc-spec-v0.4.0.md` §10.4-§10.6, `--emit manifest` / `--emit build-info`, and manifest-first CMake integration.
+- **v0.4.x deferred work placement**: follow-up items from v0.4.0 are grouped into `v0.4.1`/`v0.4.2`/`v0.4.3` by complexity and release criticality.
 - **v0.5.x** open items are currently deferred
 - Performance characterization should inform optimization priorities (measure before optimizing)
 - Spec files renamed to versioned names (`pipit-lang-spec-v0.3.0.md`, `pcc-spec-v0.3.0.md`); `v0.2.0` specs are frozen from tag `v0.2.2`

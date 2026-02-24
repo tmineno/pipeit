@@ -4,344 +4,692 @@ Version: 0.4.0
 
 ## 1. Goal
 
-`pcc` compiles Pipit Definition Language (`.pdl`) programs into generated C++ or executables while preserving static SDF guarantees and deterministic behavior.
+`pcc` is the compiler for Pipit Definition Language (`.pdl`) files.
+It consumes pipeline source plus actor metadata inputs, performs static checks, and emits one of:
 
-v0.4.0 achieves:
+- generated C++ source
+- a compiled executable
+- intermediate/debug artifacts (`ast`, `graph`, `schedule`, etc.)
+- deterministic metadata/provenance artifacts (`manifest`, `build-info`)
 
-- Explicit IR boundaries (`AST → HIR → THIR → LIR → C++`) with each phase consuming declared artifacts only
-- Dependency-driven pass manager with minimal-pass evaluation per `--emit` target
-- Unified diagnostics model with stable codes and machine-readable JSON output
-- Stage-scoped verification framework (HIR H1-H3, Lower L1-L5, Schedule S1-S2, LIR R1-R2)
-- Runtime shell library (`pipit_shell.h`) replacing inline CLI/stats/probe shell in generated C++
-- Registry determinism: `--emit manifest` for hermetic metadata generation, `--emit build-info` for provenance auditing
+v0.4.0 keeps the v0.3 language surface, but tightens compiler contracts:
 
-Refer to [pipit-lang-spec-v0.3.0](pipit-lang-spec-v0.3.0.md) for language semantics. This document specifies compiler tool behavior and architecture contracts.
+- explicit IR boundaries (`AST -> HIR -> THIR -> LIR`)
+- dependency-driven pass execution per `--emit` target
+- unified diagnostics model (human and JSON format)
+- generated runtime shell delegation via `pipit_shell.h`
+- deterministic registry fingerprint and build provenance output
+
+Refer to [pipit-lang-spec](pipit-lang-spec-v0.3.0.md) for language semantics.
+This document defines `pcc` behavior as a compiler tool.
 
 ## 2. Non-goals
 
-- No language-surface expansion (syntax/semantics remain aligned with v0.3.x).
-- No mandatory incremental/watch mode.
-- No mandatory distributed build cache.
-- No C++ AST parsing of actor implementation bodies.
-- No CMake build integration (deferred to Phase 7b).
+- `pcc` does not parse C++ actor implementation bodies.
+- `pcc` does not provide mandatory incremental/watch mode.
+- `pcc` does not include distributed build cache in v0.4.0.
+- `pcc` does not manage external C++ dependencies beyond `libpipit`.
+- IDE/LSP behavior is out of scope for this spec.
 
 ---
 
-## 3. Compatibility Gate (v0.3.x Baseline)
+## 3. Implementation
 
-v0.4.0 adopts a compatibility gate:
+`pcc` is implemented in Rust (see [ADR-001](../adr/001-rust-for-pcc.md)).
+Generated C++ targets C++17 and links `libpipit`.
 
-- Default behavior keeps v0.3.x language and CLI compatibility.
-- Any breaking behavior requires all of:
-  - explicit spec delta in this file (or successor spec),
-  - dedicated ADR with migration reasoning,
-  - release-note entry with impact and migration path.
+There is no Rust/C++ FFI boundary inside compiler phases. `pcc`:
 
-Compatibility gate scope includes:
-
-- language parsing/typing behavior,
-- `pcc` CLI options and defaults,
-- output-stage semantics (`--emit`),
-- runtime option behavior in generated binaries (`--duration`, `--param`, `--probe`, `--probe-output`, `--stats`).
-
-**Known breaking changes in v0.4.0:**
-
-- `--emit cpp` without `-o` now writes to **stdout** (was: `a.out`). See §5.2.1.
+- reads metadata from manifest or header scanning
+- builds compiler IR artifacts in Rust
+- emits C++ text
+- optionally invokes system C++ compiler as subprocess for `--emit exe`
 
 ---
 
-## 4. Architecture Contract
-
-### 4.1 IR Boundaries
-
-v0.4.0 defines four compiler IR stages:
-
-1. **AST**: Parsed syntax with spans. No semantic resolution.
-2. **HIR** (resolved/normalized): Name resolution complete. Structural normalization (define expansion, task/mode normalization, explicit tap/buffer semantics). Built by `hir.rs`.
-3. **THIR** (typed/lowered): Type inference and monomorphization complete. Safe implicit widening materialized as explicit nodes. Proof obligations validated (L1-L5). Accessed via `ThirContext` wrapper (`thir.rs`) which provides unified query API over HIR + resolved + typed + lowered + registry + precomputed metadata.
-4. **LIR** (scheduled/backend-ready): All types, rates, dimensions, buffer metadata, and actor params pre-resolved. Backend is syntax-directed from LIR (no semantic re-inference). Built by `lir.rs` (~2,050 LOC); codegen reads LIR only (~2,630 LOC).
-
-Canonical phase flow:
+## 4. Software Architecture
 
 ```text
-source → Parse → AST → Resolve → build_hir → HIR → type_infer → lower → Graph → ThirContext → Analyze → Schedule → build_lir → LIR → Codegen → C++
+                         ┌─────────────────────────────────────────────┐
+                         │              pcc (Rust binary)              │
+                         │                                             │
+  ┌──────────┐           │  ┌─────────┐   ┌─────────────┐             │
+  │ .pdl     │──────────▶│  │  Lexer  │──▶│  Parser     │──┐          │
+  │ source   │           │  └─────────┘   └─────────────┘  │ AST      │
+  └──────────┘           │                                  ▼          │
+                         │                         ┌─────────────┐     │
+  ┌─────────────┐        │  ┌───────────────┐      │   Resolve   │     │
+  │ actors.meta │───────▶│  │ Actor Registry │────▶└─────────────┘     │
+  │ / headers   │        │  └───────────────┘            │             │
+  └─────────────┘        │                               ▼             │
+                         │                         ┌─────────────┐     │
+                         │                         │  Build HIR   │     │
+                         │                         └─────────────┘     │
+                         │                               │             │
+                         │                               ▼             │
+                         │                      ┌─────────────────┐    │
+                         │                      │ Type + Lowering │    │
+                         │                      │  (THIR + Cert)  │    │
+                         │                      └─────────────────┘    │
+                         │                               │             │
+                         │                               ▼             │
+                         │                      ┌─────────────────┐    │
+                         │                      │ Graph + Analyze │    │
+                         │                      └─────────────────┘    │
+                         │                               │             │
+                         │                               ▼             │
+                         │                      ┌─────────────────┐    │
+                         │                      │    Schedule     │    │
+                         │                      └─────────────────┘    │
+                         │                               │             │
+                         │                               ▼             │
+                         │                      ┌─────────────────┐    │
+                         │                      │    Build LIR    │    │
+                         │                      └─────────────────┘    │
+                         │                               │             │
+                         │                               ▼             │
+                         │                      ┌─────────────────┐    │
+                         │                      │     Codegen     │────┼──▶ *_gen.cpp
+                         │                      └─────────────────┘    │
+                         └───────────────────────────────┬─────────────┘
+                                                         │ [emit exe]
+                                                         ▼
+                                      System C++ compiler (--cc) + libpipit
 ```
 
-### 4.2 Pass Ownership
+### 4.1 Module mapping (Rust crate: `pcc`)
 
-| Pass | Input IR | Output IR/Artifact | Owns |
-|---|---|---|---|
-| Parse | source text | `AST` (Program) | grammar/lexing |
-| Resolve | `AST`, registry | ResolvedProgram | symbols, scope |
-| BuildHir | `AST`, ResolvedProgram | `HIR` (HirProgram) | define expansion, normalization |
-| TypeInfer | `HIR`, registry | TypedResult | typing, monomorphization |
-| Lower | `HIR`, TypedResult | LoweredResult + Cert(L1-L5) | widening insertion, proof obligations |
-| BuildGraph | `HIR` | GraphResult | SDF graph, edges, back-edges |
-| Analyze | ThirContext, GraphResult | AnalysisResult | rates, shapes, buffer layout |
-| Schedule | ThirContext, GraphResult, AnalysisResult | ScheduleResult | task ordering, K-factors |
-| BuildLir | ThirContext, GraphResult, AnalysisResult, ScheduleResult | `LIR` (LirProgram) | backend IR construction |
-| Codegen | `LIR`, GraphResult, ScheduleResult, CodegenOptions | C++ source | serialization only |
+| Module | Responsibility |
+|--------|---------------|
+| `lexer` | Tokenize `.pdl` source |
+| `parser` | Build AST from token stream |
+| `registry` | Load actor metadata from manifest/header scan |
+| `resolve` | Name resolution (actors, params, buffers, taps) |
+| `hir` | Build normalized semantic IR (define/mode/task normalization) |
+| `types` | Type inference and monomorphization |
+| `lower` | Lower typed graph and emit lowering certificate |
+| `graph` | SDF graph construction |
+| `analyze` | Static analysis (types, rates, buffers, constraints) |
+| `schedule` | PASS schedule and K-factor generation |
+| `lir` | Backend-ready IR construction |
+| `codegen` | C++ serialization from LIR only |
+| `pass` / `pipeline` | Pass dependency graph and phase orchestration |
+| `diag` | Unified diagnostics model and formatting |
+| `provenance` | Source/registry fingerprinting, build-info output |
 
-Rules:
+### 4.2 Data flow between modules
 
-- A pass may consume only declared artifacts.
-- A pass may not re-infer semantics owned by earlier passes.
-- Cross-pass data sharing is via artifacts, not hidden side channels.
+```text
+.pdl + actor metadata
+  -> Parse (AST)
+  -> Resolve
+  -> HIR
+  -> Type inference + monomorphization
+  -> Lowering + verification (THIR + Cert)
+  -> Graph construction
+  -> Static analysis
+  -> Schedule generation
+  -> LIR construction
+  -> C++ code generation
+```
 
-### 4.3 Pass Manager Contract
-
-Each pass declares (`pass.rs`):
-
-- `id`: unique `PassId` (9 passes: Parse, Resolve, BuildHir, TypeInfer, Lower, BuildGraph, Analyze, Schedule, Codegen),
-- `inputs`: required `ArtifactId`s (11 artifacts),
-- `outputs`: produced `ArtifactId`s,
-- `invariants`: pre/post conditions.
-
-`--emit` targets resolve required artifacts via `required_passes(terminal)` topological walk and evaluate the minimal pass subset. For example, `--emit graph-dot` skips TypeInfer/Lower entirely.
-
-Pipeline orchestration (`pipeline.rs`): `CompilationState` with borrow-split artifacts, `run_pipeline()` with `on_pass_complete` callback for diagnostic reporting.
-
-### 4.4 Artifact/Caching Contract
-
-- Artifact keys are deterministic across machines for equal inputs/config.
-- Registry provenance participates in invalidation (via canonical JSON fingerprint).
-- Cache miss or verification failure falls back to recompute.
-- Cache behavior must not change observable compiler semantics.
-- **Note**: Invalidation key hashing and reusable cache are deferred to Phase 3b/3c.
-
-### 4.5 Shell Library
-
-Generated C++ uses a descriptor-table pattern with `pipit_shell.h`:
-
-- Codegen emits compact descriptor arrays: `ProgramDesc`, `TaskDesc[]`, `ParamDesc[]`, `ProbeDesc[]`, `BufferStatsDesc[]`
-- `main()` calls `pipit::shell_main(desc)` (~25 LOC vs ~150 LOC inline shell)
-- Runtime shell handles: CLI parsing, probe init, duration wait, stats printing, thread launch
-- All runtime flags (`--duration`, `--param`, `--probe`, `--probe-output`, `--stats`) handled by shell library
-- Task function bodies (actor firings, edge I/O, modal logic) remain in generated code
-
-### 4.6 Verification Framework
-
-Stage-scoped verification via `StageCert` trait (`pass.rs`):
-
-| Stage | Obligations | Evidence |
-|---|---|---|
-| HIR | H1 (no raw defines), H2 (unique CallIds), H3 (call-node coverage) | `hir::HirCert` |
-| Lower | L1 (type consistency), L2 (widening safety), L3 (coverage), L4 (completeness), L5 (no unresolved params) | `lower::Cert` |
-| Schedule | S1 (complete coverage), S2 (topological order) | `schedule::ScheduleCert` |
-| LIR | R1 (program completeness), R2 (deterministic emission) | `lir::LirCert` |
-
-Verification runs in debug profile (`cargo test`); release matrix deferred to Phase 8.
+`--emit` stage selection determines terminal artifact.
+v0.4.0 pass manager runs only the required dependency closure for that terminal.
 
 ---
 
-## 5. Inputs and Outputs
+## 5. Inputs
 
-### 5.1 Inputs
+### 5.1 Source file (`.pdl`)
 
-- `.pdl` source (required for all stages except `manifest`),
-- actor metadata:
-  - preferred: `--actor-meta <path>` manifest (`actors.meta.json`),
-  - fallback: header scanning via `-I` / `--actor-path`,
-- compilation config (`--emit`, `--cc`, `--cflags`, `--release`, etc.).
+Primary input for compile stages:
 
-### 5.2 Outputs
-
-| `--emit` stage | Description | Requires `.pdl` |
-|---|---|---|
-| `exe` (default) | Executable via system C++ compiler | yes |
-| `cpp` | Generated C++ source | yes |
-| `manifest` | Canonical actor metadata JSON | no |
-| `build-info` | Provenance JSON | yes (text only; parse not required) |
-| `ast` | AST dump | yes |
-| `graph` | Analysis graph dump | yes |
-| `graph-dot` | Graphviz DOT graph | yes |
-| `schedule` | Schedule dump | yes |
-| `timing-chart` | Mermaid Gantt timing chart | yes |
-
-### 5.2.1 Output Destination Contract
-
-| `--emit` stage | `-o` not given | `-o <path>` given |
-|---|---|---|
-| `exe` (default) | write `a.out` | write `<path>` |
-| `cpp` | write stdout | write `<path>` |
-| `manifest` | write stdout | write `<path>` |
-| `build-info` | write stdout | write `<path>` |
-| `ast` | write stdout | write stdout (unchanged) |
-| `graph-dot`, `schedule`, `timing-chart` | write stdout | write stdout (unchanged) |
-
-**Breaking change**: `--emit cpp` without `-o` previously wrote to `a.out`. It now writes to stdout, consistent with all other text-output stages.
-
-### 5.3 Provenance
-
-Provenance tracks "what went in" to a compilation:
-
-- **`source_hash`**: SHA-256 of raw `.pdl` source text (64-char hex)
-- **`registry_fingerprint`**: SHA-256 of `Registry::canonical_json()` — compact JSON, decoupled from display formatting (64-char hex)
-- **`manifest_schema_version`**: currently 1
-- **`compiler_version`**: `env!("CARGO_PKG_VERSION")`
-
-Provenance is computed for every compilation that reads source + registry.
-
-**Stamping in generated C++**: First line of generated C++ includes:
-
-```cpp
-// pcc provenance: source_hash=<64hex> registry_fingerprint=<64hex> version=<ver>
+```bash
+pcc example.pdl [OPTIONS]
 ```
 
-Machine-parsable, zero runtime cost. Omitted when provenance is not available (unit tests).
+Exceptions:
 
-**`--emit build-info`** outputs provenance as JSON:
+- `--emit manifest` may run without `.pdl`
+- `--emit build-info` requires source text but does not require parse success
+
+### 5.2 Actor metadata manifest (`--actor-meta`)
+
+JSON metadata manifest (schema v1) consumed by actor registry:
+
+```bash
+pcc example.pdl --actor-meta ./build/actors.meta.json
+```
+
+When omitted, registry metadata is loaded from header scanning (`-I` / `--actor-path`).
+
+### 5.3 Actor headers (`-I`, `--include`) — registry fallback and C++ declaration input
+
+One or more header files or directories:
+
+```bash
+pcc example.pdl -I ./actors.h -I ./include/
+```
+
+If `--actor-meta` is omitted, headers provide metadata for registry construction.
+For `--emit exe` and `--emit cpp`, headers are also used as generated C++ declaration inputs.
+
+### 5.4 Actor search path (`--actor-path`)
+
+Directories recursively scanned for actor headers:
+
+```bash
+pcc example.pdl --actor-path ./actors --actor-path ./vendor/actors
+```
+
+Name conflict rule: `-I` entries have precedence over `--actor-path`.
+
+---
+
+## 6. Outputs
+
+### 6.1 Default: Executable (`--emit exe`)
+
+By default, `pcc` generates C++, invokes `--cc`, and links runtime:
+
+```bash
+pcc example.pdl -I actors.h -o receiver
+# produces: ./receiver
+```
+
+### 6.2 `--emit cpp`: Generated C++ source only
+
+```bash
+pcc example.pdl -I actors.h --emit cpp -o receiver_gen.cpp
+```
+
+v0.4.0 destination contract:
+
+- with `-o`: write file
+- without `-o`: write to stdout
+
+### 6.3 `--emit ast`: AST dump
+
+```bash
+pcc example.pdl --emit ast
+```
+
+### 6.4 `--emit graph`: analysis graph dump
+
+```bash
+pcc example.pdl -I actors.h --emit graph
+```
+
+### 6.5 `--emit graph-dot`: Graphviz DOT dump
+
+```bash
+pcc example.pdl -I actors.h --emit graph-dot
+```
+
+### 6.6 `--emit schedule`: schedule dump
+
+```bash
+pcc example.pdl -I actors.h --emit schedule
+```
+
+### 6.7 `--emit timing-chart`: Mermaid Gantt dump
+
+```bash
+pcc example.pdl -I actors.h --emit timing-chart
+```
+
+### 6.8 `--emit manifest`: canonical actor metadata
+
+Emits canonical `actors.meta.json` derived from scanned headers:
+
+```bash
+pcc --emit manifest -I actors.h -o actors.meta.json
+```
+
+`--emit manifest` is a usage error when combined with `--actor-meta`.
+
+### 6.9 `--emit build-info`: provenance JSON
+
+Outputs machine-readable provenance:
+
+```bash
+pcc example.pdl -I actors.h --emit build-info
+```
+
+Fields:
+
+- `source_hash` (sha256 of source text)
+- `registry_fingerprint` (sha256 of canonical registry JSON)
+- `manifest_schema_version`
+- `compiler_version`
+
+---
+
+## 7. CLI Interface
+
+```text
+pcc [source.pdl] [OPTIONS]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-o <path>` | PATH | stage-dependent | Output path |
+| `--actor-meta <file>` | PATH | — | Actor metadata manifest |
+| `-I, --include <path>` | PATH (repeatable) | — | Actor header or search path |
+| `--actor-path <dir>` | PATH (repeatable) | — | Recursive actor search directory |
+| `--emit <stage>` | enum | `exe` | `exe`, `cpp`, `ast`, `graph`, `graph-dot`, `schedule`, `timing-chart`, `manifest`, `build-info` |
+| `--release` | flag | off | Release codegen profile |
+| `--cc <compiler>` | STRING | `c++` | System C++ compiler command |
+| `--cflags <flags>` | STRING | mode-dependent | Additional C++ compiler flags |
+| `--diagnostic-format <fmt>` | enum | `human` | `human` or `json` |
+| `--verbose` | flag | off | Phase timing and pass trace |
+| `--version` | flag | — | Print version and exit |
+| `--help` | flag | — | Print help and exit |
+
+### 7.1 Release vs Debug build
+
+| Behavior | Debug (default) | Release (`--release`) |
+|----------|------------------|----------------------|
+| Probe instrumentation | Included | Stripped |
+| C++ optimization | `-O0 -g` | `-O2` |
+| C++ standard | `-std=c++17` | `-std=c++17` |
+| Runtime assertions | Enabled | Reduced |
+
+When `--cflags` is explicitly set, optimization defaults are overridden.
+
+---
+
+## 8. Actor Metadata Loading
+
+Metadata loading order:
+
+1. If `--actor-meta` is present, load manifest metadata directly.
+2. Otherwise, scan actors from `--actor-path` then overlay `-I` entries.
+3. Validate schema and required fields.
+4. Build registry keyed by actor name and type parameters.
+
+Manifest schema (minimum):
 
 ```json
 {
-  "source_hash": "<64-char hex>",
-  "registry_fingerprint": "<64-char hex>",
-  "manifest_schema_version": 1,
-  "compiler_version": "0.1.2"
+  "schema": 1,
+  "actors": [
+    {
+      "name": "fir",
+      "type_params": ["T"],
+      "in_type": { "TypeParam": "T" },
+      "in_count": { "Symbolic": "N" },
+      "out_type": { "TypeParam": "T" },
+      "out_count": { "Literal": 1 },
+      "params": [
+        { "kind": "Param", "param_type": { "SpanTypeParam": "T" }, "name": "coeff" },
+        { "kind": "Param", "param_type": "Int", "name": "N" }
+      ]
+    }
+  ]
 }
 ```
 
-Does NOT require valid parse. Parse-invalid sources produce valid build-info.
+Registry determinism requirements:
 
-### 5.4 Registry and Manifest
+- canonical actor ordering for manifest output
+- compact canonical JSON for fingerprint hashing
+- same inputs must produce same fingerprint across platforms
 
-**`--emit manifest`**: Scans headers from `-I` / `--actor-path`, outputs canonical `actors.meta.json` (schema v1, actors sorted alphabetically). Does not require `.pdl` source.
+Typical errors:
 
-**Overlay / precedence rules**:
-
-- **`--actor-meta <manifest>`**: Actor metadata loaded from manifest only (no header scanning for metadata). `-I` / `--actor-path` still collect headers for C++ `-include` flags.
-- **Header scanning mode** (no `--actor-meta`): `--actor-path` actors form the base registry; `-I` actors overlay with higher precedence (replace on name conflict).
-- **`--emit manifest` + `--actor-meta`**: Usage error (exit code 2).
-
-**Canonical fingerprint**: `Registry::canonical_json()` uses `serde_json::to_string()` (compact, no whitespace). `generate_manifest()` uses `to_string_pretty()` for display. Both share identical sorting/collection logic. The fingerprint is always computed from the compact form — invariant documented in ADR-027.
-
----
-
-## 6. Diagnostics Contract
-
-All phases emit a shared diagnostic model (`diag.rs`):
-
-- `code` (stable identifier, 54 codes: E0001-E0603, W0001-W0400),
-- `level` (`error`/`warning`),
-- `message`,
-- primary span,
-- related spans,
-- optional hint/remediation,
-- optional cause chain for propagated constraint failures.
-
-Presentation:
-
-- Human-readable diagnostics are default CLI output.
-- Machine-readable mode (`--diagnostic-format json`) provides JSONL output.
-- Diagnostic stability policy: adding codes is allowed; changing meaning of existing codes requires versioned note.
+```text
+error: invalid actor metadata schema (expected: 1, found: 0)
+error: duplicate actor 'fft' in metadata registry
+error: --emit manifest cannot be used with --actor-meta
+```
 
 ---
 
-## 7. Failure Modes
+## 9. Compilation Phases
 
-Compilation fails when:
+Compilation is pass-based and dependency-driven.
+A phase failure aborts compilation.
 
-- parsing fails,
-- resolution fails,
-- type/lowering verification fails,
-- analysis/scheduling invariants fail,
-- backend emission prerequisites are missing,
-- external C++ compilation fails for `--emit exe`.
+```text
+source + registry inputs
+  │
+  ├─ 1. Lex & Parse                          [--emit ast]
+  │     └─ Build AST
+  │
+  ├─ 2. Actor Loading
+  │     └─ Build actor registry
+  │
+  ├─ 3. Name Resolution
+  │     └─ Bind actors/params/consts/buffers/taps
+  │
+  ├─ 4. HIR Construction
+  │     └─ Normalize defines/modes/tasks into HIR
+  │
+  ├─ 5. Type Inference & Monomorphization
+  │     └─ Solve constraints, instantiate concrete actors
+  │
+  ├─ 6. Typed Lowering + Verification
+  │     └─ Create THIR and validate lowering obligations
+  │
+  ├─ 7. Graph + Static Analysis              [--emit graph, --emit graph-dot]
+  │     └─ Rates, balance, delays, buffers, constraints
+  │
+  ├─ 8. Schedule Generation                  [--emit schedule, --emit timing-chart]
+  │     └─ PASS order, K-factor, fusion planning
+  │
+  ├─ 9. LIR Build + C++ Codegen              [--emit cpp]
+  │     └─ Backend-ready IR then C++ serialization
+  │
+  └─ 10. C++ Compilation                      [--emit exe]
+        └─ Invoke system compiler and link runtime
+```
 
-Diagnostic failures identify owning pass and primary span (where available).
+| Phase | Description | Can emit here |
+|-------|-------------|---------------|
+| 1. Lex & Parse | Tokenize and build AST | `--emit ast` |
+| 2. Actor Loading | Load metadata registry | |
+| 3. Name Resolution | Resolve symbols and references | |
+| 4. HIR Construction | Normalize semantic graph | |
+| 5. Type Inference & Monomorphization | Solve types and instantiate actors | |
+| 6. Typed Lowering + Verification | Build THIR and verify obligations | |
+| 7. Graph + Static Analysis | Build graph and solve rate/buffer constraints | `--emit graph`, `--emit graph-dot` |
+| 8. Schedule Generation | Build execution schedule | `--emit schedule`, `--emit timing-chart` |
+| 9. LIR Build + C++ Codegen | Emit C++ from LIR | `--emit cpp` |
+| 10. C++ Compilation | Compile and link executable | `--emit exe` |
 
-Exit codes:
+### 9.1 Rate-domain (fusion-domain) optimization
+
+`pcc` may fuse adjacent firings to reduce loop overhead when all are true:
+
+- same task and same subgraph
+- adjacent in topological order
+- compatible repetition/rate transfer
+- no delay/back-edge barrier crossing
+- no mandatory barrier node between firings
+
+Fusion is optional. Unfused schedules remain conforming.
+
+### 9.2 Typed IR and Verified Lowering (Normative)
+
+Lowering contract:
+
+```text
+Lower(TypedHIR) -> (THIR, Cert)
+```
+
+Required obligations:
+
+- `L1` Type consistency on every THIR edge
+- `L2` Widening safety (only allowed widening chains)
+- `L3` Rate/shape preservation by inserted conversions
+- `L4` Monomorphization soundness (one resolved concrete target)
+- `L5` No fallback typing on unresolved types
+
+Backend contract:
+
+- codegen consumes LIR (derived from THIR/analysis/schedule artifacts)
+- codegen must not re-run type inference
+- codegen must not invent fallback types
+
+---
+
+## 10. Error Output Format
+
+Default output is human-readable diagnostics to stderr:
+
+```text
+<level>[<code>]: <message>
+  at <file>:<line>:<column>
+  <context line>
+  <caret>
+  hint: <suggestion>
+```
+
+JSON format (`--diagnostic-format json`) emits one JSON object per line with:
+
+- `code`
+- `level`
+- `message`
+- `primary_span`
+- `related_spans` (optional)
+- `hint` (optional)
+
+### 10.1 Levels
+
+| Level | Meaning |
+|-------|---------|
+| `error` | Compilation stops (exit code 1) |
+| `warning` | Compilation may continue |
+| `info` | Supplementary context |
+
+### 10.2 Error categories
+
+| Category | Example |
+|----------|---------|
+| Syntax | Unexpected token |
+| Name resolution | Unknown actor / symbol |
+| Type mismatch | Pipe endpoint type incompatibility |
+| Type inference | Ambiguous polymorphic call |
+| Lowering verification | L1-L5 obligation failure |
+| Rate/SDF | Unsatisfied balance equations |
+| Constraint | Invalid writer/reader ownership |
+| Usage | Incompatible CLI flags |
+| System | I/O failure, tool invocation failure |
+
+### 10.3 Example
+
+```text
+error[E0201]: type mismatch at pipe 'fft -> fir'
+  at example.pdl:12:25
+    adc(0) | fft(256) | fir(coeff) -> signal
+                        ^^^^^^^^^^
+  hint: insert an explicit conversion actor
+```
+
+```text
+error[E0601]: lowering verification failed (L3 rate/shape preservation)
+  hint: this indicates invalid lowered IR and codegen was skipped
+```
+
+### 10.4 Diagnostic code compatibility policy
+
+- Reuse prohibition: once assigned, a diagnostic code must never be reassigned to a different meaning.
+- Retirement rule: removed diagnostics retire their code permanently.
+- Semantics change rule: when meaning changes, allocate a new code and deprecate the old one.
+- Test contract: tests may assert on `Diagnostic.code`; semantic changes to existing codes are breaking changes.
+- Versioning: code meanings are versioned with the compiler version.
+
+### 10.5 Code ranges
+
+| Range | Phase | Description |
+|-------|-------|-------------|
+| E0001-E0099 | resolve | Name resolution errors |
+| E0100-E0199 | type_infer | Type inference errors |
+| E0200-E0299 | lower | Lowering verification (L1-L5) |
+| E0300-E0399 | analyze | SDF analysis errors |
+| E0400-E0499 | schedule | Scheduling errors |
+| E0500-E0599 | graph | Graph construction errors |
+| E0600-E0699 | pipeline | Stage certification failures |
+| W0001-W0099 | resolve | Name resolution warnings |
+| W0300-W0399 | analyze | SDF analysis warnings |
+| W0400-W0499 | schedule | Scheduling warnings |
+
+### 10.6 Assigned diagnostic codes
+
+#### 10.6.1 Resolve (E0001-E0023, W0001-W0002)
+
+| Code | Description |
+|------|-------------|
+| E0001 | Duplicate const definition |
+| E0002 | Duplicate param definition |
+| E0003 | Duplicate define definition |
+| E0004 | Duplicate task definition |
+| E0005 | Cross-namespace name collision |
+| E0006 | Tap declared but never consumed in define |
+| E0007 | Duplicate mode in task |
+| E0008 | Undefined tap reference |
+| E0009 | Duplicate tap declaration |
+| E0010 | Multiple writers to shared buffer |
+| E0011 | Unknown actor or define |
+| E0012 | Non-polymorphic actor called with type arguments |
+| E0013 | Wrong number of type arguments |
+| E0014 | Undefined param reference |
+| E0015 | Undefined const reference |
+| E0016 | Runtime param used as frame dimension |
+| E0017 | Unknown name in shape constraint |
+| E0018 | Undefined param in switch source |
+| E0019 | Switch references undefined mode |
+| E0020 | Mode defined but not listed in switch |
+| E0021 | Mode listed multiple times in switch |
+| E0022 | Undefined tap as actor input |
+| E0023 | Shared buffer has no writer |
+| W0001 | Define shadows actor with same name |
+| W0002 | Deprecated switch default clause |
+
+#### 10.6.2 Type inference (E0100-E0102)
+
+| Code | Description |
+|------|-------------|
+| E0100 | Unknown type name |
+| E0101 | Ambiguous polymorphic call (upstream context available) |
+| E0102 | Ambiguous polymorphic call (no upstream context) |
+
+#### 10.6.3 Lowering (E0200-E0206)
+
+| Code | Description |
+|------|-------------|
+| E0200 | L1: Type consistency violation at edge |
+| E0201 | L2: Unsafe widening chain |
+| E0202 | L3: Rate/shape preservation violation |
+| E0203 | L4: Polymorphic actor not fully monomorphized |
+| E0204 | L4: Polymorphic actor has no concrete instance |
+| E0205 | L5: Unresolved input type |
+| E0206 | L5: Unresolved output type |
+
+#### 10.6.4 Analysis (E0300-E0310, W0300)
+
+| Code | Description |
+|------|-------------|
+| E0300 | Unresolved frame dimension |
+| E0301 | Conflicting frame constraint from upstream |
+| E0302 | Conflicting dimension (span-derived vs edge-inferred) |
+| E0303 | Type mismatch at pipe |
+| E0304 | SDF balance equation unsolvable |
+| E0305 | Feedback loop with no delay |
+| E0306 | Shared buffer rate mismatch |
+| E0307 | Shared memory pool exceeded |
+| E0308 | Param type mismatch |
+| E0309 | Switch param non-int32 default |
+| E0310 | Control buffer type mismatch |
+| W0300 | Inferred dimension param ordering warning |
+
+#### 10.6.5 Schedule (E0400, W0400)
+
+| Code | Description |
+|------|-------------|
+| E0400 | Unresolvable cycle in subgraph |
+| W0400 | Unsustainable tick rate |
+
+#### 10.6.6 Graph (E0500)
+
+| Code | Description |
+|------|-------------|
+| E0500 | Tap not found in graph |
+
+#### 10.6.7 Pipeline certification (E0600-E0603)
+
+| Code | Description |
+|------|-------------|
+| E0600 | HIR verification failed (H1-H3) |
+| E0601 | Lowering verification failed (L1-L5) |
+| E0602 | Schedule verification failed (S1-S2) |
+| E0603 | LIR verification failed (R1-R2) |
+
+---
+
+## 11. Exit Codes
 
 | Code | Meaning |
-|---|---|
-| 0 | Success |
-| 1 | Compilation error (parse, type, analysis) |
-| 2 | Usage error (invalid arguments, incompatible flags) |
-| 3 | System error (I/O failure, missing files) |
+|------|---------|
+| `0` | Success |
+| `1` | Compilation failure (source/semantic errors) |
+| `2` | Usage failure (invalid or incompatible options) |
+| `3` | System failure (I/O, missing tools, permission) |
 
 ---
 
-## 8. Performance and Safety
+## 12. Generated Code Structure
 
-- `pcc` is deterministic for identical input/config.
-- `LIR` contains all backend-critical semantic decisions (no backend fallback inference).
-- Proof-obligation failures are hard errors.
-- Caching may improve latency but must preserve identical outputs/diagnostics.
-- Provenance fingerprints are computed from canonical compact JSON, ensuring stability across formatting changes.
+For `--emit cpp`, generated code is structured as:
+
+1. Includes (`pipit.h`, `pipit_shell.h`, actor headers, standard headers)
+2. Concrete actor aliases and static metadata tables
+3. Static storage (buffers, const data, params)
+4. Task functions (scheduled actor firing logic)
+5. Mode/control dispatch (when applicable)
+6. Runtime handoff (`pipit::shell_main(desc)`)
+
+v0.4.0 contract:
+
+- generated runtime shell behavior is centralized in `pipit_shell.h`
+- generated code contains task logic, not ad-hoc CLI parser duplication
+- code generation is deterministic for identical inputs
+
+Dependencies:
+
+- `libpipit`
+- actor headers (`-I` / `--actor-path`)
+- C++17 toolchain
 
 ---
 
-## 9. Acceptance Tests
+## 13. Performance / Safety
 
-### Phase 0 (Spec/ADR Contract Freeze) ✅
+- Pass execution is dependency-driven; irrelevant phases are skipped for non-terminal artifacts.
+- Compilation memory growth should be linear to graph size.
+- Metadata-only workflows (`--emit manifest`) avoid `.pdl` parsing.
+- Build provenance (`--emit build-info`) is machine-readable and deterministic.
+- Generated runtime keeps bounded-buffer semantics inherited from `libpipit`.
 
-- `AST → HIR → THIR → LIR` boundary and ownership documented.
-- Pass-manager contract documented.
-- Compatibility gate documented.
-- ADR set published: ADR-020 (pass manager), ADR-021 (stable IDs), ADR-022 (diagnostics), ADR-023 (compatibility gate).
+---
 
-### Phase 1 (Mechanical Foundations) ✅
+## 14. Acceptance Tests
 
-- 7 insta snapshot tests lock byte-equivalent output.
-- Stable IDs (`CallId`/`DefId`/`TaskId`) thread through all phases.
-- Span-as-primary-key eliminated from semantic tables.
+```bash
+# 1. Build executable
+pcc example.pdl -I actors.h -o example
+test -x ./example
 
-### Phase 2 (IR Unification) ✅
+# 2. Emit C++ to file
+pcc example.pdl -I actors.h --emit cpp -o example_gen.cpp
+test -f ./example_gen.cpp
 
-- HIR normalization: define expansion, modal normalization.
-- ThirContext wrapper: unified query API for downstream phases.
-- LIR backend IR: codegen reads LIR only, 48.5% LOC reduction.
-- `type_infer` and `lower` consume HIR (not raw AST).
+# 3. Emit C++ to stdout when -o is omitted
+pcc example.pdl -I actors.h --emit cpp | head -n 1 | grep "pcc"
 
-### Phase 3 (Pass Manager) ✅ (partial)
+# 4. Emit AST
+pcc example.pdl --emit ast >/dev/null
 
-- 9 PassIds, 11 ArtifactIds, dependency resolution.
-- `run_pipeline()` with borrow-split `CompilationState`.
-- Minimal-pass evaluation for each `--emit` target.
-- Invalidation hashing and caching deferred to Phase 3b/3c.
+# 5. Emit graph artifacts
+pcc example.pdl -I actors.h --emit graph | grep "repetition"
+pcc example.pdl -I actors.h --emit graph-dot | grep "digraph"
 
-### Phase 4 (Verification Framework) ✅
+# 6. Emit schedule artifacts
+pcc example.pdl -I actors.h --emit schedule | grep "task"
+pcc example.pdl -I actors.h --emit timing-chart | grep "gantt"
 
-- `StageCert` trait with HIR/Lower/Schedule/LIR verifiers.
-- Verification wired into pipeline runner.
-- Regression corpus (`verify_regression.rs`).
+# 7. Emit manifest without source file
+pcc --emit manifest -I actors.h -o actors.meta.json
+test -f actors.meta.json
 
-### Phase 5 (Diagnostics) ✅
+# 8. Emit build-info
+pcc example.pdl -I actors.h --emit build-info | grep "source_hash"
 
-- 54 stable diagnostic codes.
-- `--diagnostic-format json` JSONL output.
-- Related spans and cause chains for constraint failures.
+# 9. JSON diagnostic mode
+pcc bad.pdl --diagnostic-format json 2>&1 | head -n 1 | grep "\"code\""
 
-### Phase 6 (Runtime Shell) ✅
-
-- `pipit_shell.h` runtime library.
-- Descriptor-table codegen pattern.
-- 12 C++ shell unit tests.
-
-### Phase 7a (Registry Determinism) ✅
-
-- `--emit manifest` produces canonical JSON (no `.pdl` required).
-- `--emit build-info` produces provenance JSON.
-- Generated C++ includes `// pcc provenance:` comment header.
-- Canonical fingerprint via `canonical_json()`, decoupled from display formatting.
-- Overlay/precedence rules documented and tested.
-- 6 reproducibility tests (byte-identical outputs for same inputs).
-- ADR-027 exit criteria all met.
-
-### Phase 7b (CMake Build Integration) ✅
-
-- Manifest-first workflow wired into `examples/CMakeLists.txt`.
-- `PIPIT_USE_MANIFEST` option (default ON) with legacy fallback.
-- Explicit header inventory with scoped GLOB cross-check.
-- CMake dependency chain validated (`test_cmake_regen.sh`).
-
-### Phase 8 (Test Strategy and Migration Hardening) ✅
-
-- IR-level golden tests: HIR, THIR, and LIR insta snapshots (7 tests each, all example PDLs).
-- Pipeline equivalence tests: direct call chain vs pass-manager orchestration produce byte-identical C++ output.
-- Property-based tests (proptest): parser→HIR roundtrip, widening transitivity/antisymmetry (exhaustive), scheduler invariants.
-- Full matrix coverage: all 8 C++ runtime test binaries wired into `cargo test`.
-
-### Deferred
-
-- Phase 3b/3c: Invalidation hashing and artifact cache.
+# 10. Invalid flag returns usage error
+pcc --invalid-flag
+test $? -eq 2
+```
