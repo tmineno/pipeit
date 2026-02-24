@@ -329,6 +329,67 @@ impl<'a> ThirContext<'a> {
         }
     }
 
+    /// Produce a deterministic summary of THIR precomputed metadata for snapshot tests.
+    ///
+    /// Shows the three unique THIR contributions not captured by HIR or LIR:
+    /// 1. Extracted set-directive values (mem_bytes, tick_rate_hz, timer_spin, overrun_policy)
+    /// 2. Resolved param C++ types (from graph-based scanning)
+    /// 3. Indexed entry keys (derived from HIR items)
+    ///
+    /// All map-derived keys are sorted alphabetically for deterministic output.
+    pub fn snapshot_summary(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        writeln!(out, "ThirContext summary").unwrap();
+
+        // 1. Extracted directives
+        writeln!(out, "  extracted directives:").unwrap();
+        writeln!(out, "    mem_bytes: {}", self.mem_bytes).unwrap();
+        writeln!(out, "    tick_rate_hz: {}", self.tick_rate_hz).unwrap();
+        match self.timer_spin {
+            Some(v) => writeln!(out, "    timer_spin: Some({})", v).unwrap(),
+            None => writeln!(out, "    timer_spin: None").unwrap(),
+        }
+        writeln!(out, "    overrun_policy: {}", self.overrun_policy).unwrap();
+
+        // 2. Param C++ types (sorted)
+        writeln!(out, "  param_cpp_types:").unwrap();
+        let mut param_types: Vec<_> = self.param_cpp_types.iter().collect();
+        param_types.sort_by_key(|(k, _)| (*k).clone());
+        if param_types.is_empty() {
+            writeln!(out, "    (none)").unwrap();
+        } else {
+            for (name, cpp_type) in &param_types {
+                writeln!(out, "    {} -> {}", name, cpp_type).unwrap();
+            }
+        }
+
+        // 3. Indexed entries (derived from HIR items, sorted)
+        writeln!(out, "  indexed entries:").unwrap();
+        let mut task_names: Vec<_> = self.hir.tasks.iter().map(|t| t.name.as_str()).collect();
+        task_names.sort();
+        writeln!(out, "    tasks: [{}]", task_names.join(", ")).unwrap();
+
+        let mut const_names: Vec<_> = self.hir.consts.iter().map(|c| c.name.as_str()).collect();
+        const_names.sort();
+        writeln!(out, "    consts: [{}]", const_names.join(", ")).unwrap();
+
+        let mut param_names: Vec<_> = self.hir.params.iter().map(|p| p.name.as_str()).collect();
+        param_names.sort();
+        writeln!(out, "    params: [{}]", param_names.join(", ")).unwrap();
+
+        let mut set_names: Vec<_> = self
+            .hir
+            .set_directives
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        set_names.sort();
+        writeln!(out, "    sets: [{}]", set_names.join(", ")).unwrap();
+
+        out
+    }
+
     /// Return the span-argument-derived length for a dimension, ignoring whether
     /// the dimension already has an explicit argument. Used for conflict detection.
     pub fn span_arg_length_for_dim(

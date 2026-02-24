@@ -1,6 +1,6 @@
 [package]
 name = "pcc"
-version = "0.1.2"
+version = "0.4.0"
 edition = "2021"
 description = "Pipit Compiler Collection — compiles .pdl pipeline definitions to native executables"
 
@@ -22,6 +22,8 @@ sha2 = "0.10"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+insta = "1"
+proptest = "1"
 
 [[bench]]
 name = "compiler_bench"

@@ -1,0 +1,50 @@
+---
+source: compiler/tests/snapshot_lir.rs
+expression: output
+---
+LirProgram (2 consts, 0 params, 3 inter-task bufs, 2 tasks, 2 probes)
+  const sync_coeff: float[4] = [1, -1, 1, -1]
+  const data_coeff: float[5] = [0.1f, 0.2f, 0.4f, 0.2f, 0.1f]
+  directives: mem=134217728, overrun=drop, timer=Fixed(10000)
+  inter-task ctrl: int32_t[256] readers=1 [] skip_writes
+  inter-task payload: float[512] readers=1 [logger]
+  inter-task sync_result: float[256] readers=1 [] skip_writes
+  task 'logger' @ 1000Hz K=1
+    edge_buffers: _e14_15: float[2560000], _e15_16: float[1]
+    firings:
+      [x2560000] buf_read(payload) -> _e14_15 tokens=2560000
+      Actor_decimate<float><float>(2560000) [_e14_15] -> [_e15_16]
+      Actor_csvwrite<void>("received.csv") [_e15_16] -> []
+  task 'receiver' @ 10000000Hz K=500
+    ctrl: edge(_e2_3[0])
+    control subgraph:
+      edge_buffers: _e0_1: float[64], _e1_2: float[1], _e2_3: int32_t[1]
+      firings:
+        [x64] Actor_constant<float><float>(0, dim(1)) -> [_e0_1]
+        Actor_correlate<float>() [_e0_1] -> [_e1_2]
+        Actor_detect<int32_t>() [_e1_2] -> [_e2_3]
+        buf_write(ctrl) <- _e2_3 tokens=1 skip
+    mode 'sync'
+      edge_buffers: _e4_5: float[4], _e5_6: float[1]
+      firings:
+        Actor_constant<float><float>(0, dim(4)) -> [_e4_5]
+        Actor_fir<float><float>(:sync_coeff[4], dim(4)) [_e4_5] -> [_e5_6]
+        probe(?sync_out) _e5_6 tokens=1
+        buf_write(sync_result) <- _e5_6 tokens=1 skip
+    mode 'data'
+      edge_buffers: _e8_9: float[1280], _e9_10: cfloat[1280], _e10_11: float[1280], _e11_12: float[256]
+      firings:
+        fused [x5]:
+          hoist _actor_8 = Actor_constant<float>(0, dim(256))
+          hoist _actor_9 = Actor_fft(256)
+          hoist _actor_10 = Actor_c2r(dim(256))
+          [x5] Actor_constant<float><float>(0, dim(256)) -> [_e8_9]
+          [x5] Actor_fft<cfloat>(256) [_e8_9] -> [_e9_10]
+          [x5] Actor_c2r<float>(dim(256)) [_e9_10] -> [_e10_11]
+        fused [x256]:
+          hoist _actor_11 = Actor_fir<float>(:data_coeff[5], dim(5))
+          [x256] Actor_fir<float><float>(:data_coeff[5], dim(5)) [_e10_11] -> [_e11_12]
+          [x256] probe(?data_out) _e11_12 tokens=256
+        [x256] buf_write(payload) <- _e11_12 tokens=256
+  probe sync_out
+  probe data_out

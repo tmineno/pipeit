@@ -1,0 +1,20 @@
+---
+source: compiler/tests/snapshot_lir.rs
+expression: output
+---
+LirProgram (1 consts, 0 params, 0 inter-task bufs, 1 tasks, 0 probes)
+  const lp_coeff: float[3] = [0.25f, 0.5f, 0.25f]
+  directives: mem=67108864, overrun=drop, timer=Fixed(10000)
+  task 'analyzer' @ 1000Hz K=1
+    edge_buffers: _e0_1: float[192], _e2_3: float[64], _e4_5: cfloat[192], _e5_6: float[192]
+    firings:
+      fused [x64]:
+        hoist _actor_0 = Actor_constant<float>(0, dim(3))
+        hoist _actor_2 = Actor_fir<float>(:lp_coeff[3], dim(3))
+        [x64] Actor_constant<float><float>(0, dim(3)) -> [_e0_1]
+        [x192] fork(~sig)
+        [x64] Actor_fir<float><float>(:lp_coeff[3], dim(3)) [_e0_1] -> [_e2_3]
+      [x3] Actor_fft<cfloat>(64) [_e0_1] -> [_e4_5]
+      [x64] Actor_stdout<float><void>() [_e2_3] -> []
+      [x3] Actor_mag<float>(dim(64)) [_e4_5] -> [_e5_6]
+      [x192] Actor_stdout<float><void>() [_e5_6] -> []

@@ -12,9 +12,10 @@
 // Side effects: none.
 
 use std::collections::HashMap;
-use std::fmt;
 
 use crate::ast::*;
+use crate::diag::codes;
+use crate::diag::{DiagCode, DiagLevel, Diagnostic};
 use crate::id::{CallId, DefId, IdAllocator, TaskId};
 use crate::registry::Registry;
 
@@ -126,35 +127,6 @@ pub struct ProbeEntry {
     pub context: String,
 }
 
-/// A name resolution diagnostic.
-#[derive(Debug, Clone)]
-pub struct Diagnostic {
-    pub level: DiagLevel,
-    pub span: Span,
-    pub message: String,
-    pub hint: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiagLevel {
-    Error,
-    Warning,
-}
-
-impl fmt::Display for Diagnostic {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let level = match self.level {
-            DiagLevel::Error => "error",
-            DiagLevel::Warning => "warning",
-        };
-        write!(f, "{}: {}", level, self.message)?;
-        if let Some(hint) = &self.hint {
-            write!(f, "\n  hint: {}", hint)?;
-        }
-        Ok(())
-    }
-}
-
 // ── Public entry point ──────────────────────────────────────────────────────
 
 /// Resolve all names in a parsed Pipit program.
@@ -224,22 +196,14 @@ impl<'a> ResolveCtx<'a> {
         }
     }
 
-    fn error(&mut self, span: Span, message: String) {
-        self.diagnostics.push(Diagnostic {
-            level: DiagLevel::Error,
-            span,
-            message,
-            hint: None,
-        });
+    fn error(&mut self, code: DiagCode, span: Span, message: String) {
+        self.diagnostics
+            .push(Diagnostic::new(DiagLevel::Error, span, message).with_code(code));
     }
 
-    fn warning(&mut self, span: Span, message: String) {
-        self.diagnostics.push(Diagnostic {
-            level: DiagLevel::Warning,
-            span,
-            message,
-            hint: None,
-        });
+    fn warning(&mut self, code: DiagCode, span: Span, message: String) {
+        self.diagnostics
+            .push(Diagnostic::new(DiagLevel::Warning, span, message).with_code(code));
     }
 
     // ── Pass 1: collect globals ─────────────────────────────────────────
@@ -251,6 +215,7 @@ impl<'a> ResolveCtx<'a> {
                     let name = &c.name.name;
                     if let Some(existing) = self.resolved.consts.get(name) {
                         self.error(
+                            codes::E0001,
                             c.name.span,
                             format!(
                                 "duplicate const '{}' (first defined at offset {})",
@@ -273,6 +238,7 @@ impl<'a> ResolveCtx<'a> {
                     let name = &p.name.name;
                     if let Some(existing) = self.resolved.params.get(name) {
                         self.error(
+                            codes::E0002,
                             p.name.span,
                             format!(
                                 "duplicate param '{}' (first defined at offset {})",
@@ -295,6 +261,7 @@ impl<'a> ResolveCtx<'a> {
                     let name = &d.name.name;
                     if let Some(existing) = self.resolved.defines.get(name) {
                         self.error(
+                            codes::E0003,
                             d.name.span,
                             format!(
                                 "duplicate define '{}' (first defined at offset {})",
@@ -318,6 +285,7 @@ impl<'a> ResolveCtx<'a> {
                     let name = &t.name.name;
                     if let Some(existing) = self.resolved.tasks.get(name) {
                         self.error(
+                            codes::E0004,
                             t.name.span,
                             format!(
                                 "duplicate task '{}' (first defined at offset {})",
@@ -371,7 +339,7 @@ impl<'a> ResolveCtx<'a> {
         }
 
         for (span, message) in collision_errors {
-            self.error(span, message);
+            self.error(codes::E0005, span, message);
         }
     }
 
@@ -394,6 +362,7 @@ impl<'a> ResolveCtx<'a> {
                     for (tap_name, info) in &taps {
                         if !info.consumed {
                             self.error(
+                                codes::E0006,
                                 info.decl_span,
                                 format!(
                                     "tap ':{tap_name}' declared but never consumed in define '{}'",
@@ -443,6 +412,7 @@ impl<'a> ResolveCtx<'a> {
                             for mode in &modal.modes {
                                 if let Some(existing_span) = modes.get(&mode.name.name) {
                                     self.error(
+                                        codes::E0007,
                                         mode.name.span,
                                         format!(
                                             "duplicate mode '{}' in task '{}' (first at offset {})",
@@ -501,6 +471,7 @@ impl<'a> ResolveCtx<'a> {
                         info.consumed = true;
                     } else {
                         self.error(
+                            codes::E0008,
                             ident.span,
                             format!(
                                 "undefined tap ':{name}' in {ctx}",
@@ -521,6 +492,7 @@ impl<'a> ResolveCtx<'a> {
                     PipeElem::Tap(ident) => {
                         if taps.contains_key(&ident.name) {
                             self.error(
+                                codes::E0009,
                                 ident.span,
                                 format!(
                                     "duplicate tap ':{name}' in {ctx}",
@@ -554,6 +526,7 @@ impl<'a> ResolveCtx<'a> {
                 if let Some(existing) = self.resolved.buffers.get(buf_name) {
                     if existing.writer_task != task_name {
                         self.error(
+                            codes::E0010,
                             sink.buffer.span,
                             format!(
                                 "multiple writers to shared buffer '{}': first written by task '{}' (offset {})",
@@ -607,6 +580,7 @@ impl<'a> ResolveCtx<'a> {
                 .insert(call_id, CallResolution::Define);
             if actor_meta.is_some() {
                 self.warning(
+                    codes::W0001,
                     call.name.span,
                     format!("define '{}' shadows actor with the same name", name),
                 );
@@ -625,12 +599,15 @@ impl<'a> ResolveCtx<'a> {
             return;
         }
 
-        self.diagnostics.push(Diagnostic {
-            level: DiagLevel::Error,
-            span: call.name.span,
-            message: format!("unknown actor or define '{}'", name),
-            hint: Some("check actor header includes (-I flag)".to_string()),
-        });
+        self.diagnostics.push(
+            Diagnostic::new(
+                DiagLevel::Error,
+                call.name.span,
+                format!("unknown actor or define '{}'", name),
+            )
+            .with_code(codes::E0011)
+            .with_hint("check actor header includes (-I flag)"),
+        );
     }
 
     fn validate_actor_type_args(&mut self, call: &ActorCall, actor_name: &str, expected: usize) {
@@ -639,6 +616,7 @@ impl<'a> ResolveCtx<'a> {
         }
         if expected == 0 {
             self.error(
+                codes::E0012,
                 call.name.span,
                 format!(
                     "actor '{}' is not polymorphic but was called with type arguments",
@@ -649,6 +627,7 @@ impl<'a> ResolveCtx<'a> {
         }
         if call.type_args.len() != expected {
             self.error(
+                codes::E0013,
                 call.name.span,
                 format!(
                     "actor '{}' expects {} type argument(s), found {}",
@@ -664,14 +643,22 @@ impl<'a> ResolveCtx<'a> {
         match arg {
             Arg::ParamRef(ident) => {
                 if !self.resolved.params.contains_key(&ident.name) {
-                    self.error(ident.span, format!("undefined param '${}'", ident.name));
+                    self.error(
+                        codes::E0014,
+                        ident.span,
+                        format!("undefined param '${}'", ident.name),
+                    );
                 }
             }
             Arg::ConstRef(ident) => {
                 if !scope_has_formal_param(scope, &ident.name)
                     && !self.resolved.consts.contains_key(&ident.name)
                 {
-                    self.error(ident.span, format!("undefined const '{}'", ident.name));
+                    self.error(
+                        codes::E0015,
+                        ident.span,
+                        format!("undefined const '{}'", ident.name),
+                    );
                 }
             }
             Arg::Value(_) => {}
@@ -702,17 +689,21 @@ impl<'a> ResolveCtx<'a> {
             if let crate::ast::ShapeDim::ConstRef(ident) = dim {
                 if !scope_has_formal_param(scope, &ident.name) {
                     if self.resolved.params.contains_key(&ident.name) {
-                        self.diagnostics.push(Diagnostic {
-                            level: DiagLevel::Error,
-                            span: ident.span,
-                            message: format!(
-                                "runtime param '${}' cannot be used as frame dimension",
-                                ident.name
-                            ),
-                            hint: Some("use const or literal for shape constraints".to_string()),
-                        });
+                        self.diagnostics.push(
+                            Diagnostic::new(
+                                DiagLevel::Error,
+                                ident.span,
+                                format!(
+                                    "runtime param '${}' cannot be used as frame dimension",
+                                    ident.name
+                                ),
+                            )
+                            .with_code(codes::E0016)
+                            .with_hint("use const or literal for shape constraints"),
+                        );
                     } else if !self.resolved.consts.contains_key(&ident.name) {
                         self.error(
+                            codes::E0017,
                             ident.span,
                             format!("unknown name '{}' in shape constraint", ident.name),
                         );
@@ -745,6 +736,7 @@ impl<'a> ResolveCtx<'a> {
             SwitchSource::Param(ident) => {
                 if !self.resolved.params.contains_key(&ident.name) {
                     self.error(
+                        codes::E0018,
                         ident.span,
                         format!("undefined param '${}' in switch source", ident.name),
                     );
@@ -756,6 +748,7 @@ impl<'a> ResolveCtx<'a> {
         for mode_ref in &switch.modes {
             if !modes.contains_key(&mode_ref.name) {
                 self.error(
+                    codes::E0019,
                     mode_ref.span,
                     format!(
                         "switch references undefined mode '{}' in task '{}'",
@@ -769,6 +762,7 @@ impl<'a> ResolveCtx<'a> {
         // treat it as metadata only (warn + ignore at runtime).
         if let Some(default) = &switch.default {
             self.warning(
+                codes::W0002,
                 default.span,
                 format!(
                     "deprecated switch default clause in task '{}' is ignored in v0.2",
@@ -783,6 +777,7 @@ impl<'a> ResolveCtx<'a> {
         for (mode_name, mode_span) in modes {
             if !switch_mode_names.contains(&mode_name.as_str()) {
                 self.error(
+                    codes::E0020,
                     *mode_span,
                     format!(
                         "mode '{}' defined in task '{}' but not listed in switch statement",
@@ -796,6 +791,7 @@ impl<'a> ResolveCtx<'a> {
         for mode_ref in &switch.modes {
             if let Some(&first_span) = seen.get(mode_ref.name.as_str()) {
                 self.error(
+                    codes::E0021,
                     mode_ref.span,
                     format!(
                         "mode '{}' listed multiple times in switch of task '{}' (first at offset {})",
@@ -822,6 +818,7 @@ impl<'a> ResolveCtx<'a> {
                     info.consumed = true;
                 } else {
                     self.error(
+                        codes::E0022,
                         ptr.span,
                         format!(
                             "undefined tap ':{name}' referenced as actor input in {scope}",
@@ -846,6 +843,7 @@ impl<'a> ResolveCtx<'a> {
                 info.readers.push((task_name.clone(), *span));
             } else {
                 self.error(
+                    codes::E0023,
                     *span,
                     format!("shared buffer '@{}' has no writer", buf_name),
                 );
@@ -868,7 +866,7 @@ impl<'a> ResolveCtx<'a> {
             }
         }
         for (span, message) in tap_errors {
-            self.error(span, message);
+            self.error(codes::E0006, span, message);
         }
     }
 }

@@ -243,6 +243,7 @@ fn find_node(sub: &Subgraph, id: NodeId) -> Option<&Node> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diag;
     use crate::registry::Registry;
     use crate::resolve;
     use std::path::PathBuf;
@@ -285,7 +286,7 @@ mod tests {
             resolve_result
                 .diagnostics
                 .iter()
-                .all(|d| d.level != resolve::DiagLevel::Error),
+                .all(|d| d.level != diag::DiagLevel::Error),
             "resolve errors: {:?}",
             resolve_result.diagnostics
         );
@@ -300,7 +301,7 @@ mod tests {
             graph_result
                 .diagnostics
                 .iter()
-                .all(|d| d.level != resolve::DiagLevel::Error),
+                .all(|d| d.level != diag::DiagLevel::Error),
             "graph errors: {:?}",
             graph_result.diagnostics
         );
@@ -325,7 +326,7 @@ mod tests {
             analysis_result
                 .diagnostics
                 .iter()
-                .all(|d| d.level != resolve::DiagLevel::Error),
+                .all(|d| d.level != diag::DiagLevel::Error),
             "analysis errors: {:?}",
             analysis_result.diagnostics
         );
@@ -335,7 +336,7 @@ mod tests {
             schedule_result
                 .diagnostics
                 .iter()
-                .all(|d| d.level != resolve::DiagLevel::Error),
+                .all(|d| d.level != diag::DiagLevel::Error),
             "schedule errors: {:?}",
             schedule_result.diagnostics
         );
@@ -826,7 +827,10 @@ mod tests {
         let reg = test_registry();
         let chart = build_and_emit("clock 10MHz t {\n    constant(0.0) | stdout()\n}", &reg);
         assert!(chart.contains("10MHz"), "should format as MHz");
-        assert!(chart.contains("K=10"), "K factor should be 10 for 10MHz");
+        assert!(
+            chart.contains("K=500"),
+            "K factor should be 500 for 10MHz (capped)"
+        );
     }
 
     #[test]

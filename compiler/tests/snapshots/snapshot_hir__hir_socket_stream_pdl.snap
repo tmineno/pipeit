@@ -1,0 +1,11 @@
+---
+source: compiler/tests/snapshot_hir.rs
+expression: output
+---
+HirProgram (0 consts, 2 params, 0 directives, 2 tasks)
+  param freq = 100000
+  param amp = 0.8
+  task 'sender' @ 100000000 (pipeline)
+    sine<float>($freq, $amp)[256] | socket_write("localhost:9100", 0)
+  task 'receiver' @ 1000 (pipeline)
+    socket_read("localhost:9200") | stdout()

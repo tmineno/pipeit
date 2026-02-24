@@ -5,7 +5,7 @@
 pub mod analyze;
 pub mod ast;
 pub mod codegen;
-pub mod dim_resolve;
+pub mod diag;
 pub mod dot;
 pub mod graph;
 pub mod hir;
@@ -16,7 +16,6 @@ pub mod lower;
 pub mod parser;
 pub mod pass;
 pub mod pipeline;
-pub mod program_query;
 pub mod registry;
 pub mod resolve;
 pub mod schedule;

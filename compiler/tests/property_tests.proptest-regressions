@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c4e690da26b04015eee01ff30cbdef77ad99bb7070dc24d75b525a8a136c945a # shrinks to pdl = "task t0 @ 1000Hz {\n  constant(109158332307614700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000)\n}\n"
+cc ab1b0a32e7f9035834ddc980b5528a2512191508c449928b697847cc6b56c366 # shrinks to pdl = "task t0 @ 1000Hz {\n  constant(0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003321296718765144)\n}\n"

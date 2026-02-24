@@ -1,0 +1,92 @@
+---
+source: compiler/tests/snapshot_lir.rs
+expression: output
+---
+LirProgram (2 consts, 1 params, 6 inter-task bufs, 3 tasks, 4 probes)
+  const lp_coeff: float[5] = [0.1f, 0.2f, 0.4f, 0.2f, 0.1f]
+  const bp_coeff: float[5] = [0.05f, -0.1f, 0.3f, -0.1f, 0.05f]
+  param agc_gain: float = "1" (cli: std::stof)
+  directives: mem=134217728, overrun=drop, timer=Fixed(10000)
+  inter-task ctl: int32_t[256] readers=1 [] skip_writes
+  inter-task data_buf: float[256] readers=1 [] skip_writes
+  inter-task filtered: float[512] readers=1 [analysis]
+  inter-task narrow: float[512] readers=1 [analysis]
+  inter-task sync_buf: float[256] readers=1 [] skip_writes
+  inter-task wideband: float[512] readers=1 [analysis]
+  task 'analysis' @ 10000000Hz K=500
+    edge_buffers: _e23_24: float[256], _e24_25: float[1], _e28_29: float[256], _e29_30: float[1], _e31_32: float[256], _e32_33: float[1]
+    firings:
+      [x256] buf_read(filtered) -> _e23_24 tokens=256
+      [x256] buf_read(narrow) -> _e28_29 tokens=256
+      [x256] buf_read(wideband) -> _e31_32 tokens=256
+      Actor_decimate<float><float>(256) [_e23_24] -> [_e24_25]
+      Actor_decimate<float><float>(256) [_e28_29] -> [_e29_30]
+      Actor_decimate<float><float>(256) [_e31_32] -> [_e32_33]
+      fork(~dec_f)
+      Actor_csvwrite<void>("narrow.csv") [_e29_30] -> []
+      Actor_csvwrite<void>("wideband.csv") [_e32_33] -> []
+      Actor_csvwrite<void>("filtered.csv") [_e24_25] -> []
+      Actor_stdout<float><void>() [_e24_25] -> []
+  task 'capture' @ 10000000Hz K=500
+    feedback _fb_10_11: float[1] init=0
+    edge_buffers: _e0_1: float[1280], _e1_2: cfloat[1280], _e3_4: float[1280], _e4_5: float[256], _e5_6: float[256], _e6_7: float[256], _fb_10_11: [1] (fb), _e12_13: float[1280], _e14_15: float[1280], _e15_16: cfloat[1280], _e16_17: float[1280], _e18_19: float[256], _e21_22: float[256]
+    firings:
+      [x5] Actor_constant<float><float>(0, dim(256)) -> [_e0_1]
+      [x256] fork(~fb)
+      [x5] Actor_constant<float><float>(0, dim(256)) -> [_e14_15]
+      [x5] Actor_fft<cfloat>(256) [_e0_1] -> [_e1_2]
+      [x5] Actor_fft<cfloat>(256) [_e14_15] -> [_e15_16]
+      [x1280] fork(~spec0)
+      [x5] Actor_c2r<float>(dim(256)) [_e15_16] -> [_e16_17]
+      [x5] Actor_c2r<float>(dim(256)) [_e1_2] -> [_e3_4]
+      [x5] Actor_mag<float>(dim(256)) [_e1_2] -> [_e12_13]
+      [x1280] fork(~raw1)
+      [x256] Actor_fir<float><float>(:lp_coeff[5], dim(5)) [_e3_4] -> [_e4_5]
+      [x1280] Actor_stdout<float><void>() [_e12_13] -> []
+      [x256] Actor_fir<float><float>(:bp_coeff[5], dim(5)) [_e16_17] -> [_e18_19]
+      [x256] Actor_fir<float><float>(:lp_coeff[5], dim(5)) [_e16_17] -> [_e21_22]
+      [x256] Actor_add<float><float>() [_e4_5, _fb_10_11] -> [_e5_6]
+      [x256] probe(?bp_out) _e18_19 tokens=256
+      [x256] buf_write(wideband) <- _e21_22 tokens=256
+      [x256] Actor_mul<float><float>($agc_gain, dim(1)) [_e5_6] -> [_e6_7]
+      [x256] buf_write(narrow) <- _e18_19 tokens=256
+      fused [x256]:
+        [x256] fork(~agc)
+        [x256] probe(?agc_out) _e6_7 tokens=256
+      [x256] Actor_delay<float><float>(1, 0) [_e6_7] -> [_fb_10_11]
+      [x256] buf_write(filtered) <- _e6_7 tokens=256
+  task 'monitor' @ 10000000Hz K=500
+    ctrl: edge(_e36_37[0])
+    control subgraph:
+      edge_buffers: _e34_35: float[64], _e35_36: float[1], _e36_37: int32_t[1]
+      firings:
+        [x64] Actor_constant<float><float>(0, dim(1)) -> [_e34_35]
+        Actor_correlate<float>() [_e34_35] -> [_e35_36]
+        Actor_detect<int32_t>() [_e35_36] -> [_e36_37]
+        buf_write(ctl) <- _e36_37 tokens=1 skip
+    mode 'sync'
+      edge_buffers: _e38_39: float[5], _e39_40: float[1]
+      firings:
+        Actor_constant<float><float>(0, dim(5)) -> [_e38_39]
+        Actor_fir<float><float>(:lp_coeff[5], dim(5)) [_e38_39] -> [_e39_40]
+        probe(?sync_probe) _e39_40 tokens=1
+        buf_write(sync_buf) <- _e39_40 tokens=1 skip
+    mode 'data'
+      edge_buffers: _e42_43: float[1280], _e43_44: cfloat[1280], _e44_45: float[1280], _e45_46: float[256]
+      firings:
+        fused [x5]:
+          hoist _actor_42 = Actor_constant<float>(0, dim(256))
+          hoist _actor_43 = Actor_fft(256)
+          hoist _actor_44 = Actor_c2r(dim(256))
+          [x5] Actor_constant<float><float>(0, dim(256)) -> [_e42_43]
+          [x5] Actor_fft<cfloat>(256) [_e42_43] -> [_e43_44]
+          [x5] Actor_c2r<float>(dim(256)) [_e43_44] -> [_e44_45]
+        fused [x256]:
+          hoist _actor_45 = Actor_fir<float>(:bp_coeff[5], dim(5))
+          [x256] Actor_fir<float><float>(:bp_coeff[5], dim(5)) [_e44_45] -> [_e45_46]
+          [x256] probe(?data_probe) _e45_46 tokens=256
+        [x256] buf_write(data_buf) <- _e45_46 tokens=256 skip
+  probe agc_out
+  probe bp_out
+  probe sync_probe
+  probe data_probe

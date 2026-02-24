@@ -19,8 +19,9 @@ use chumsky::span::Span as _;
 
 use crate::analyze::AnalyzedProgram;
 use crate::ast::*;
+use crate::diag::codes;
+use crate::diag::{DiagCode, DiagLevel, Diagnostic};
 use crate::graph::*;
-use crate::resolve::{DiagLevel, Diagnostic};
 use crate::thir::ThirContext;
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -231,22 +232,14 @@ impl<'a> ScheduleCtx<'a> {
         }
     }
 
-    fn error(&mut self, span: Span, message: String) {
-        self.diagnostics.push(Diagnostic {
-            level: DiagLevel::Error,
-            span,
-            message,
-            hint: None,
-        });
+    fn error(&mut self, code: DiagCode, span: Span, message: String) {
+        self.diagnostics
+            .push(Diagnostic::new(DiagLevel::Error, span, message).with_code(code));
     }
 
-    fn warning(&mut self, span: Span, message: String) {
-        self.diagnostics.push(Diagnostic {
-            level: DiagLevel::Warning,
-            span,
-            message,
-            hint: None,
-        });
+    fn warning(&mut self, code: DiagCode, span: Span, message: String) {
+        self.diagnostics
+            .push(Diagnostic::new(DiagLevel::Warning, span, message).with_code(code));
     }
 
     fn build_result(self) -> ScheduleResult {
@@ -321,6 +314,7 @@ impl<'a> ScheduleCtx<'a> {
         let period_ns = 1_000_000_000.0 / timer_hz;
         if period_ns < 10_000.0 {
             self.warning(
+                codes::W0400,
                 freq_span,
                 format!(
                     "effective tick period is {:.0}ns ({:.0}Hz); \
@@ -418,6 +412,7 @@ impl<'a> ScheduleCtx<'a> {
                 .filter(|id| !scheduled.contains(id))
                 .collect();
             self.error(
+                codes::E0400,
                 Span::new((), 0..0),
                 format!(
                     "cannot schedule subgraph '{}' of task '{}': {} node(s) in \
@@ -498,12 +493,17 @@ impl<'a> ScheduleCtx<'a> {
 use crate::subgraph_index::find_node;
 
 /// K factor: iterations per tick (compile-time heuristic).
-/// K = ceil(freq / tick_rate). Default tick_rate = 1 MHz.
+/// K = ceil(freq / tick_rate), capped at MAX_K to prevent UDP buffer
+/// overflow when tasks contain network actors (socket_write).
+/// A burst of K packets must fit within the OS default receive buffer
+/// (~212 KB on Linux = ~390 packets at 1072 bytes each).
+const MAX_K_FACTOR: u32 = 500;
+
 fn compute_k_factor(freq_hz: f64, tick_rate_hz: f64) -> u32 {
     if freq_hz <= tick_rate_hz {
         1
     } else {
-        (freq_hz / tick_rate_hz).ceil() as u32
+        ((freq_hz / tick_rate_hz).ceil() as u32).min(MAX_K_FACTOR)
     }
 }
 
@@ -734,10 +734,10 @@ mod tests {
     #[test]
     fn k_factor_high_freq() {
         let reg = test_registry();
-        // default tick_rate = 10kHz → K = ceil(10MHz / 10kHz) = 1000
+        // default tick_rate = 10kHz → K = ceil(10MHz / 10kHz) = 1000, capped to 500
         let result = schedule_ok("clock 10MHz t {\n    constant(0.0) | stdout()\n}", &reg);
         let meta = result.schedule.tasks.get("t").unwrap();
-        assert_eq!(meta.k_factor, 1000);
+        assert_eq!(meta.k_factor, 500);
     }
 
     #[test]

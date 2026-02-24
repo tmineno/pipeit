@@ -15,6 +15,11 @@
 #include <thread>
 #include <vector>
 
+#ifdef __linux__
+#include <poll.h>
+#include <sys/socket.h>
+#endif
+
 #include <pipit_net.h>
 
 namespace pipscope {
@@ -31,13 +36,28 @@ struct SampleBuffer {
 
     explicit SampleBuffer(size_t cap = 1'000'000) : data(cap, 0.0f), capacity(cap) {}
 
-    /// Append n samples to the buffer.
+    /// Append n samples to the buffer (wrap-aware memcpy).
     void push(const float *samples, size_t n) {
-        for (size_t i = 0; i < n; i++) {
-            data[head] = samples[i];
-            head = (head + 1) % capacity;
+        if (n >= capacity) {
+            // More samples than capacity — keep only the last `capacity` samples
+            std::memcpy(data.data(), samples + (n - capacity), capacity * sizeof(float));
+            head = 0;
+            count = capacity;
+            return;
         }
+        size_t first = std::min(n, capacity - head);
+        std::memcpy(data.data() + head, samples, first * sizeof(float));
+        if (first < n) {
+            std::memcpy(data.data(), samples + first, (n - first) * sizeof(float));
+        }
+        head = (head + n) % capacity;
         count = std::min(count + n, capacity);
+    }
+
+    /// Reset the buffer without reallocating. O(1).
+    void clear() {
+        head = 0;
+        count = 0;
     }
 
     /// Copy the most recent `max_n` samples into dst (oldest → newest order).
@@ -147,6 +167,7 @@ struct FrameStats {
     uint64_t drop_iter_gap = 0;      // iteration_index discontinuity
     uint64_t drop_boundary = 0;      // missing start/end boundary
     uint64_t drop_meta_mismatch = 0; // dtype/sample_rate changed mid-frame
+    uint64_t inter_frame_gaps = 0;   // kernel-level packet loss (inter-frame iter gap)
 };
 
 // ── Pending frame accumulator ────────────────────────────────────────────────
@@ -166,7 +187,7 @@ struct PendingFrame {
     }
 };
 
-// ── ChannelState ─────────────────────────────────────────────────────────────
+// ── ChannelState (shared, protected by mutex_) ──────────────────────────────
 
 struct ChannelState {
     uint16_t chan_id;
@@ -175,9 +196,16 @@ struct ChannelState {
     uint64_t packet_count = 0;
     SampleBuffer buffer;
     FrameStats stats;
-    PendingFrame pending;
 
     explicit ChannelState(uint16_t id, size_t buf_capacity) : chan_id(id), buffer(buf_capacity) {}
+};
+
+// ── ChannelRecvState (recv-thread-only, no lock needed) ─────────────────────
+
+struct ChannelRecvState {
+    PendingFrame pending;
+    bool iter_tracking = false;
+    uint64_t next_expected_iter = 0;
 };
 
 // ── PpktReceiver ─────────────────────────────────────────────────────────────
@@ -191,6 +219,12 @@ struct ChannelSnapshot {
     std::vector<float> samples;
 };
 
+/// Receiver-level metrics for observability (lock-free, atomic reads).
+struct ReceiverMetrics {
+    uint64_t recv_packets;
+    uint64_t recv_bytes;
+};
+
 class PpktReceiver {
     int fd_ = -1;
     std::atomic<bool> running_{false};
@@ -200,31 +234,59 @@ class PpktReceiver {
     std::map<uint16_t, ChannelState> channels_;
     size_t buffer_capacity_;
 
+    // Lock-free recv metrics (incremented in recv_loop, read from GUI thread)
+    std::atomic<uint64_t> recv_packets_{0};
+    std::atomic<uint64_t> recv_bytes_{0};
+
+    // Signal recv_loop to clear its local ChannelRecvState map (set by clear_channels)
+    std::atomic<bool> recv_state_reset_{false};
+
   public:
     explicit PpktReceiver(size_t buffer_capacity = 1'000'000) : buffer_capacity_(buffer_capacity) {}
 
     ~PpktReceiver() { stop(); }
 
-    /// Bind to UDP port on localhost and start the receiver thread.
+    size_t buffer_capacity() const { return buffer_capacity_; }
+
+    /// Bind to UDP port on all interfaces and start the receiver thread.
     bool start(uint16_t port) {
-        // Create and bind socket
-        fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+        char addr_str[32];
+        snprintf(addr_str, sizeof(addr_str), "0.0.0.0:%u", port);
+        return start(addr_str);
+    }
+
+    /// Bind to the given address string and start the receiver thread.
+    ///
+    /// Preconditions: receiver must be stopped.
+    /// Postconditions: on success, receiver thread is running.
+    /// Failure modes: returns false if address is invalid or bind fails.
+    /// Side effects: opens a socket and spawns a background thread.
+    ///
+    /// Supports "host:port" (UDP) and "unix:///path" (Unix domain socket).
+    bool start(const char *address) {
+        pipit::net::ParsedAddr pa = pipit::net::parse_address(address, std::strlen(address));
+        if (pa.kind == pipit::net::AddrKind::INVALID)
+            return false;
+
+        int domain = (pa.kind == pipit::net::AddrKind::UNIX) ? AF_UNIX : AF_INET;
+        fd_ = ::socket(domain, SOCK_DGRAM, 0);
         if (fd_ < 0)
             return false;
 
-        int optval = 1;
-        setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+        if (domain == AF_INET) {
+            int optval = 1;
+            setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+        }
 
-        // Enlarge receive buffer to reduce kernel-level drops at high packet rates
-        int rcvbuf = 4 * 1024 * 1024; // 4 MB
-        setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+        // Enlarge receive buffer to reduce kernel-level drops at high packet rates.
+        // SO_RCVBUF is silently capped by /proc/sys/net/core/rmem_max (often 212 KB).
+        // Try SO_RCVBUFFORCE first (requires CAP_NET_ADMIN), fall back to SO_RCVBUF.
+        int rcvbuf = 16 * 1024 * 1024; // 16 MB requested
+        if (setsockopt(fd_, SOL_SOCKET, SO_RCVBUFFORCE, &rcvbuf, sizeof(rcvbuf)) < 0) {
+            setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+        }
 
-        struct sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_ANY);
-        addr.sin_port = htons(port);
-
-        if (::bind(fd_, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0) {
+        if (::bind(fd_, reinterpret_cast<const struct sockaddr *>(&pa.storage), pa.len) < 0) {
             ::close(fd_);
             fd_ = -1;
             return false;
@@ -275,6 +337,40 @@ class PpktReceiver {
         return result;
     }
 
+    /// Fill caller-owned snapshot vector, reusing existing allocations.
+    /// After first frame, steady-state calls perform zero heap allocations.
+    void snapshot_into(std::vector<ChannelSnapshot> &out, size_t max_samples) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        out.resize(channels_.size());
+        size_t idx = 0;
+        for (auto &[id, ch] : channels_) {
+            auto &snap = out[idx++];
+            snap.chan_id = ch.chan_id;
+            snap.sample_rate_hz = ch.sample_rate_hz;
+            snap.packet_count = ch.packet_count;
+            snap.stats = ch.stats;
+            snap.samples.resize(max_samples); // no-op when capacity already sufficient
+            size_t n = ch.buffer.snapshot(snap.samples.data(), max_samples);
+            snap.samples.resize(n); // shrink size, no dealloc
+        }
+    }
+
+    /// Clear all channel data. Called on reconnect to discard stale data.
+    void clear_channels() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        channels_.clear();
+        recv_state_reset_.store(true, std::memory_order_release);
+    }
+
+    /// Returns true if the receiver thread is currently running.
+    bool is_running() const { return running_.load(); }
+
+    /// Return lock-free receiver metrics (packet/byte counters).
+    ReceiverMetrics metrics() const {
+        return {recv_packets_.load(std::memory_order_relaxed),
+                recv_bytes_.load(std::memory_order_relaxed)};
+    }
+
     // Non-copyable
     PpktReceiver(const PpktReceiver &) = delete;
     PpktReceiver &operator=(const PpktReceiver &) = delete;
@@ -282,7 +378,7 @@ class PpktReceiver {
   private:
     static constexpr size_t kMaxPacketBytes = 65536;
     static constexpr size_t kMaxConvertedSamples = 8192;
-    static constexpr auto kPollSleep = std::chrono::microseconds(100);
+    static constexpr auto kPollSleep = std::chrono::microseconds(10);
 
     enum class RecvStatus { Retry, Packet, Fatal };
 
@@ -341,7 +437,8 @@ class PpktReceiver {
 
     enum class DropReason { SeqGap, IterGap, Boundary, MetaMismatch };
 
-    void record_drop(ChannelState &ch, DropReason reason) {
+    /// Record a frame drop with reason. Called under mutex.
+    static void record_drop(ChannelState &ch, ChannelRecvState &rs, DropReason reason) {
         ch.stats.dropped_frames++;
         switch (reason) {
         case DropReason::SeqGap:
@@ -357,110 +454,237 @@ class PpktReceiver {
             ch.stats.drop_meta_mismatch++;
             break;
         }
-        ch.pending.reset();
+        rs.pending.reset();
     }
 
+    /// Assemble a decoded packet into frames.
+    /// recv_state is recv-thread-local — no lock needed for accumulation.
+    /// Lock is only acquired for the brief commit to shared ChannelState.
     void assemble_frame(const pipit::net::PpktHeader &hdr, const float *samples,
-                        size_t sample_count) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto &ch = get_or_create_channel(hdr.chan_id);
-        ch.sample_rate_hz = hdr.sample_rate_hz;
-        ch.last_sequence = hdr.sequence;
-        ch.packet_count++;
-
+                        size_t sample_count, ChannelRecvState &rs) {
         bool is_start = (hdr.flags & pipit::net::FLAG_FRAME_START) != 0;
         bool is_end = (hdr.flags & pipit::net::FLAG_FRAME_END) != 0;
 
-        // ── Start of a new frame ──
+        // ── Start of a new frame (lock-free accumulation) ──
         if (is_start) {
-            if (ch.pending.active) {
-                // Previous frame never closed — drop it
-                record_drop(ch, DropReason::Boundary);
+            if (rs.pending.active) {
+                // Previous frame never closed — drop it (needs lock for stats)
+                std::lock_guard<std::mutex> lock(mutex_);
+                auto &ch = get_or_create_channel(hdr.chan_id);
+                ch.packet_count++;
+                record_drop(ch, rs, DropReason::Boundary);
             }
-            ch.pending.active = true;
-            ch.pending.expected_sequence = hdr.sequence + 1;
-            ch.pending.start_timestamp_ns = hdr.timestamp_ns;
-            ch.pending.next_iteration = hdr.iteration_index + sample_count;
-            ch.pending.dtype = hdr.dtype;
-            ch.pending.sample_rate_hz = hdr.sample_rate_hz;
-            ch.pending.samples.assign(samples, samples + sample_count);
+
+            // ── Inter-frame iteration_index continuity check ──
+            if (hdr.flags & pipit::net::FLAG_FIRST_FRAME) {
+                rs.iter_tracking = false;
+            }
+            bool has_gap = rs.iter_tracking && hdr.iteration_index != rs.next_expected_iter;
+
+            rs.pending.active = true;
+            rs.pending.expected_sequence = hdr.sequence + 1;
+            rs.pending.start_timestamp_ns = hdr.timestamp_ns;
+            rs.pending.next_iteration = hdr.iteration_index + sample_count;
+            rs.pending.dtype = hdr.dtype;
+            rs.pending.sample_rate_hz = hdr.sample_rate_hz;
+            rs.pending.samples.assign(samples, samples + sample_count);
 
             if (is_end) {
-                // Single-chunk frame — commit immediately
+                // Single-chunk frame — commit under lock
+                std::lock_guard<std::mutex> lock(mutex_);
+                auto &ch = get_or_create_channel(hdr.chan_id);
+                ch.sample_rate_hz = hdr.sample_rate_hz;
+                ch.last_sequence = hdr.sequence;
+                ch.packet_count++;
+                if (has_gap) {
+                    ch.stats.inter_frame_gaps++;
+                    ch.buffer.clear();
+                }
                 ch.stats.accepted_frames++;
-                ch.buffer.push(ch.pending.samples.data(), ch.pending.samples.size());
-                ch.pending.reset();
+                ch.buffer.push(rs.pending.samples.data(), rs.pending.samples.size());
+                rs.pending.reset();
+                rs.iter_tracking = true;
+                rs.next_expected_iter = hdr.iteration_index + sample_count;
+            } else {
+                // Multi-chunk frame start — update metadata under lock
+                std::lock_guard<std::mutex> lock(mutex_);
+                auto &ch = get_or_create_channel(hdr.chan_id);
+                ch.sample_rate_hz = hdr.sample_rate_hz;
+                ch.last_sequence = hdr.sequence;
+                ch.packet_count++;
+                if (has_gap) {
+                    ch.stats.inter_frame_gaps++;
+                    ch.buffer.clear();
+                }
             }
             return;
         }
 
         // ── Continuation / end chunk without a preceding start ──
-        if (!ch.pending.active) {
-            record_drop(ch, DropReason::Boundary);
+        if (!rs.pending.active) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto &ch = get_or_create_channel(hdr.chan_id);
+            ch.packet_count++;
+            record_drop(ch, rs, DropReason::Boundary);
             return;
         }
 
-        // ── Validate sequence continuity ──
-        if (hdr.sequence != ch.pending.expected_sequence) {
-            record_drop(ch, DropReason::SeqGap);
+        // ── Validate sequence continuity (lock-free) ──
+        if (hdr.sequence != rs.pending.expected_sequence) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto &ch = get_or_create_channel(hdr.chan_id);
+            ch.packet_count++;
+            record_drop(ch, rs, DropReason::SeqGap);
             return;
         }
 
-        // ── Validate iteration continuity ──
-        if (hdr.iteration_index != ch.pending.next_iteration) {
-            record_drop(ch, DropReason::IterGap);
+        // ── Validate iteration continuity (lock-free) ──
+        if (hdr.iteration_index != rs.pending.next_iteration) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto &ch = get_or_create_channel(hdr.chan_id);
+            ch.packet_count++;
+            record_drop(ch, rs, DropReason::IterGap);
             return;
         }
 
-        // ── Validate metadata consistency within frame ──
-        if (hdr.timestamp_ns != ch.pending.start_timestamp_ns || hdr.dtype != ch.pending.dtype ||
-            hdr.sample_rate_hz != ch.pending.sample_rate_hz) {
-            record_drop(ch, DropReason::MetaMismatch);
+        // ── Validate metadata consistency within frame (lock-free) ──
+        if (hdr.timestamp_ns != rs.pending.start_timestamp_ns || hdr.dtype != rs.pending.dtype ||
+            hdr.sample_rate_hz != rs.pending.sample_rate_hz) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto &ch = get_or_create_channel(hdr.chan_id);
+            ch.packet_count++;
+            record_drop(ch, rs, DropReason::MetaMismatch);
             return;
         }
 
-        // ── Accumulate chunk ──
-        ch.pending.samples.insert(ch.pending.samples.end(), samples, samples + sample_count);
-        ch.pending.expected_sequence = hdr.sequence + 1;
-        ch.pending.next_iteration = hdr.iteration_index + sample_count;
+        // ── Accumulate chunk (lock-free) ──
+        rs.pending.samples.insert(rs.pending.samples.end(), samples, samples + sample_count);
+        rs.pending.expected_sequence = hdr.sequence + 1;
+        rs.pending.next_iteration = hdr.iteration_index + sample_count;
 
-        // ── Commit if frame is complete ──
+        // ── Commit if frame is complete (brief lock) ──
         if (is_end) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto &ch = get_or_create_channel(hdr.chan_id);
+            ch.sample_rate_hz = hdr.sample_rate_hz;
+            ch.last_sequence = hdr.sequence;
+            ch.packet_count++;
             ch.stats.accepted_frames++;
-            ch.buffer.push(ch.pending.samples.data(), ch.pending.samples.size());
-            ch.pending.reset();
+            ch.buffer.push(rs.pending.samples.data(), rs.pending.samples.size());
+            rs.iter_tracking = true;
+            rs.next_expected_iter = rs.pending.next_iteration;
+            rs.pending.reset();
+        } else {
+            // Continuation chunk — update packet_count under lock
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto &ch = get_or_create_channel(hdr.chan_id);
+            ch.last_sequence = hdr.sequence;
+            ch.packet_count++;
         }
     }
 
+    /// Process a single raw packet: decode header+samples, then assemble frame.
+    void process_packet(const uint8_t *buf, size_t packet_size, float *conv_buf,
+                        size_t conv_capacity, std::map<uint16_t, ChannelRecvState> &recv_state) {
+        recv_packets_.fetch_add(1, std::memory_order_relaxed);
+        recv_bytes_.fetch_add(packet_size, std::memory_order_relaxed);
+
+        pipit::net::PpktHeader hdr{};
+        const uint8_t *payload = nullptr;
+        size_t payload_bytes = 0;
+        if (!decode_packet(buf, packet_size, hdr, payload, payload_bytes))
+            return;
+
+        size_t converted = 0;
+        if (!decode_samples(payload, payload_bytes, hdr, conv_buf, conv_capacity, converted))
+            return;
+
+        auto &rs = recv_state[hdr.chan_id];
+        assemble_frame(hdr, conv_buf, converted, rs);
+    }
+
     void recv_loop() {
-        alignas(8) std::array<uint8_t, kMaxPacketBytes> buf{};
         std::array<float, kMaxConvertedSamples> conv_buf{};
+        std::map<uint16_t, ChannelRecvState> recv_state;
+
+#ifdef __linux__
+        // ── Linux optimized path: poll() + recvmmsg() drain loop ──
+        static constexpr int kBatchSize = 16;
+
+        // Allocate batch buffers once
+        std::vector<std::array<uint8_t, kMaxPacketBytes>> batch_bufs(kBatchSize);
+        std::vector<struct iovec> iovecs(kBatchSize);
+        std::vector<struct mmsghdr> msgs(kBatchSize);
+
+        for (int i = 0; i < kBatchSize; ++i) {
+            iovecs[i].iov_base = batch_bufs[i].data();
+            iovecs[i].iov_len = kMaxPacketBytes;
+            std::memset(&msgs[i], 0, sizeof(struct mmsghdr));
+            msgs[i].msg_hdr.msg_iov = &iovecs[i];
+            msgs[i].msg_hdr.msg_iovlen = 1;
+        }
+
+        struct pollfd pfd{};
+        pfd.fd = fd_;
+        pfd.events = POLLIN;
 
         while (running_.load()) {
+            // Check if clear_channels() requested a recv_state reset
+            if (recv_state_reset_.exchange(false, std::memory_order_acquire))
+                recv_state.clear();
+
+            int pr = ::poll(&pfd, 1, 1); // 1ms timeout for running_ flag check
+
+            if (pr < 0) {
+                if (errno == EINTR)
+                    continue;
+                break; // fatal (EBADF, ENOMEM)
+            }
+            if (pr == 0)
+                continue; // timeout, check running_ flag
+
+            // Drain all available packets
+            for (;;) {
+                int n = ::recvmmsg(fd_, msgs.data(), kBatchSize, MSG_DONTWAIT, nullptr);
+                if (n > 0) {
+                    for (int i = 0; i < n; ++i) {
+                        process_packet(batch_bufs[i].data(), msgs[i].msg_len, conv_buf.data(),
+                                       conv_buf.size(), recv_state);
+                    }
+                    // Reset iovecs for next batch (recvmmsg may modify iov_len)
+                    for (int i = 0; i < n; ++i) {
+                        iovecs[i].iov_len = kMaxPacketBytes;
+                    }
+                } else if (n < 0) {
+                    if (errno == EINTR)
+                        continue;
+                    if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        break; // socket drained → back to poll
+                    break;     // unexpected error → back to poll
+                } else {
+                    break; // n==0, shouldn't happen
+                }
+            }
+        }
+#else
+        // ── Fallback path: single recvfrom + sleep ──
+        alignas(8) std::array<uint8_t, kMaxPacketBytes> buf{};
+
+        while (running_.load()) {
+            // Check if clear_channels() requested a recv_state reset
+            if (recv_state_reset_.exchange(false, std::memory_order_acquire))
+                recv_state.clear();
+
             size_t packet_size = 0;
             RecvStatus status = recv_datagram(buf.data(), buf.size(), packet_size);
-            if (status == RecvStatus::Retry) {
+            if (status == RecvStatus::Retry)
                 continue;
-            }
-            if (status == RecvStatus::Fatal) {
+            if (status == RecvStatus::Fatal)
                 break;
-            }
 
-            pipit::net::PpktHeader hdr{};
-            const uint8_t *payload = nullptr;
-            size_t payload_bytes = 0;
-            if (!decode_packet(buf.data(), packet_size, hdr, payload, payload_bytes)) {
-                continue;
-            }
-
-            size_t converted = 0;
-            if (!decode_samples(payload, payload_bytes, hdr, conv_buf.data(), conv_buf.size(),
-                                converted)) {
-                continue;
-            }
-
-            assemble_frame(hdr, conv_buf.data(), converted);
+            process_packet(buf.data(), packet_size, conv_buf.data(), conv_buf.size(), recv_state);
         }
+#endif
     }
 };
 

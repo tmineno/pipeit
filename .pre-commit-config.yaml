@@ -28,7 +28,7 @@ repos:
         entry: ./benches/commit_characterize.sh --id-source head --skip-if-exists
         language: system
         pass_filenames: false
-        files: ^compiler/
+        always_run: true
         stages: [post-commit]
 
   # Documentation

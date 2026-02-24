@@ -43,7 +43,7 @@ Presentation contract:
 
 ## Exit criteria
 
-- [ ] Shared diagnostic data type is used across core passes.
-- [ ] Stable code namespace is documented and enforced.
-- [ ] Primary/related span output is available in human and JSON formats.
-- [ ] Cause-chain diagnostics exist for propagated constraint failures.
+- [x] Shared diagnostic data type is used across core passes.
+- [x] Stable code namespace is documented and enforced.
+- [x] Primary/related span output is available in human and JSON formats.
+- [x] Cause-chain diagnostics exist for propagated constraint failures.

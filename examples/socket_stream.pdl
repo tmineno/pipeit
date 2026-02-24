@@ -21,8 +21,8 @@ param amp  = 0.8
 # Generate a sine wave and stream it out via UDP.
 # Block size 256 batches samples into ~1KB packets instead of
 # sending one sample per packet (which overwhelms UDP at 10MHz).
-clock 1000MHz sender {
-    sine<float>($freq, $amp) | socket_write("localhost:9100", 0)
+clock 100MHz sender {
+    sine<float>($freq, $amp)[256] | socket_write("localhost:9100", 0)
 }
 
 # Receive samples from another process and print them
