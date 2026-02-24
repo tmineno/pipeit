@@ -50,7 +50,7 @@ c++ -std=c++20 -O2 gain.cpp \
 # Or compile directly to executable (one step, requires C++20)
 target/release/pcc examples/gain.pdl \
   -I runtime/libpipit/include/std_actors.h \
-  --cflags=-std=c++20 \
+  --cflags="-std=c++20 -O2" \
   -o gain
 
 # Run with duration and stats
@@ -70,14 +70,13 @@ target/release/pcc examples/gain.pdl \
 
 ### Compiler (`pcc`)
 
-- Full pipeline: parse → resolve → type_infer → lower → graph → analyze → schedule → codegen
+- Full pipeline: parse → resolve → HIR → type_infer → lower → graph → analyze → schedule → LIR → codegen
+- Pass-manager orchestration with `--emit`-driven minimal evaluation
 - Polymorphic actors with constraint-based type inference (`actor<T>`)
 - Implicit safe widening: `int8 → int16 → int32 → float → double`, `cfloat → cdouble`
 - Dimension mismatch diagnostics (explicit arg vs shape constraint vs span-derived conflicts)
 - SDF balance verification, feedback delay validation
-- Overrun policies: `drop`, `slip`, `backlog`
-- Actor error propagation with structured exit codes (0/1/2)
-- Diagnostic hints for common errors
+- Structured diagnostics (`human` / `json`) with stable diagnostic codes
 
 ### Runtime
 
@@ -85,11 +84,13 @@ target/release/pcc examples/gain.pdl \
 - `--param name=value` for runtime parameter override
 - `--stats` for per-task timing statistics
 - `--probe <name>` / `--probe-output <path>` for data observation
+- `--threads <n>` advisory runtime hint
 - `--release` strips probes to zero cost
 - Adaptive spin-wait timer with EWMA calibration (ADR-014)
 
-### Standard Actors (33 actors)
+### Standard Actors
 
+- Split headers: `std_actors.h`, `std_math.h`, `std_sink.h`, `std_source.h`
 - **I/O**: `stdin`, `stdout`, `stderr`, `stdout_fmt`, `binread`, `binwrite`
 - **Math**: `constant`, `mul`, `add`, `sub`, `div`, `abs`, `sqrt`, `threshold`, `convolution`
 - **Statistics**: `mean`, `rms`, `min`, `max`
@@ -103,6 +104,10 @@ target/release/pcc examples/gain.pdl \
 
 ### Output Modes
 
+- `--emit exe` — Generate and compile executable (default)
+- `--emit cpp` — Emit generated C++ source
+- `--emit ast` — Dump parsed AST
+- `--emit graph` — Dump analyzed graph view
 - `--emit manifest` — Actor metadata JSON (hermetic builds, no `.pdl` required)
 - `--emit build-info` — Provenance JSON (source hash, registry fingerprint)
 - `--emit graph-dot` — Graphviz DOT dataflow graph
@@ -113,7 +118,7 @@ target/release/pcc examples/gain.pdl \
 
 ```
 compiler/       Rust compiler (pcc)
-  src/            parse → resolve → graph → analyze → schedule → codegen
+  src/            parse → resolve → HIR/THIR/LIR → analyze/schedule → codegen
   tests/          unit + integration + end-to-end coverage
 runtime/        C++ runtime library (libpipit)
   libpipit/       Ring buffer, timer, statistics, networking (PPKT)
