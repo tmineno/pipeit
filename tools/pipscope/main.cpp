@@ -145,6 +145,13 @@ struct AppState {
     char status_msg[256] = "Disconnected";
 
     pipscope::TriggerConfig trigger;
+
+    // Plot refresh rate tracking (how often waveform data actually updates)
+    int update_count = 0;
+    double last_rate_time = 0.0;
+    float refresh_rate_hz = 0.0f;
+
+    size_t buffer_capacity = 1'000'000;
 };
 
 static void begin_frame() {
@@ -216,6 +223,19 @@ static void render_toolbar(AppState &state, pipscope::PpktReceiver &receiver) {
         break;
     }
     ImGui::TextColored(status_color, "%s", state.status_msg);
+
+    // Compute refresh rate (updates/sec) over 1-second windows
+    {
+        double now = ImGui::GetTime();
+        double elapsed = now - state.last_rate_time;
+        if (elapsed >= 1.0) {
+            state.refresh_rate_hz = static_cast<float>(state.update_count / elapsed);
+            state.update_count = 0;
+            state.last_rate_time = now;
+        }
+    }
+    ImGui::SameLine();
+    ImGui::Text("| Refresh: %.0f Hz", state.refresh_rate_hz);
 
     // ── Trigger controls (row 2) ─────────────────────────────────────────
     ImGui::Checkbox("Trigger", &state.trigger.enabled);
@@ -315,6 +335,18 @@ static void take_tail(std::vector<pipscope::ChannelSnapshot> &dst,
     }
 }
 
+// Returns true if every channel in snaps has at least min_samples samples.
+static bool all_channels_have(const std::vector<pipscope::ChannelSnapshot> &snaps,
+                              int min_samples) {
+    if (snaps.empty())
+        return false;
+    for (const auto &ch : snaps) {
+        if (static_cast<int>(ch.samples.size()) < min_samples)
+            return false;
+    }
+    return true;
+}
+
 static void update_snapshots(AppState &state, pipscope::PpktReceiver &receiver) {
     if (state.paused)
         return;
@@ -323,15 +355,6 @@ static void update_snapshots(AppState &state, pipscope::PpktReceiver &receiver) 
     size_t request_size =
         state.trigger.enabled ? static_cast<size_t>(ds) * 2 : static_cast<size_t>(ds);
     auto raw = receiver.snapshot(request_size);
-
-    // X-axis guard: if we already have valid display data AND any channel in raw
-    // has fewer samples than display_samples, hold the previous display.
-    if (!state.snapshots.empty()) {
-        for (const auto &ch : raw) {
-            if (static_cast<int>(ch.samples.size()) < ds)
-                return; // hold previous display
-        }
-    }
 
     if (state.trigger.enabled) {
         // Find trigger source channel by chan_id
@@ -355,16 +378,25 @@ static void update_snapshots(AppState &state, pipscope::PpktReceiver &receiver) 
         if (idx >= 0) {
             state.trigger.waiting = false;
             extract_window(state.snapshots, raw, idx - pre, ds);
+            state.update_count++;
         } else if (state.trigger.mode == pipscope::TriggerConfig::Auto) {
             state.trigger.waiting = false;
+            // Hold previous display if insufficient data (e.g. after inter_frame_gap clear)
+            if (!all_channels_have(raw, ds) && !state.snapshots.empty())
+                return;
             take_tail(state.snapshots, raw, ds);
+            state.update_count++;
         } else {
             // Normal mode: no trigger found — keep previous display
             state.trigger.waiting = true;
         }
     } else {
         state.trigger.waiting = false;
-        state.snapshots = std::move(raw);
+        // Hold previous display if insufficient data (e.g. after inter_frame_gap clear)
+        if (!all_channels_have(raw, ds) && !state.snapshots.empty())
+            return;
+        take_tail(state.snapshots, raw, ds);
+        state.update_count++;
     }
 }
 
@@ -409,6 +441,14 @@ static void render_channel_plot(const pipscope::ChannelSnapshot &channel, bool a
         ImPlot::SetupAxes("Time (s)", "Amplitude");
         if (auto_y) {
             ImPlot::SetupAxis(ImAxis_Y1, nullptr, ImPlotAxisFlags_AutoFit);
+        }
+        // Constrain x-axis to the data range. Because all update paths guarantee exactly
+        // display_samples samples (via take_tail + guard), data_duration is stable and won't
+        // cause axis jitter. The constraint prevents zoom-out beyond data but allows zoom-in.
+        if (channel.sample_rate_hz > 0 && !channel.samples.empty()) {
+            double data_duration =
+                static_cast<double>(channel.samples.size()) / channel.sample_rate_hz;
+            ImPlot::SetupAxisLimitsConstraints(ImAxis_X1, 0.0, data_duration);
         }
 
         if (!channel.samples.empty()) {
@@ -512,6 +552,7 @@ int main(int argc, char **argv) {
 
     pipscope::PpktReceiver receiver;
     AppState state;
+    state.buffer_capacity = receiver.buffer_capacity();
 
     if (args.has_address) {
         strncpy(state.address_buf, args.address, sizeof(state.address_buf) - 1);
@@ -527,6 +568,8 @@ int main(int argc, char **argv) {
 
     while (!glfwWindowShouldClose(window) && !g_shutdown) {
         glfwPollEvents();
+        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+            break;
         begin_frame();
         render_ui(state, receiver);
         end_frame(window);

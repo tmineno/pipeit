@@ -211,6 +211,8 @@ class PpktReceiver {
 
     ~PpktReceiver() { stop(); }
 
+    size_t buffer_capacity() const { return buffer_capacity_; }
+
     /// Bind to UDP port on all interfaces and start the receiver thread.
     bool start(uint16_t port) {
         char addr_str[32];
