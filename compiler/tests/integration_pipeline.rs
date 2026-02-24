@@ -285,3 +285,67 @@ fn emit_build_info_succeeds_with_parse_invalid_source() {
         serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("should be valid JSON: {}", e));
     assert!(json["source_hash"].is_string());
 }
+
+// ── Manifest round-trip tests ─────────────────────────────────────────────
+
+/// Two-step manifest workflow: generate manifest, then compile with --actor-meta.
+/// This mirrors the CMake build integration from Phase 7b.
+#[test]
+fn manifest_then_compile_produces_valid_cpp() {
+    let tmp_dir = std::env::temp_dir();
+    let manifest_path = tmp_dir.join("pcc_test_manifest_roundtrip.json");
+
+    // Step 1: Generate manifest from headers
+    let manifest_output = Command::new(pcc_binary())
+        .arg("--emit")
+        .arg("manifest")
+        .arg("-I")
+        .arg(runtime_include_dir())
+        .arg("-I")
+        .arg(examples_dir())
+        .arg("-o")
+        .arg(&manifest_path)
+        .output()
+        .expect("failed to run pcc --emit manifest");
+
+    assert!(
+        manifest_output.status.success(),
+        "manifest generation should succeed.\nstderr: {}",
+        String::from_utf8_lossy(&manifest_output.stderr)
+    );
+    assert!(manifest_path.exists(), "manifest file should be created");
+
+    // Step 2: Compile PDL using manifest (hermetic, no header scanning for metadata)
+    let pdl = project_root().join("examples/gain.pdl");
+    let cpp_output = Command::new(pcc_binary())
+        .arg(&pdl)
+        .arg("--actor-meta")
+        .arg(&manifest_path)
+        .arg("-I")
+        .arg(examples_dir())
+        .arg("-I")
+        .arg(runtime_include_dir())
+        .arg("--emit")
+        .arg("cpp")
+        .output()
+        .expect("failed to run pcc with --actor-meta");
+
+    let _ = std::fs::remove_file(&manifest_path);
+
+    assert!(
+        cpp_output.status.success(),
+        "compilation with --actor-meta should succeed.\nstderr: {}",
+        String::from_utf8_lossy(&cpp_output.stderr)
+    );
+
+    let cpp = String::from_utf8_lossy(&cpp_output.stdout);
+    assert!(!cpp.is_empty(), "generated C++ should be non-empty");
+    assert!(
+        cpp.contains("// pcc provenance:"),
+        "generated C++ should contain provenance comment"
+    );
+    assert!(
+        cpp.contains("pipit::shell_main"),
+        "generated C++ should contain shell_main call"
+    );
+}
