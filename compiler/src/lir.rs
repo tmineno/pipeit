@@ -81,6 +81,25 @@ pub enum LirTimerSpin {
     Adaptive,
 }
 
+// ── Memory kind classification (ADR-028) ─────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryKind {
+    Local,  // intra-task, no atomics, local buffer
+    Shared, // inter-task, ring buffer I/O
+    Alias,  // passthrough (Fork/Probe), zero-copy
+}
+
+impl std::fmt::Display for MemoryKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MemoryKind::Local => write!(f, "local"),
+            MemoryKind::Shared => write!(f, "shared"),
+            MemoryKind::Alias => write!(f, "alias"),
+        }
+    }
+}
+
 // ── Inter-task buffers ─────────────────────────────────────────────────────
 
 pub struct LirInterTaskBuffer {
@@ -90,6 +109,7 @@ pub struct LirInterTaskBuffer {
     pub reader_count: usize,
     pub reader_tasks: Vec<String>,
     pub skip_writes: bool,
+    pub memory_kind: MemoryKind,
 }
 
 // ── Tasks ──────────────────────────────────────────────────────────────────
@@ -155,6 +175,7 @@ pub struct LirEdgeBuffer {
     pub is_feedback: bool,
     /// Passthrough alias — no declaration needed, use this var instead.
     pub alias_of: Option<String>,
+    pub memory_kind: MemoryKind,
 }
 
 pub enum LirFiringGroup {
@@ -420,13 +441,14 @@ impl std::fmt::Display for LirProgram {
         for buf in &self.inter_task_buffers {
             writeln!(
                 f,
-                "  inter-task {}: {}[{}] readers={} [{}]{}",
+                "  inter-task {}: {}[{}] readers={} [{}]{} [{}]",
                 buf.name,
                 buf.cpp_type,
                 buf.capacity_tokens,
                 buf.reader_count,
                 buf.reader_tasks.join(", "),
-                if buf.skip_writes { " skip_writes" } else { "" }
+                if buf.skip_writes { " skip_writes" } else { "" },
+                buf.memory_kind,
             )?;
         }
 
@@ -513,7 +535,10 @@ fn fmt_lir_subgraph(
             .filter(|eb| eb.alias_of.is_none())
             .map(|eb| {
                 let fb_tag = if eb.is_feedback { " (fb)" } else { "" };
-                format!("{}: {}[{}]{}", eb.var_name, eb.cpp_type, eb.tokens, fb_tag)
+                format!(
+                    "{}: {}[{}]{} [{}]",
+                    eb.var_name, eb.cpp_type, eb.tokens, fb_tag, eb.memory_kind
+                )
             })
             .collect();
         writeln!(f, "{}edge_buffers: {}", indent, bufs.join(", "))?;
@@ -769,6 +794,7 @@ impl<'a> LirBuilder<'a> {
                     reader_count,
                     reader_tasks,
                     skip_writes,
+                    memory_kind: MemoryKind::Shared,
                 }
             })
             .collect()
@@ -1118,6 +1144,7 @@ impl<'a> LirBuilder<'a> {
                     tokens,
                     is_feedback: true,
                     alias_of: None,
+                    memory_kind: MemoryKind::Local,
                 });
                 continue;
             }
@@ -1134,6 +1161,7 @@ impl<'a> LirBuilder<'a> {
                 tokens,
                 is_feedback: false,
                 alias_of: None,
+                memory_kind: MemoryKind::Local,
             });
         }
 
@@ -1150,6 +1178,7 @@ impl<'a> LirBuilder<'a> {
                     tokens,
                     is_feedback: false,
                     alias_of: Some(alias_name),
+                    memory_kind: MemoryKind::Alias,
                 });
             }
         }
