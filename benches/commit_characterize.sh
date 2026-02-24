@@ -250,6 +250,14 @@ case "$ID_SOURCE" in
         ;;
 esac
 
+# Skip if HEAD commit does not touch compiler/ files.
+# pre-commit post-commit stage provides no file list, so we check here.
+compiler_changed="$(git -C "$PROJECT_ROOT" diff --name-only HEAD~1 HEAD -- compiler/ 2>/dev/null || true)"
+if [ -z "$compiler_changed" ]; then
+    log "no compiler/ files changed in HEAD — skipping"
+    exit 0
+fi
+
 for cmd in git cargo jq timeout sha1sum sed awk; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "Missing required command: $cmd" >&2
