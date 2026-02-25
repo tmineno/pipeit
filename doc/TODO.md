@@ -148,65 +148,33 @@
 
 ---
 
-## v0.4.1 - Memory Plan: Low-Copy Codegen & SPSC Optimization
+## v0.4.1 - Memory Plan: Low-Copy Codegen & SPSC Optimization ✅
 
-**Goal**: Move generated C++ toward "pointers + fixed-length arrays" within tasks and "minimal fence + minimal copy" at shared boundaries, targeting IPC/SIMD-dominated execution.
+**Goal**: Classify edge memory kinds in LIR, specialize SPSC ring buffers, and reduce param sync overhead.
 
-> **Reference**: review-0003 (memory plan). Design principle: classify edges into intra-task (no atomics, scalar/local buffer), inter-task (block RingBuffer I/O only), and fork/probe/tap (alias within task, block I/O across boundary).
+> **Reference**: review-0003 (memory plan), ADR-028/029/030. Audited for over-engineering: items where modern compilers (GCC 13+, Clang 17+) already optimize equivalently were deferred.
 
-### Deterministic Keys
+- [x] Add `MemoryKind` enum (`Local`, `Shared`, `Alias`) to `LirEdgeBuffer` and `LirInterTaskBuffer` (ADR-028)
+- [x] Add `alignas(64)` to intra-task non-feedback edge buffers
+- [x] SPSC `RingBuffer<T, Capacity, 1>` partial specialization with API-compatible overloads (ADR-029)
+- [x] Add `reader_count` to `LirBufferIo`; SPSC comment in codegen retry loops
+- [x] Simplify param sync to single acquire load, remove `_param_read` (ADR-030)
+- [x] Add `--experimental` CLI flag plumbing (reserved for Phase C gating)
+- [x] New `test_ringbuf.cpp`: 9 SPSC tests (correctness, wraparound, concurrent stress, multi-reader coexistence)
 
-- [ ] Implement deterministic `invalidation_key` hashing.
-- [ ] Integrate manifest/header provenance into cache keys and diagnostics.
+### Deferred to v0.5.x
 
-### Phase A: Codegen-Centric Optimization (Minimal Runtime Change)
+- Scalarization (token=1 edges) — only 7 edges; compilers optimize `float[1]` identically to `float`
+- `assume_aligned` / `__restrict__` — `assume_aligned` redundant for `alignas` static; `__restrict__` needs measurement
+- Locality scoring for scheduler — ready-set typically 1-3 nodes; <2% expected benefit
+- `_in_*` concatenation copy reduction — requires LIR `offset`/`stride` metadata extension
+- SPSC retry tuning (spin/yield/backoff) — measure before tuning
+- SPSC relaxed memory ordering evaluation — needs proof, measure before changing
+- Phase C: Block pool & pointer ring — gated behind `--experimental`, high complexity
 
-- [ ] Add memory kind annotation to LIR edges (`intra` / `shared` / `alias`)
-- [ ] Scalarize token=1 intra-task edges (`T x` instead of buffer)
-- [ ] Reduce `_in_*` concatenation copies for multi-input actors (direct reference or minimal pack)
-- [ ] Align intra-task edge buffers to `alignas(64)`
-- [ ] Emit `assume_aligned` / `__restrict__` hints in generated code where applicable
-- [ ] Simplify param sync to single-stage load (`write -> local`, one load per tick)
-- [ ] Add locality score to scheduler ready-set selection (within constraint bounds)
+### Deferred to v0.4.3
 
-> **Risk**: items 2/4/6 are low risk (local, no semantic change); items 3/7 are medium risk (ordering constraints).
-
-### Phase B: SPSC Ring Buffer (Small Runtime Addition, High Impact)
-
-- [ ] Add `Readers=1` specialized SPSC ring buffer implementation in `pipit.h`
-- [ ] Static reader-count detection in codegen; auto-select SPSC path when `reader_count == 1`
-- [ ] Optimize retry/wait strategy for SPSC (spin → yield → backoff tuning)
-- [ ] Evaluate relaxed memory ordering for SPSC self-tail (non-data-visibility fields)
-
-> **Risk**: Medium — performance optimization must preserve ordering guarantees.
-
-### Phase C: Block Pool & Pointer Ring (Experimental)
-
-- [ ] Introduce block pool + index ring (pointer ring) for zero-copy shared transfers
-- [ ] Manage multi-reader reclamation via reference count or epoch-based scheme
-- [ ] Maintain existing data ring as compatibility fallback; staged migration
-- [ ] Gate behind `--experimental` flag; Human Decision required before enabling by default
-
-> **Risk**: High — memory reclamation model correctness is the key difficulty.
-
-### Verification Plan
-
-- Correctness: `cargo test --manifest-path compiler/Cargo.toml`
-- Benchmarks: `./benches/run_all.sh --filter ringbuf --filter e2e --output-dir tmp/bench_memplan`
-- Microarch: `perf stat -e cycles,instructions,LLC-loads,LLC-load-misses,stalled-cycles-backend`
-- Success criteria: LLC miss rate reduction, IPC increase, `read_fail_pct` improvement, e2e throughput maintained or improved
-
-### Human Decision Points
-
-1. Enable Phase A+B by default, or gate behind opt-in flag?
-2. Deploy Phase C under `--experimental` flag first?
-3. SPSC implementation API surface: maintain existing `RingBuffer<T, Cap, Readers>` template compatibility?
-
-### Impact Scope
-
-- **compiler**: `codegen.rs`, `lir.rs`, `schedule.rs`, (if needed) `analyze.rs`
-- **runtime**: `pipit.h` (RingBuffer branching / SPSC addition)
-- **tests/benches**: codegen snapshots, integration, runtime ringbuf/e2e
+- Deterministic `invalidation_key` hashing — no caching infrastructure to consume keys
 
 ## v0.4.2 - Diagnostics Completion (Medium Complexity)
 
@@ -458,6 +426,8 @@
 - **v0.4.0 summary**: architecture rebuild completed across contract freeze, IR unification, pass-manager orchestration, verification/diagnostics upgrade, runtime-shell extraction, registry determinism, and migration hardening.
 - **v0.4.0 delivered artifacts**: HIR/THIR/LIR production pipeline, `codegen_from_lir` path, unified diagnostics with stable codes in `pcc-spec-v0.4.0.md` §10.4-§10.6, `--emit manifest` / `--emit build-info`, and manifest-first CMake integration.
 - **v0.4.x deferred work placement**: follow-up items from v0.4.0 are grouped into `v0.4.1`/`v0.4.2`/`v0.4.3` by complexity and release criticality.
+- **v0.4.1 summary**: MemoryKind classification (ADR-028), SPSC ring buffer (ADR-029), param sync simplification (ADR-030), `alignas(64)` edge buffers, `--experimental` flag. Audited for over-engineering; scalarization/assume_aligned/locality-scoring deferred.
+- **v0.4.1 ADRs**: ADR-028 (edge memory classification), ADR-029 (SPSC ring buffer specialization), ADR-030 (param sync simplification)
 - **v0.5.x** open items are currently deferred
 - Performance characterization should inform optimization priorities (measure before optimizing)
 - Spec files renamed to versioned names (`pipit-lang-spec-v0.3.0.md`, `pcc-spec-v0.3.0.md`); `v0.2.0` specs are frozen from tag `v0.2.2`
