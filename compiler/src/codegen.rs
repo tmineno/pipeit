@@ -1082,6 +1082,9 @@ impl<'a> CodegenCtx<'a> {
     /// Emit shared buffer read from LIR data.
     fn emit_lir_buffer_read(&mut self, task_name: &str, io: &LirBufferIo, indent: &str) {
         let reader_idx = io.reader_idx.unwrap_or(0);
+        if io.reader_count == 1 {
+            let _ = writeln!(self.out, "{}// SPSC: single-reader fast path", indent);
+        }
         let _ = writeln!(
             self.out,
             "{}int _rb_retry_{}_{} = 0;",
@@ -1131,6 +1134,9 @@ impl<'a> CodegenCtx<'a> {
 
     /// Emit shared buffer write from LIR data.
     fn emit_lir_buffer_write(&mut self, task_name: &str, io: &LirBufferIo, indent: &str) {
+        if io.reader_count == 1 {
+            let _ = writeln!(self.out, "{}// SPSC: single-reader fast path", indent);
+        }
         let _ = writeln!(
             self.out,
             "{}int _rb_retry_{}_{} = 0;",

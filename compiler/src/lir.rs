@@ -274,6 +274,8 @@ pub struct LirBufferIo {
     pub src_node_id: NodeId,
     /// Target/peer node ID (for retry variable naming).
     pub peer_node_id: NodeId,
+    /// Number of readers on this ring buffer (for SPSC detection, ADR-029).
+    pub reader_count: usize,
 }
 
 // ── Probes ─────────────────────────────────────────────────────────────────
@@ -1802,10 +1804,9 @@ impl<'a> LirBuilder<'a> {
         } else {
             (String::new(), 1)
         };
-        let reader_idx = self
-            .buffer_reader_tasks(buffer_name)
-            .iter()
-            .position(|t| t == task_name);
+        let reader_tasks = self.buffer_reader_tasks(buffer_name);
+        let reader_count = reader_tasks.len().max(1);
+        let reader_idx = reader_tasks.iter().position(|t| t == task_name);
         let (src_node_id, peer_node_id) = if let Some(out_edge) = outgoing.first() {
             (node.id, out_edge.target)
         } else {
@@ -1820,6 +1821,7 @@ impl<'a> LirBuilder<'a> {
             skip: false,
             src_node_id,
             peer_node_id,
+            reader_count,
         }
     }
 
@@ -1859,6 +1861,7 @@ impl<'a> LirBuilder<'a> {
         } else {
             (node.id, node.id)
         };
+        let reader_count = self.buffer_reader_tasks(buffer_name).len().max(1);
         LirBufferIo {
             buffer_name: buffer_name.to_string(),
             task_name: task_name.to_string(),
@@ -1868,6 +1871,7 @@ impl<'a> LirBuilder<'a> {
             skip,
             src_node_id,
             peer_node_id,
+            reader_count,
         }
     }
 
