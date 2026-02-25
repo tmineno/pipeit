@@ -53,6 +53,7 @@ fn build_codegen_options(
         release: false,
         include_paths: vec![root.join("runtime/libpipit/include"), root.join("examples")],
         provenance: Some(provenance),
+        experimental: false,
     }
 }
 

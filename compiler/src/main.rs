@@ -76,6 +76,10 @@ struct Cli {
     /// Diagnostic output format
     #[arg(long, value_enum, default_value_t = DiagnosticFormat::Human)]
     diagnostic_format: DiagnosticFormat,
+
+    /// Enable experimental codegen features (no effect currently)
+    #[arg(long)]
+    experimental: bool,
 }
 
 fn main() {
@@ -215,6 +219,7 @@ fn main() {
         release: cli.release,
         include_paths: loaded_headers.clone(),
         provenance: Some(provenance),
+        experimental: cli.experimental,
     };
     let mut state = pcc::pipeline::CompilationState::new(program, registry);
     let mut has_errors = false;

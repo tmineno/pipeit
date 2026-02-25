@@ -43,6 +43,9 @@ pub struct CodegenOptions {
     /// Provenance metadata to stamp in generated C++ header comment.
     /// None in unit tests; Some in production builds.
     pub provenance: Option<crate::pipeline::Provenance>,
+    /// Enable experimental codegen features (e.g., block pool allocator).
+    /// No behavioral change currently — reserved for Phase C gating.
+    pub experimental: bool,
 }
 
 // ── Public entry point ──────────────────────────────────────────────────────
@@ -1506,6 +1509,7 @@ mod tests {
                 release: false,
                 include_paths: vec![],
                 provenance: None,
+                experimental: false,
             },
         )
     }
@@ -1998,6 +2002,7 @@ mod tests {
                 release: true,
                 include_paths: vec![],
                 provenance: None,
+                experimental: false,
             },
         );
         let errors: Vec<_> = release_result
@@ -2320,6 +2325,7 @@ mod tests {
             release: false,
             include_paths: vec![],
             provenance: None,
+            experimental: false,
         };
         let mut ctx = CodegenCtx::new(
             &graph_result.graph,
@@ -2531,6 +2537,7 @@ mod tests {
                 release: false,
                 include_paths: vec![],
                 provenance: Some(prov),
+                experimental: false,
             },
         );
         let cpp = result.generated.cpp_source;

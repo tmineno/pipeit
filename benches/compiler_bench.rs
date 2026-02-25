@@ -393,6 +393,7 @@ fn bench_kpi_full_compile_latency(c: &mut Criterion) {
         release: false,
         include_paths: vec![],
         provenance: None,
+        experimental: false,
     };
 
     for (name, source) in scenarios() {
@@ -411,6 +412,7 @@ fn bench_kpi_phase_latency(c: &mut Criterion) {
         release: false,
         include_paths: vec![],
         provenance: None,
+        experimental: false,
     };
     let source = COMPLEX_PIPELINE;
     bench_parse_phase(c, source);
