@@ -144,7 +144,7 @@
 
 - Pre-refactor baseline for KPI comparison: `7248b44` (v0.3.4).
 - Post-Phase-2c observed regression point: `e758c03` (simple +14.7%, multitask +31.9%, complex +36.8%, modal +47.7%).
-- Open items are deferred to `v0.4.x` and grouped below by patch-version complexity.
+- Open items are deferred to `v0.4.x` and grouped below by priority (criticality → performance impact → complexity).
 
 ---
 
@@ -172,35 +172,41 @@
 - SPSC relaxed memory ordering evaluation — needs proof, measure before changing
 - Phase C: Block pool & pointer ring — gated behind `--experimental`, high complexity
 
-### Deferred to v0.4.3
+### Deferred to v0.4.4
 
 - Deterministic `invalidation_key` hashing — no caching infrastructure to consume keys
 
-## v0.4.2 - Diagnostics Completion (Medium Complexity)
+---
 
-**Goal**: Complete diagnostics provenance and ambiguity guidance to improve debuggability and remediation clarity.
+## v0.4.x Priority Overview (Remaining)
 
-- [ ] Add full provenance tracing through the constraint solver.
-- [ ] Improve ambiguity/mismatch diagnostics with candidate and remediation suggestions.
+| Version | Focus | Criticality | Perf Impact | Complexity | Depends on |
+|---------|-------|-------------|-------------|------------|------------|
+| v0.4.1 ✅ | Memory plan (codegen + SPSC) | Medium | Very High | Medium-High | — |
+| v0.4.2 | Bind-based external integration | **Critical** | Indirect | Medium-High | v0.4.0 |
+| v0.4.3 | PSHM shared-memory transport | **Critical** | Very High | High | v0.4.2 P1-P3 |
+| v0.4.4 | Compiler latency + deterministic caching | Medium | Medium | Medium | — |
+| v0.4.5 | Diagnostics completion | Low | — | Medium | — |
 
-## v0.4.3 - Compiler Latency Profiling & Recovery (High Complexity)
+**Scheduling note**: v0.4.3 Phase 2 (PSHM runtime core) can be developed in parallel with v0.4.2 later phases since it is runtime-only work with no compiler dependency.
 
-**Goal**: Measure and recover compile-latency regression; add reusable artifact caching without changing compiler semantics.
-
-- [ ] Run formal KPI A/B benchmark against v0.3.4 baseline (`compiler_bench_stable.sh --baseline-ref v0.3.4`).
-- [ ] Record release disposition for compile-latency regression after benchmark review.
-- [ ] Add artifact hashing and reusable cache for heavy phases.
-- [ ] Profile per-phase time (`build_hir`, `build_thir`, `build_lir`, `codegen`) and rank dominant costs.
-- [ ] Reduce allocation/clone overhead in `build_lir`.
-- [ ] Evaluate lazy/on-demand LIR field materialization for codegen-only paths.
-- [ ] Audit `precompute_metadata()` duplication against analysis-owned data.
-- [ ] Re-measure after each optimization; target per-scenario latency within 10% of `7248b44`.
+```text
+Time →
+v0.4.2 (Bind P1-P3)    ████████████████
+v0.4.3 (PSHM P2)              ░░░░░░░░░░  (parallel: runtime-only, no compiler dep)
+v0.4.2 (Bind P4-P6)                    ████████
+v0.4.3 (PSHM P3-P6)                    ████████████  (after bind P1-P3)
+v0.4.4 (Latency)                        ░░░░░░░░░░░░░░░░  (anytime)
+v0.4.5 (Diagnostics)                                    ████
+```
 
 ---
 
-## v0.4.1 - Bind-Based External Integration (Spec v0.4.0 Implementation)
+## v0.4.2 - Bind-Based External Integration
 
 **Goal**: Implement `bind`-first external integration with compiler-generated stable IDs and iteration-boundary-safe runtime rebind.
+
+> **Priority rationale**: Critical foundation — unlocks PSHM transport (v0.4.3) and all future transport backends. No external integration is possible without this infrastructure.
 
 ### Phase 1: Frontend & IR Wiring (Mechanical)
 
@@ -249,9 +255,11 @@
 
 ---
 
-## v0.4.2 - Shared-Memory Bind Transport (PSHM) and Interface Optionalization
+## v0.4.3 - Shared-Memory Bind Transport (PSHM)
 
 **Goal**: Implement `shm(...)` bind transport for multi-process local IPC, and align compiler/runtime behavior with optional interface-manifest output.
+
+> **Priority rationale**: Highest performance impact — shared-memory IPC eliminates serialization and kernel-crossing overhead vs UDP. Critical for real-time multi-process pipelines. Depends on v0.4.2 Phases 1-3 (bind grammar, inference, stable ID) but Phase 2 (PSHM runtime core) can start in parallel.
 
 ### Phase 1: Compiler Surface Alignment
 
@@ -260,7 +268,7 @@
 - [ ] Change interface manifest behavior from always-on to opt-in (`--emit interface`, `--interface-out <path>`)
 - [ ] Keep `list_bindings` as mandatory runtime introspection path even when no manifest is emitted
 
-### Phase 2: PSHM Runtime Core (Protocol v0.1.0)
+### Phase 2: PSHM Runtime Core (Protocol v0.1.0) — parallelizable with v0.4.2
 
 - [ ] Implement PSHM superblock + slot header binary layout exactly per spec (`magic/version/header_len/epoch/write_seq`)
 - [ ] Implement single-writer publish path with release-store ordering guarantees
@@ -300,6 +308,41 @@
 - [ ] Rebind over PSHM is atomic at iteration boundary with no mixed-epoch frame visibility
 - [ ] Interface manifest is optional; runtime `list_bindings` provides equivalent bind metadata
 - [ ] No regressions in existing UDP/Unix bind behavior or legacy socket actor behavior
+
+---
+
+## v0.4.4 - Compiler Latency Profiling, Deterministic Caching & Recovery
+
+**Goal**: Measure and recover compile-latency regression; add deterministic artifact caching without changing compiler semantics.
+
+> **Priority rationale**: Medium criticality — compiler latency is a developer-experience concern, not a runtime performance issue. Regression was observed post-v0.4.0 architecture rebuild; recovery should be measurement-driven. Deterministic keys (formerly in memory plan) belong here as they enable artifact caching.
+
+### Deterministic Artifact Keys
+
+- [ ] Implement deterministic `invalidation_key` hashing for pass artifacts
+- [ ] Integrate manifest/header provenance into cache keys and diagnostics
+- [ ] Add artifact hashing and reusable cache for heavy phases
+
+### Profiling & Regression Recovery
+
+- [ ] Run formal KPI A/B benchmark against v0.3.4 baseline (`compiler_bench_stable.sh --baseline-ref v0.3.4`)
+- [ ] Record release disposition for compile-latency regression after benchmark review
+- [ ] Profile per-phase time (`build_hir`, `build_thir`, `build_lir`, `codegen`) and rank dominant costs
+- [ ] Reduce allocation/clone overhead in `build_lir`
+- [ ] Evaluate lazy/on-demand LIR field materialization for codegen-only paths
+- [ ] Audit `precompute_metadata()` duplication against analysis-owned data
+- [ ] Re-measure after each optimization; target per-scenario latency within 10% of `7248b44`
+
+---
+
+## v0.4.5 - Diagnostics Completion
+
+**Goal**: Complete diagnostics provenance and ambiguity guidance to improve debuggability and remediation clarity.
+
+> **Priority rationale**: Lowest urgency in v0.4.x — no performance impact, no blocking dependency. Quality-of-life improvement for users debugging compilation failures.
+
+- [ ] Add full provenance tracing through the constraint solver
+- [ ] Improve ambiguity/mismatch diagnostics with candidate and remediation suggestions
 
 ---
 
@@ -530,7 +573,7 @@
 - **pre-v0.4.0 open items** were moved to `v0.5.x` backlog (`Deferred Backlog from v0.3.x`)
 - **v0.4.0 summary**: architecture rebuild completed across contract freeze, IR unification, pass-manager orchestration, verification/diagnostics upgrade, runtime-shell extraction, registry determinism, and migration hardening.
 - **v0.4.0 delivered artifacts**: HIR/THIR/LIR production pipeline, `codegen_from_lir` path, unified diagnostics with stable codes in `pcc-spec-v0.4.0.md` §10.4-§10.6, `--emit manifest` / `--emit build-info`, and manifest-first CMake integration.
-- **v0.4.x deferred work placement**: follow-up items from v0.4.0 are grouped into `v0.4.1`/`v0.4.2`/`v0.4.3` by complexity and release criticality.
+- **v0.4.x deferred work placement**: follow-up items from v0.4.0 are grouped into `v0.4.1` through `v0.4.5` by priority (criticality → performance impact → complexity). Deterministic artifact keys moved from memory plan to v0.4.4 (compiler caching).
 - **v0.4.1 summary**: MemoryKind classification (ADR-028), SPSC ring buffer (ADR-029), param sync simplification (ADR-030), `alignas(64)` edge buffers, `--experimental` flag. Audited for over-engineering; scalarization/assume_aligned/locality-scoring deferred.
 - **v0.4.1 ADRs**: ADR-028 (edge memory classification), ADR-029 (SPSC ring buffer specialization), ADR-030 (param sync simplification)
 - **v0.5.x** open items are currently deferred
