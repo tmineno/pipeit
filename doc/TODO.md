@@ -196,6 +196,35 @@
 - [ ] Audit `precompute_metadata()` duplication against analysis-owned data.
 - [ ] Re-measure after each optimization; target per-scenario latency within 10% of `7248b44`.
 
+## v0.4.4 - Clang Registry Extraction & Manifest-Required Inputs (Breaking)
+
+**Goal**: Move `ACTOR` metadata extraction to a dedicated Clang toolchain path and require manifest input for `pcc` compile/build-info paths while keeping `pcc` itself Clang-independent.
+
+- [ ] **M0: Contract lock (spec/ADR/docs)**
+  - [ ] Update `pcc-spec`, usage guide, and README for manifest-required behavior.
+  - [ ] Document breaking change: non-`--emit manifest` compile paths require `--actor-meta`.
+  - [ ] Define stable usage-error contract for missing manifest input (code + message).
+- [ ] **M1: Clang extractor skeleton**
+  - [ ] Add dedicated registry generator target (working name: `pipit-reggen`).
+  - [ ] Ingest `compile_commands.json` and run TU-aware extraction.
+  - [ ] Emit deterministic schema v1 `actors.meta.json`.
+- [ ] **M2: Accurate metadata extraction**
+  - [ ] Capture `ACTOR(...)` signatures in include/define-resolved context.
+  - [ ] Extract template type parameter names via AST.
+  - [ ] Map canonical `QualType` forms to manifest types (`float`, `std::complex<float>`, spans, etc.).
+- [ ] **M3: pcc manifest-required enforcement**
+  - [ ] Remove default header-scan metadata loading from compile/build-info paths.
+  - [ ] Require `--actor-meta` for compile/build-info and provide actionable remediation diagnostics.
+  - [ ] Keep `--emit manifest` as the metadata generation entrypoint.
+- [ ] **M4: Build integration + CI**
+  - [ ] Update CMake/examples workflow (`header change -> manifest regen -> compile regen`).
+  - [ ] Update integration/repro tests for manifest-required contract coverage.
+  - [ ] Verify deterministic fingerprint behavior across repeated runs.
+- [ ] **M5: Cleanup + hardening**
+  - [ ] Retire obsolete text-scanner-first docs/tests in `pcc`.
+  - [ ] Add extractor failure-path regression tests (missing compile DB, unresolved include, type-map failure).
+  - [ ] Publish migration notes for downstream users.
+
 ---
 
 ## v0.5.x - Ecosystem & Quality of Life
@@ -223,10 +252,10 @@
   - [ ] Remove or minimize remaining `ActorMeta` cloning in `type_infer` hot paths (monomorphization/result materialization path)
   - [ ] Reduce String/HashMap churn in monomorphization keys (prefer reused keys/interned forms)
 
-- [ ] **From v0.3.4 / Priority 3: Registry + header loading costs**
-  - [ ] Cache parsed header metadata across repeated invocations (hash-keyed)
-  - [ ] Avoid redundant overlay work when include-set + header hashes are unchanged
-  - [ ] Re-benchmark repeated single-file compiles (`simple`, `multitask`, `modal`) after cache changes
+- [ ] **From v0.4.4 / Priority 3: Registry generation + manifest refresh costs**
+  - [ ] Cache extractor outputs keyed by compile DB + actor-header hash set
+  - [ ] Skip manifest regeneration when actor-signature set is unchanged
+  - [ ] Re-benchmark two-step workflow (`manifest -> build-info/cpp`) for `simple`, `multitask`, `modal`
 
 - [ ] **From v0.3.4 / Priority 4: Exit criteria validation**
   - [ ] `kpi/full_compile_latency/complex` median improved by >= 5% vs v0.3.3 baseline
