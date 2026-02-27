@@ -1,4 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
+
+if(NOT DEFINED CMAKE_CXX_COMPILER)
+    set(CMAKE_CXX_COMPILER clang++)
+endif()
+
 project(pipit_examples LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)

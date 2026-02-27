@@ -11,7 +11,7 @@ A domain-specific language for describing clock-driven, real-time data pipelines
 - Compile to native executables via C++ code generation
 
 ```text
-source.pdl → pcc → source_gen.cpp → g++/clang++ → executable
+source.pdl → pcc → source_gen.cpp → clang++ → executable
 ```
 
 ## Example
@@ -42,7 +42,7 @@ target/release/pcc examples/gain.pdl \
   --emit cpp -o gain.cpp
 
 # Build the executable manually
-c++ -std=c++20 -O2 gain.cpp \
+clang++ -std=c++20 -O2 gain.cpp \
   -I runtime/libpipit/include \
   -I runtime/libpipit/include/third_party \
   -lpthread -o gain

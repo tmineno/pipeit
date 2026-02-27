@@ -15,7 +15,7 @@ fi
 
 # Clean build
 rm -rf "${BUILD_DIR}"
-cmake -S examples -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE=Release -DPCC="${PCC}" > /dev/null 2>&1
+cmake -S examples -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++ -DPCC="${PCC}" > /dev/null 2>&1
 cmake --build "${BUILD_DIR}" -j "$(nproc)" > /dev/null 2>&1
 
 # Record timestamps

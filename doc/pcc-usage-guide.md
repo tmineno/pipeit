@@ -21,7 +21,7 @@ pcc [source.pdl] [options]
 | `--actor-meta <file>` | Actor metadata manifest (`actors.meta.json`). |
 | `--emit <stage>` | `exe` (default), `cpp`, `ast`, `graph`, `graph-dot`, `schedule`, `timing-chart`, `manifest`, `build-info`. |
 | `--release` | Release codegen profile (probe stripping + optimized C++ defaults). |
-| `--cc <compiler>` | C++ compiler command for `--emit exe` (default: `c++`). |
+| `--cc <compiler>` | C++ compiler command for `--emit exe` (default: `clang++`). |
 | `--cflags "<flags>"` | Extra C++ flags. Overrides default optimization flags (`-O0 -g` debug, `-O2` release). |
 | `--diagnostic-format <human\|json>` | Diagnostic output format (default: `human`). |
 | `--verbose` | Print phase/timing trace information. |

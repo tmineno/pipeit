@@ -24,7 +24,7 @@ fn pcc_binary() -> PathBuf {
 }
 
 fn find_cxx_compiler() -> Option<String> {
-    for compiler in &["c++", "g++", "clang++"] {
+    for compiler in &["clang++", "c++", "g++"] {
         if Command::new(compiler)
             .arg("--version")
             .output()

@@ -279,7 +279,7 @@ pcc [source.pdl] [OPTIONS]
 | `--actor-path <dir>` | PATH (repeatable) | — | Recursive actor search directory |
 | `--emit <stage>` | enum | `exe` | `exe`, `cpp`, `ast`, `graph`, `graph-dot`, `schedule`, `timing-chart`, `manifest`, `build-info` |
 | `--release` | flag | off | Release codegen profile |
-| `--cc <compiler>` | STRING | `c++` | System C++ compiler command |
+| `--cc <compiler>` | STRING | `clang++` | System C++ compiler command |
 | `--cflags <flags>` | STRING | mode-dependent | Additional C++ compiler flags |
 | `--diagnostic-format <fmt>` | enum | `human` | `human` or `json` |
 | `--verbose` | flag | off | Phase timing and pass trace |
