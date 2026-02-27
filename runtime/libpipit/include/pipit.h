@@ -152,6 +152,77 @@ template <typename T, std::size_t Capacity, std::size_t Readers = 1> class RingB
     }
 };
 
+// ── SPSC partial specialization (ADR-029) ───────────────────────────────────
+//
+// When Readers == 1, the generic multi-reader tail scan loop is unnecessary.
+// This specialization uses a single tail and writer-private cached_tail for
+// the fast path, preserving the same API surface and memory ordering model.
+
+template <typename T, std::size_t Capacity> class RingBuffer<T, Capacity, 1> {
+    static_assert(Capacity > 0, "RingBuffer capacity must be > 0");
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "RingBuffer element type must be trivially copyable");
+    static constexpr std::size_t N = Capacity;
+
+    struct alignas(64) PaddedTail {
+        std::atomic<std::size_t> value{0};
+    };
+
+    alignas(64) std::atomic<std::size_t> head_{0}; // absolute write cursor
+    PaddedTail tail_;                              // single reader tail
+    std::size_t cached_tail_{0};                   // writer-private cached tail
+    T buf_[N];
+
+  public:
+    RingBuffer() = default;
+
+    bool write(const T *src, std::size_t count) {
+        std::size_t h = head_.load(std::memory_order_relaxed);
+        std::size_t used = h - cached_tail_;
+        if (used > Capacity || Capacity - used < count) {
+            // Slow path: reload single tail
+            cached_tail_ = tail_.value.load(std::memory_order_acquire);
+            used = h - cached_tail_;
+            if (used > Capacity)
+                return false;
+            if (Capacity - used < count)
+                return false;
+        }
+        std::size_t start = h % N;
+        std::size_t first = std::min(count, N - start);
+        std::memcpy(&buf_[start], src, first * sizeof(T));
+        if (first < count)
+            std::memcpy(&buf_[0], src + first, (count - first) * sizeof(T));
+        head_.store(h + count, std::memory_order_release);
+        return true;
+    }
+
+    bool read(std::size_t reader_idx, T *dst, std::size_t count) {
+        (void)reader_idx; // single reader — always index 0
+        std::size_t t = tail_.value.load(std::memory_order_relaxed);
+        std::size_t h = head_.load(std::memory_order_acquire);
+        std::size_t avail = h - t;
+        if (count > avail)
+            return false;
+        std::size_t start = t % N;
+        std::size_t first = std::min(count, N - start);
+        std::memcpy(dst, &buf_[start], first * sizeof(T));
+        if (first < count)
+            std::memcpy(dst + first, &buf_[0], (count - first) * sizeof(T));
+        tail_.value.store(t + count, std::memory_order_release);
+        return true;
+    }
+
+    bool read(T *dst, std::size_t count) { return read(0, dst, count); }
+
+    std::size_t available(std::size_t reader_idx = 0) const {
+        (void)reader_idx;
+        std::size_t h = head_.load(std::memory_order_acquire);
+        std::size_t t = tail_.value.load(std::memory_order_acquire);
+        return h - t;
+    }
+};
+
 // ── Timer (chrono-based tick generator) ─────────────────────────────────────
 
 class Timer {

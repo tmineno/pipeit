@@ -43,6 +43,9 @@ pub struct CodegenOptions {
     /// Provenance metadata to stamp in generated C++ header comment.
     /// None in unit tests; Some in production builds.
     pub provenance: Option<crate::pipeline::Provenance>,
+    /// Enable experimental codegen features (e.g., block pool allocator).
+    /// No behavioral change currently — reserved for Phase C gating.
+    pub experimental: bool,
 }
 
 // ── Public entry point ──────────────────────────────────────────────────────
@@ -188,11 +191,6 @@ impl<'a> CodegenCtx<'a> {
             let _ = writeln!(
                 self.out,
                 "static std::atomic<{}> _param_{}_write({});",
-                p.cpp_type, p.name, p.default_literal
-            );
-            let _ = writeln!(
-                self.out,
-                "static std::atomic<{}> _param_{}_read({});",
                 p.cpp_type, p.name, p.default_literal
             );
         }
@@ -656,12 +654,7 @@ impl<'a> CodegenCtx<'a> {
             for param in &lir_task.used_params {
                 let _ = writeln!(
                     self.out,
-                    "{}_param_{}_read.store(_param_{}_write.load(std::memory_order_acquire), std::memory_order_release);",
-                    indent, param.name, param.name
-                );
-                let _ = writeln!(
-                    self.out,
-                    "{}{} _param_{}_val = _param_{}_read.load(std::memory_order_acquire);",
+                    "{}{} _param_{}_val = _param_{}_write.load(std::memory_order_acquire);",
                     indent, param.cpp_type, param.name, param.name
                 );
             }
@@ -798,7 +791,7 @@ impl<'a> CodegenCtx<'a> {
             }
             let _ = writeln!(
                 self.out,
-                "{}static {} {}[{}];",
+                "{}alignas(64) static {} {}[{}];",
                 indent, eb.cpp_type, eb.var_name, eb.tokens
             );
         }
@@ -1082,6 +1075,9 @@ impl<'a> CodegenCtx<'a> {
     /// Emit shared buffer read from LIR data.
     fn emit_lir_buffer_read(&mut self, task_name: &str, io: &LirBufferIo, indent: &str) {
         let reader_idx = io.reader_idx.unwrap_or(0);
+        if io.reader_count == 1 {
+            let _ = writeln!(self.out, "{}// SPSC: single-reader fast path", indent);
+        }
         let _ = writeln!(
             self.out,
             "{}int _rb_retry_{}_{} = 0;",
@@ -1131,6 +1127,9 @@ impl<'a> CodegenCtx<'a> {
 
     /// Emit shared buffer write from LIR data.
     fn emit_lir_buffer_write(&mut self, task_name: &str, io: &LirBufferIo, indent: &str) {
+        if io.reader_count == 1 {
+            let _ = writeln!(self.out, "{}// SPSC: single-reader fast path", indent);
+        }
         let _ = writeln!(
             self.out,
             "{}int _rb_retry_{}_{} = 0;",
@@ -1510,6 +1509,7 @@ mod tests {
                 release: false,
                 include_paths: vec![],
                 provenance: None,
+                experimental: false,
             },
         )
     }
@@ -1573,12 +1573,18 @@ mod tests {
             &reg,
         );
         assert!(
-            cpp.contains("std::atomic<float> _param_gain_write(2.5f)")
-                && cpp.contains("std::atomic<float> _param_gain_read(2.5f)")
-                && cpp.contains(
-                    "_param_gain_read.store(_param_gain_write.load(std::memory_order_acquire)"
-                ),
-            "should emit param read/write buffers: {}",
+            cpp.contains("std::atomic<float> _param_gain_write(2.5f)"),
+            "should emit param write atomic: {}",
+            cpp
+        );
+        assert!(
+            !cpp.contains("_param_gain_read"),
+            "should not emit _param_read (removed by ADR-030): {}",
+            cpp
+        );
+        assert!(
+            cpp.contains("_param_gain_write.load(std::memory_order_acquire)"),
+            "should emit single acquire load from _param_write: {}",
             cpp
         );
     }
@@ -1996,6 +2002,7 @@ mod tests {
                 release: true,
                 include_paths: vec![],
                 provenance: None,
+                experimental: false,
             },
         );
         let errors: Vec<_> = release_result
@@ -2318,6 +2325,7 @@ mod tests {
             release: false,
             include_paths: vec![],
             provenance: None,
+            experimental: false,
         };
         let mut ctx = CodegenCtx::new(
             &graph_result.graph,
@@ -2529,6 +2537,7 @@ mod tests {
                 release: false,
                 include_paths: vec![],
                 provenance: Some(prov),
+                experimental: false,
             },
         );
         let cpp = result.generated.cpp_source;

@@ -7,7 +7,7 @@ LirProgram (0 consts, 1 params, 0 inter-task bufs, 1 tasks, 1 probes)
   directives: mem=16777216, overrun=drop, timer=Fixed(10000)
   task 'iir' @ 1000Hz K=1
     feedback _fb_6_7: float[1] init=0
-    edge_buffers: _e0_1: float[1], _e1_2: float[1], _e2_3: float[1], _fb_6_7: [1] (fb)
+    edge_buffers: _e0_1: float[1] [local], _e1_2: float[1] [local], _e2_3: float[1] [local], _fb_6_7: [1] (fb) [local]
     firings:
       Actor_constant<float><float>(0, dim(1)) -> [_e0_1]
       fork(~fb)

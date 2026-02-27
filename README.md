@@ -77,6 +77,7 @@ target/release/pcc examples/gain.pdl \
 - Dimension mismatch diagnostics (explicit arg vs shape constraint vs span-derived conflicts)
 - SDF balance verification, feedback delay validation
 - Structured diagnostics (`human` / `json`) with stable diagnostic codes
+- LIR edge memory classification (`Local`/`Shared`/`Alias`) with cache-line-aligned buffers
 
 ### Runtime
 
@@ -86,7 +87,7 @@ target/release/pcc examples/gain.pdl \
 - `--probe <name>` / `--probe-output <path>` for data observation
 - `--threads <n>` advisory runtime hint
 - `--release` strips probes to zero cost
-- Adaptive spin-wait timer with EWMA calibration (ADR-014)
+- `--experimental` enables experimental codegen features (reserved)
 
 ### Standard Actors
 
