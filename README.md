@@ -88,8 +88,6 @@ target/release/pcc examples/gain.pdl \
 - `--threads <n>` advisory runtime hint
 - `--release` strips probes to zero cost
 - `--experimental` enables experimental codegen features (reserved)
-- Adaptive spin-wait timer with EWMA calibration (ADR-014)
-- SPSC ring buffer specialization for single-reader inter-task buffers (ADR-029)
 
 ### Standard Actors
 
