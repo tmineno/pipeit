@@ -13,6 +13,7 @@ Pipit は、共有メモリ上に SDF (Synchronous Dataflow) セマンティク�
 - **直感的な構文**: 最小限の特殊記号とキーワードにより、低い学習コストで記述可能
 - **安全優先の型変換**: 意味保存できる数値拡張のみ暗黙化し、意味変換は明示アクターを要求する
 - **接続の遅延束縛**: `bind` 文により外部接続先を宣言し、方向・型・レートは既存パイプラインから推論する
+- **静的展開による多チャネル並列化**: `clock` の spawn 句と共有バッファ配列をコンパイル時に展開し、SDF の静的解析可能性を維持する
 
 ### 1.2 ターゲット環境
 
@@ -42,9 +43,11 @@ source.pdl + (actors.meta.json or actors.h)
 | **ティック** | タスクのクロックタイマーが発生する1周期。1ティック = K イテレーション (K ≥ 1) |
 | **イテレーション境界** | イテレーションの完了と次のイテレーション開始の間の論理的な時点 |
 | **共有バッファ** | タスク間でデータを受け渡す非同期 FIFO。共有メモリプール上にリングバッファとして静的配置される |
+| **共有バッファ配列（family）** | 固定長の共有バッファ集合。`name[idx]` で要素参照し、`name[*]` で全要素を束ねて参照できる |
 | **タップ** | パイプライン内のフォークノード。データをコピーして複数の下流に分配する |
 | **プローブ** | 非侵入的な観測点。リリースビルドではゼロコストで除去される |
 | **バインド** | `bind` 文で宣言される外部接続。共有バッファ名を外部エンドポイントへ遅延束縛する |
+| **spawn 句** | `clock` に付与するコンパイル時複製指定。1つのタスク定義から複数タスクを静的生成する |
 | **安定ID (`stable_id`)** | バインド対象を一意に識別する決定的 ID。コンパイラが生成し、UI はこの ID を主キーとして使う |
 | **アクターマニフェスト** | `ACTOR` 宣言由来のメタデータファイル（`actors.meta.json`）。`--actor-meta` 指定時に `pcc` が読み込む |
 
@@ -73,6 +76,8 @@ source.pdl + (actors.meta.json or actors.h)
 | `?name` | プローブ | デバッグ用の非侵入的観測点 |
 | `$name` | パラメータ参照 | ランタイムパラメータの参照 |
 | `<...>` | 型引数 | polymorphic actor の型実引数 |
+| `*` | 全要素参照 | 共有バッファ配列 `name[*]` の全要素を束ねる |
+| `..` | 範囲演算子 | spawn 句の半開区間 `[begin..end)` を表す |
 | `#` | コメント | 行末コメント |
 
 ### 2.4 キーワード
@@ -80,7 +85,7 @@ source.pdl + (actors.meta.json or actors.h)
 以下の識別子は予約語であり、ユーザー定義の識別子として使用できない。
 
 ```
-set  const  param  define  clock  mode  control  switch  default  delay  bind
+set  const  param  shared  define  clock  mode  control  switch  default  delay  bind
 ```
 
 ### 2.5 リテラル
@@ -555,6 +560,21 @@ adc(0) | mul($gain) -> output
 $ ./my_app --param gain=2.0 --param enable=0
 ```
 
+### 5.3.1 共有バッファ配列宣言
+
+固定チャネル数の共有バッファ群を宣言するには `shared` を用いる。
+
+```pdl
+const CH = 24
+shared in[CH]
+shared out[CH]
+```
+
+- `shared name[N]` は長さ `N` の共有バッファ配列（family）を定義する
+- `N` は正のコンパイル時整数（整数リテラルまたは `const`）でなければならない
+- `shared` で宣言された family 要素は `name[idx]` で参照する
+- `name[*]` は family 全要素を1つの束として参照する（詳細は §5.7）
+
 ### 5.4 タスク定義
 
 タスクはクロック駆動のパイプラインの実行単位である。
@@ -569,11 +589,12 @@ clock 10MHz capture {
 #### 5.4.1 構文
 
 ```
-clock <freq> <name> { <task_body> }
+clock <freq> <name> [<idx>=<begin>..<end>] { <task_body> }
 ```
 
 - `clock <freq>`: タスクの target rate。省略不可
 - `<name>`: タスク名。プログラム内で一意でなければならない
+- `[<idx>=<begin>..<end>]`: 任意の spawn 句。半開区間 `[begin, end)` でタスクを複製する
 - `<task_body>`: パイプライン行、または mode/control 構成
 
 #### 5.4.2 実行モデル
@@ -616,6 +637,25 @@ $ ./my_app --duration 10s --stats
 - 各エッジ上の FIFO トークン順序
 - 観測可能な副作用順序（共有バッファ境界、sink 出力、プローブ出力）
 
+#### 5.4.5 spawn 句（静的タスク複製）
+
+spawn 句付き `clock` は、コンパイル時に複数の独立タスクへ展開される。
+
+```pdl
+const CH = 24
+shared in[CH]
+
+clock 48kHz capture[ch=0..CH] {
+    adc(ch) | fir(coeff) -> in[ch]
+}
+```
+
+- `clock ... capture[ch=0..CH]` は `capture[0]` 〜 `capture[CH-1]` の `CH` 個へ静的展開される
+- 展開後の各タスクは通常の `clock` タスクと同一セマンティクスで実行され、相互に並列である
+- `idx` はコンパイル時インデックス変数であり、spawn 本体内で actor 引数と buffer 添字に使用できる
+- `begin` / `end` は正のコンパイル時整数でなければならない。`begin < end` を満たさない場合はコンパイルエラー
+- spawn 展開は name resolve / 型推論 / SDF 解析の前に実行される
+
 ### 5.5 パイプ演算子
 
 ```
@@ -630,11 +670,11 @@ actor_a() | actor_b() | actor_c()
 
 | 位置 | 構文 | 解釈 |
 |------|------|------|
-| 行頭 | `@name` | 共有バッファからの読出し |
+| 行頭 | `@name` / `@name[idx]` / `@name[*]` | 共有バッファ（単体/配列要素/配列全体）からの読出し |
 | パイプ中 | `name(...)` | アクター呼出し（0引数でも括弧必須） |
 | パイプ中 | `:name` | タップ（宣言または参照） |
 | パイプ中 | `?name` | プローブ |
-| パイプ末尾 | `-> name` | 共有バッファへの書込み |
+| パイプ末尾 | `-> name` / `-> name[idx]` / `-> name[*]` | 共有バッファ（単体/配列要素/配列全体）への書込み |
 
 **アクターは必ず括弧付き**で記述する。0引数のアクターも `name()` と書く。これにより、アクター呼出しと他の構文要素（共有バッファ名、タップ名、キーワード）の間に構文上の曖昧さは生じない。
 
@@ -687,27 +727,48 @@ adc(0) | :orphan | fir(coeff) -> signal
 
 ```
 ... | fir(coeff) -> signal
+... | fir(coeff) -> out[ch]
 ```
 
-`-> name` はパイプラインの末尾に置かれ、共有メモリバッファ `signal` へデータを書き込む。
+`-> name` / `-> name[idx]` / `-> name[*]` はパイプラインの末尾に置かれ、共有メモリバッファへデータを書き込む。
 
 #### 読出し
 
 ```
 @signal | decimate(10000) | csvwrite("out.csv")
+@in[ch] | fir(coeff) | stdout()
 ```
 
-`@name` をパイプラインの先頭に置くことで、共有メモリバッファからデータを読み出す。`@` プレフィックスにより、共有バッファの読出しであることが構文上明示される。
+`@name` / `@name[idx]` / `@name[*]` をパイプラインの先頭に置くことで、共有メモリバッファからデータを読み出す。`@` プレフィックスにより、共有バッファの読出しであることが構文上明示される。
+
+#### 要素参照（`name[idx]`）
+
+- `name[idx]` は共有バッファ配列（family）の単一要素を指す
+- `idx` は整数リテラル、`const`、または spawn インデックス変数でなければならない
+- `idx` はコンパイル時に範囲検査される。`0 <= idx < N` を満たさない場合はコンパイルエラー
+- `name[idx]` は独立した共有バッファとして扱われる（型・レート・単一ライター制約も要素単位）
+
+#### 全要素参照（`name[*]`）
+
+`name[*]` は配列全要素をチャンネル次元で束ね、1つの仮想ポートとして扱う。
+
+- 要素数を `C`、各要素のフレーム要素数を `F` とすると、`name[*]` の shape は `[C, F]`（2次元）として扱う
+- 実行時レイアウトは従来どおりフラットであり、shape はコンパイル時メタデータである
+- `@name[*]` は `name[0], name[1], ..., name[C-1]` を index 昇順で結合する gather と等価
+- `-> name[*]` は上流から供給された `[C, F]` を各要素へ分配する scatter と等価
+- `name[*]` に接続される全要素は同一 dtype と同一 `F` を満たさなければならない（不一致はコンパイルエラー）
 
 #### 単一ライター制約
 
-一つの共有メモリバッファに対して `->` を記述できるのは1タスクのみ。
+一つの共有メモリバッファ（または family 要素）に対して `->` を記述できるのは1タスクのみ。
 
 ```
 clock 10MHz a { ... -> signal }
 clock 10MHz b { ... -> signal }
 # error: multiple writers to shared buffer 'signal'
 ```
+
+`-> name[*]` は family の全要素に対する writer 宣言として扱う。したがって `-> name[*]` と `-> name[idx]` の混在、または複数タスクからの `-> name[*]` は許可されない。
 
 #### 複数リーダー
 
@@ -717,7 +778,7 @@ clock 1kHz d { @signal | proc2() | ... }
 # OK: 各リーダーは独立したリードポインタを持つ
 ```
 
-同一クロックの複数リーダーは、同一イテレーション内で同じデータを観測する（スナップショット読み取り）。
+同一クロックの複数リーダーは、同一イテレーション内で同じデータを観測する（スナップショット読み取り）。同じ規則は `name[idx]` と `name[*]` にも適用される。
 
 #### クロックドメイン境界とレート整合条件
 
@@ -739,6 +800,12 @@ error: rate mismatch at shared buffer 'buf'
   reader 'slow': 1 token/iteration × 1kHz  = 1K tokens/sec
   hint: insert rate conversion actor (e.g. decimate(10000))
 ```
+
+`name[*]` を用いる場合の追加条件:
+
+- `@name[*]`（gather）では、全要素 `name[i]` が同一 `Cr_elem × fr` を満たさなければならない
+- `-> name[*]`（scatter）では、上流の総トークンレートが全要素へ等分可能でなければならない
+- 2次元 shape `[C, F]` の `F` は全要素で一致しなければならない
 
 **バッファサイズ:**
 
@@ -869,8 +936,8 @@ bind iq2 = shm("rx.iq", slots=1024, slot_bytes=4096)
 
 バインド方向は次で一意に決定する。
 
-1. `-> name` が1つ以上存在する場合: **out-bind**
-2. `-> name` が存在せず `@name` が1つ以上存在する場合: **in-bind**
+1. `-> name` または `-> name[*]` が1つ以上存在する場合: **out-bind**
+2. 上記が存在せず `@name` または `@name[*]` が1つ以上存在する場合: **in-bind**
 3. 上記いずれにも該当しない場合: コンパイルエラー
 
 #### 契約（contract）推論
@@ -897,7 +964,7 @@ bind iq2 = shm("rx.iq", slots=1024, slot_bytes=4096)
 
 #### 制約
 
-- `bind` 対象名は少なくとも1つの `@name` または `-> name` として参照されなければならない
+- `bind` 対象名は少なくとも1つの `@name` / `@name[*]` / `-> name` / `-> name[*]` として参照されなければならない
 - 同一 `name` に対する `bind` は最大1つ
 - in-bind で reader 契約が一意に定まらない場合はコンパイルエラー
 
@@ -1001,6 +1068,9 @@ switch(ctrl, sync, data) default sync
 | デッドロック | フィードバックループに `delay` がない |
 | ctrl 供給不在 | `switch` の ctrl に供給元がない |
 | パラメータ型不整合 | `param` の型とアクターの `RUNTIME_PARAM` 型の不一致 |
+| spawn 範囲不正 | `clock ... [ch=begin..end]` で `begin >= end` または非整数 |
+| 配列添字範囲外 | `name[idx]` の `idx` が宣言範囲外 |
+| family 契約不整合 | `name[*]` で dtype / frame 次元 / 要素レートが一致しない |
 | bind 方向推論失敗 | `bind name = ...` で `@name` / `-> name` が存在しない |
 | bind 契約曖昧 | in-bind の reader 群から単一レート契約を導けない |
 | bind endpoint 不正 | `bind` の endpoint 種別やオプションが未定義/範囲外 |
@@ -1028,7 +1098,7 @@ pipit: pipeline terminated with error (exit code 1, fail-fast)
 
 ## 8. コンパイラ処理フロー
 
-コンパイラ `pcc` の処理フロー（字句解析 → 構文解析 → アクターマニフェスト読込み（必要に応じて生成） → 名前解決 → 型制約解決/モノモーフ化 → SDF グラフ構築 → 静的解析 → スケジュール生成 → C++ コード生成 → C++ コンパイル）の詳細は現行仕様 [pcc-spec](pcc-spec-v0.4.0.md) を参照。
+コンパイラ `pcc` の処理フロー（字句解析 → 構文解析 → spawn 展開 → アクターマニフェスト読込み（必要に応じて生成） → 名前解決 → 型制約解決/モノモーフ化 → SDF グラフ構築 → 静的解析 → スケジュール生成 → C++ コード生成 → C++ コンパイル）の詳細は現行仕様 [pcc-spec](pcc-spec-v0.4.0.md) を参照。
 
 polymorphism と暗黙数値拡張を含むプログラムは、実装内部で explicit な lower 形へ書き換えられてもよい。ただしこの書き換えは意味保存でなければならない。少なくとも以下を満たすこと（MUST）。
 
@@ -1107,6 +1177,7 @@ program         ::= (statement NL)*
 statement       ::= set_stmt
                   | const_stmt
                   | param_stmt
+                  | shared_stmt
                   | bind_stmt
                   | define_stmt
                   | task_stmt
@@ -1125,6 +1196,8 @@ const_stmt      ::= 'const' IDENT '=' value
 
 param_stmt      ::= 'param' IDENT '=' scalar
 
+shared_stmt     ::= 'shared' IDENT '[' shape_dim ']'
+
 bind_stmt       ::= 'bind' IDENT '=' bind_endpoint
 
 bind_endpoint   ::= IDENT '(' bind_args? ')'
@@ -1140,7 +1213,10 @@ define_stmt     ::= 'define' IDENT '(' params? ')' '{' pipeline_body '}'
 
 # ── タスク定義 ──
 
-task_stmt       ::= 'clock' FREQ IDENT '{' task_body '}'
+task_stmt       ::= 'clock' FREQ IDENT spawn_clause? '{' task_body '}'
+
+spawn_clause    ::= '[' IDENT '=' range_expr ']'
+range_expr      ::= shape_dim '..' shape_dim
 
 task_body       ::= pipeline_body
                   | modal_body
@@ -1168,7 +1244,7 @@ pipeline_line   ::= pipe_expr
 
 pipe_expr       ::= pipe_source ('|' pipe_elem)* sink?
 
-pipe_source     ::= '@' IDENT          # 共有バッファ読出し
+pipe_source     ::= '@' buffer_ref     # 共有バッファ読出し
                   | ':' IDENT           # タップ参照（消費側）
                   | actor_call          # アクター（ソースアクター）
 
@@ -1183,7 +1259,14 @@ shape_constraint ::= '[' shape_dims ']'
 shape_dims      ::= shape_dim (',' shape_dim)*
 shape_dim       ::= NUMBER | IDENT     # IDENT は const 参照
 
-sink            ::= '->' IDENT         # 共有バッファ書込み
+sink            ::= '->' buffer_ref    # 共有バッファ書込み
+
+buffer_ref      ::= IDENT
+                  | IDENT '[' index_expr ']'
+                  | IDENT '[' '*' ']'
+
+index_expr      ::= NUMBER             # 整数リテラル
+                  | IDENT               # const 参照 or spawn index 参照
 
 # ── 引数・パラメータ ──
 
@@ -1220,6 +1303,8 @@ SIZE_UNIT       ::= 'KB' | 'MB' | 'GB'
 NUMBER          ::= '-'? [0-9]+ ('.' [0-9]+)? ([eE] [+-]? [0-9]+)?
 STRING          ::= '"' ( [^"\\] | '\\' ["\\] )* '"'
 IDENT           ::= [a-zA-Z_] [a-zA-Z0-9_]*
+STAR            ::= '*'
+RANGE_DOTS      ::= '..'
 
 NL              ::= '\n'+
 EMPTY           ::= NL
@@ -1419,6 +1504,33 @@ bind ctrl = udp("127.0.0.1:9200", chan=2)
 
 `wave` は `-> wave` から out-bind と推論され、`ctrl` は `@ctrl` から in-bind と推論される。
 
+### 11.6 多チャネル spawn と配列全体参照（v0.4.0）
+
+```pdl
+const CH = 24
+const FRAME = 256
+
+shared in[CH]
+shared out[CH]
+
+# 24ch を一括生成（各タスクは独立並列実行）
+clock 48kHz capture[ch=0..CH] {
+    adc(ch) | frame_pack()[FRAME] -> in[ch]
+}
+
+# 配列全体参照: in[*] を [CH, FRAME] として扱う
+clock 48kHz beam {
+    @in[*] | beamform()[CH, FRAME] | distribute()[CH, FRAME] -> out[*]
+}
+
+# 要素参照: 個別チャンネルの後段処理
+clock 48kHz sink[ch=0..CH] {
+    @out[ch] | stdout()
+}
+```
+
+`@in[*]` / `-> out[*]` は 2 次元 shape `[CH, FRAME]` として接続される。先頭次元は配列（チャンネル）次元、後続は frame 次元である。
+
 ---
 
 ## 13. フレーム次元推論と多次元ベクトル化（v0.2 ドラフト）
@@ -1447,6 +1559,15 @@ bind ctrl = udp("127.0.0.1:9200", chan=2)
   - `IN(T, N)` ≡ `IN(T, SHAPE(N))`
   - `OUT(T, 1)` はスカラー要素数 1 を意味する
 - v0.1.0 のプログラムは意味を変えずに受理される
+
+#### 13.2.3 共有バッファ配列の shape リフト（v0.4.0）
+
+共有バッファ配列 `name[CH]` に対する全要素参照 `name[*]` は、shape を次の規則で 2 次元化する。
+
+- 各要素 `name[i]` のフレーム要素数を `F` とする
+- `@name[*]` / `-> name[*]` の shape は `[CH, F]` とする
+- `CH` は in/out 配列次元（チャンネル次元）、`F` は frame 次元を表す
+- この 2 次元 shape はコンパイル時解析にのみ用いられ、実行時バッファは従来どおりフラット配置を維持する
 
 ### 13.3 アクター宣言拡張（C++ 側）
 
