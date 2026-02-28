@@ -19,16 +19,16 @@
 | v0.4.0 | — | IR unification (AST→HIR→THIR→LIR), pass manager (ADR-020–023), diagnostics upgrade, `pipit_shell.h`, `codegen.rs` 5106→2630 LOC |
 | v0.4.1 | — | MemoryKind enum (ADR-028), SPSC ring buffer (ADR-029), param sync simplification (ADR-030), `alignas(64)` edges |
 | v0.4.2 | — | Diagnostics completion: all 10 E0100–E0206 enriched with `cause_chain`, `related_spans`, hints |
-| v0.4.2-bind | — | Bind-based external integration: `bind` grammar/IR/inference, stable IDs, `--emit interface`, `BindIoAdapter` codegen, runtime rebind (feat/shm-support) |
+| v0.4.3 | — | Bind-based external integration: `bind` grammar/IR/inference, stable IDs, `--emit interface`, `BindIoAdapter` codegen, runtime rebind |
 | v0.4.4 | — | PP record manifest extraction (ADR-032), `--actor-meta` required (ADR-033, breaking), E0700 diagnostic, 667 tests |
 
 ---
 
-## v0.4.3 - Shared-Memory Bind Transport (PSHM)
+## v0.4.5 - Shared-Memory Bind Transport (PSHM)
 
 **Goal**: Implement `shm(...)` bind transport for multi-process local IPC.
 
-> Depends on v0.4.2-bind (merged). Phase 2 (PSHM runtime core) is parallelizable.
+> Depends on v0.4.3 (merged). Phase 2 (PSHM runtime core) is parallelizable.
 
 ### Phase 1: Compiler Surface Alignment
 
@@ -103,8 +103,8 @@
 - [ ] Re-benchmark two-step manifest workflow (v0.4.4)
 - [ ] KPI exit criteria: complex/modal ≥5% improvement vs v0.3.3, no regressions (v0.3.4)
 - [ ] Task-internal branch parallelization study — safety gate, effect classification, prototype (v0.3.4)
-- [ ] Full provenance tracing through constraint solver (v0.4.5)
-- [ ] Ambiguity/mismatch diagnostics with candidate suggestions (v0.4.5)
+- [ ] Full provenance tracing through constraint solver (v0.5.x)
+- [ ] Ambiguity/mismatch diagnostics with candidate suggestions (v0.5.x)
 
 ### Standard Actor Library Expansion
 
