@@ -171,30 +171,17 @@
 - SPSC retry tuning (spin/yield/backoff) — measure before tuning
 - SPSC relaxed memory ordering evaluation — needs proof, measure before changing
 - Phase C: Block pool & pointer ring — gated behind `--experimental`, high complexity
-
-### Deferred to v0.4.3
-
 - Deterministic `invalidation_key` hashing — no caching infrastructure to consume keys
 
-## v0.4.2 - Diagnostics Completion (Medium Complexity)
+## v0.4.2 - Diagnostics Completion ✅
 
 **Goal**: Complete diagnostics provenance and ambiguity guidance to improve debuggability and remediation clarity.
 
-- [ ] Add full provenance tracing through the constraint solver.
-- [ ] Improve ambiguity/mismatch diagnostics with candidate and remediation suggestions.
-
-## v0.4.3 - Compiler Latency Profiling & Recovery (High Complexity)
-
-**Goal**: Measure and recover compile-latency regression; add reusable artifact caching without changing compiler semantics.
-
-- [ ] Run formal KPI A/B benchmark against v0.3.4 baseline (`compiler_bench_stable.sh --baseline-ref v0.3.4`).
-- [ ] Record release disposition for compile-latency regression after benchmark review.
-- [ ] Add artifact hashing and reusable cache for heavy phases.
-- [ ] Profile per-phase time (`build_hir`, `build_thir`, `build_lir`, `codegen`) and rank dominant costs.
-- [ ] Reduce allocation/clone overhead in `build_lir`.
-- [ ] Evaluate lazy/on-demand LIR field materialization for codegen-only paths.
-- [ ] Audit `precompute_metadata()` duplication against analysis-owned data.
-- [ ] Re-measure after each optimization; target per-scenario latency within 10% of `7248b44`.
+- [x] Enrich `type_infer.rs` E0100/E0101/E0102 with `cause_chain`, `related_spans`, and actionable hints
+- [x] Refactor `infer_type_from_args()` to return partial results (`Option<Vec<Option<PipitType>>>`) for E0102 provenance
+- [x] Enrich `lower.rs` E0200-E0206 with `cause_chain`, `related_spans`, and remediation hints
+- [x] Dedicated tests for E0202 (L3), E0204 (L4), and E0100 paths
+- [x] All 10 diagnostics in type_infer + lower now have full provenance (cause_chain + hints)
 
 ## v0.4.4 - Clang Registry Extraction & Manifest-Required Inputs (Breaking)
 
@@ -232,6 +219,29 @@
 **Goal**: Make Pipit easier to use and deploy in real projects.
 
 > **Status**: Deferred. All unchecked (`- [ ]`) items in this `v0.5.x` section are deferred.
+
+### Deferred from v0.4.x: Compiler Latency Profiling & Recovery
+
+> **Reference**: review-0004 (deferred v0.4.3 plan). Acceptance gate: cold-compile KPI within 10% of v0.3.4 baseline (`7248b44`). Warm-cache CLI latency is a separate informational metric.
+
+- [ ] **Measurement infrastructure**
+  - [ ] Add phase benchmarks for build_hir, type_infer, lower, build_thir, build_lir to `kpi/phase_latency`
+  - [ ] Add `--emit phase-timing` for machine-readable JSON output (store timings in `CompilationState`)
+  - [ ] Add explicit timing for `build_thir_context()` (currently untimed, hidden hotspot)
+- [ ] **Baseline & disposition**
+  - [ ] Run formal KPI A/B benchmark against v0.3.4 baseline (`compiler_bench_stable.sh --baseline-ref v0.3.4`)
+  - [ ] Record release disposition for compile-latency regression in ADR-031
+- [ ] **LIR dead field removal**
+  - [ ] Remove `LirInterTaskBuffer.skip_writes` and `.reader_tasks` (computed but never read by codegen)
+- [ ] **Whole-program output cache** (`cache.rs`)
+  - [ ] Cache key: SHA-256 of source_hash + registry_fingerprint + compiler_version + codegen_options + include_paths
+  - [ ] File-based cache at `$XDG_CACHE_HOME/pipit/v1/`, atomic write, best-effort I/O
+  - [ ] Skip-cache-if-warnings policy (only cache warning-free compilations)
+  - [ ] `--no-cache` CLI flag
+- [ ] **Not actionable (investigated, no change needed)**
+  - [x] `precompute_metadata()` duplication audit — no such function; analysis→LIR data flow is reasonable
+  - [x] Lazy LIR field materialization — codegen uses all fields
+- [ ] **Deterministic `invalidation_key` hashing** (deferred from v0.4.1 — no caching infrastructure to consume keys)
 
 ### Deferred Backlog from v0.3.x
 
@@ -454,9 +464,11 @@
 - **pre-v0.4.0 open items** were moved to `v0.5.x` backlog (`Deferred Backlog from v0.3.x`)
 - **v0.4.0 summary**: architecture rebuild completed across contract freeze, IR unification, pass-manager orchestration, verification/diagnostics upgrade, runtime-shell extraction, registry determinism, and migration hardening.
 - **v0.4.0 delivered artifacts**: HIR/THIR/LIR production pipeline, `codegen_from_lir` path, unified diagnostics with stable codes in `pcc-spec-v0.4.0.md` §10.4-§10.6, `--emit manifest` / `--emit build-info`, and manifest-first CMake integration.
-- **v0.4.x deferred work placement**: follow-up items from v0.4.0 are grouped into `v0.4.1`/`v0.4.2`/`v0.4.3` by complexity and release criticality.
+- **v0.4.x deferred work placement**: follow-up items from v0.4.0 were grouped into `v0.4.1`/`v0.4.2`/`v0.4.3` by complexity and release criticality. v0.4.3 (latency profiling & recovery) was deferred to v0.5.x after planning review (see review-0004).
 - **v0.4.1 summary**: MemoryKind classification (ADR-028), SPSC ring buffer (ADR-029), param sync simplification (ADR-030), `alignas(64)` edge buffers, `--experimental` flag. Audited for over-engineering; scalarization/assume_aligned/locality-scoring deferred.
 - **v0.4.1 ADRs**: ADR-028 (edge memory classification), ADR-029 (SPSC ring buffer specialization), ADR-030 (param sync simplification)
-- **v0.5.x** open items are currently deferred
+- **v0.4.2 summary**: Diagnostics completion — enriched all 10 diagnostics in `type_infer.rs` (E0100-E0102) and `lower.rs` (E0200-E0206) with `cause_chain`, `related_spans`, and actionable hints. Refactored `infer_type_from_args()` for partial-result provenance.
+- **v0.4.3 deferred**: Compiler latency profiling & recovery planned but deferred to v0.5.x. Full plan in review-0004. Key findings: ThirContext untimed, LIR has 2 dead fields, whole-program output cache designed with skip-cache-if-warnings policy and include_paths in cache key.
+- **v0.5.x** open items are currently deferred; now also includes former v0.4.3 latency work
 - Performance characterization should inform optimization priorities (measure before optimizing)
 - Spec files renamed to versioned names (`pipit-lang-spec-v0.3.0.md`, `pcc-spec-v0.3.0.md`); `v0.2.0` specs are frozen from tag `v0.2.2`
