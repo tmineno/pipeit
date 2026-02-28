@@ -2214,4 +2214,165 @@ ACTOR(scale, IN(T, N), OUT(T, N), PARAM(T, gain) PARAM(int, N)) {
             "canonical JSON should be stable across calls"
         );
     }
+
+    // ── PP extraction unit tests ────────────────────────────────────────
+
+    #[test]
+    fn parse_pp_records_simple() {
+        let output = r#"PIPIT_REC_V1("std_actors.h", 42, "gain", "IN(float, 1)", "OUT(float, 1)", "RUNTIME_PARAM(float, gain)")"#;
+        let records = parse_pp_records(output).expect("parse should succeed");
+        assert_eq!(records.len(), 1);
+        let (meta, source) = &records[0];
+        assert_eq!(meta.name, "gain");
+        assert_eq!(meta.in_type, PipitType::Float);
+        assert_eq!(meta.in_count, TokenCount::Literal(1));
+        assert_eq!(meta.out_type, PipitType::Float);
+        assert_eq!(meta.out_count, TokenCount::Literal(1));
+        assert_eq!(meta.params.len(), 1);
+        assert_eq!(meta.params[0].kind, ParamKind::RuntimeParam);
+        assert_eq!(source, "std_actors.h");
+    }
+
+    #[test]
+    fn parse_pp_records_no_params() {
+        let output =
+            r#"PIPIT_REC_V1("test.h", 10, "pass_through", "IN(float, 1)", "OUT(float, 1)", "")"#;
+        let records = parse_pp_records(output).expect("parse should succeed");
+        assert_eq!(records.len(), 1);
+        assert!(records[0].0.params.is_empty());
+    }
+
+    #[test]
+    fn parse_pp_records_multiple() {
+        let output = concat!(
+            "PIPIT_REC_V1(\"a.h\", 1, \"alpha\", \"IN(float, 1)\", \"OUT(float, 1)\", \"\")\n",
+            "PIPIT_REC_V1(\"b.h\", 2, \"beta\", \"IN(int32, 2)\", \"OUT(int32, 2)\", \"PARAM(int, ch)\")\n",
+        );
+        let records = parse_pp_records(output).expect("parse should succeed");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].0.name, "alpha");
+        assert_eq!(records[1].0.name, "beta");
+    }
+
+    #[test]
+    fn parse_pp_records_template() {
+        let output = "template <typename T>\nPIPIT_REC_V1(\"poly.h\", 5, \"poly_scale\", \"IN(T, 1)\", \"OUT(T, 1)\", \"RUNTIME_PARAM(T, scale)\")";
+        let records = parse_pp_records(output).expect("parse should succeed");
+        assert_eq!(records.len(), 1);
+        let meta = &records[0].0;
+        assert_eq!(meta.name, "poly_scale");
+        assert!(
+            !meta.type_params.is_empty(),
+            "template actor should have type params"
+        );
+        assert!(
+            meta.type_params.iter().any(|p| p == "T"),
+            "type_params should contain T, got: {:?}",
+            meta.type_params
+        );
+    }
+
+    #[test]
+    fn parse_pp_records_empty_output() {
+        let records = parse_pp_records("").expect("empty should succeed");
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn parse_pp_records_no_records_in_noise() {
+        let records =
+            parse_pp_records("some other text\nno records here\n").expect("should succeed");
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn split_record_fields_simple() {
+        let fields =
+            split_record_fields(r#""a.h", 42, "gain", "IN(float, 1)", "OUT(float, 1)", """#);
+        assert_eq!(fields.len(), 6);
+        assert_eq!(fields[0].trim(), r#""a.h""#);
+        assert_eq!(fields[1].trim(), "42");
+        assert_eq!(fields[2].trim(), r#""gain""#);
+    }
+
+    #[test]
+    fn split_record_fields_commas_in_strings() {
+        let fields = split_record_fields(
+            r#""file.h", 1, "name", "IN(float, 1)", "OUT(float, 1)", "PARAM(int, a) PARAM(float, b)""#,
+        );
+        assert_eq!(fields.len(), 6);
+    }
+
+    #[test]
+    fn unescape_simple() {
+        assert_eq!(unescape_string_literal(r#""hello""#), "hello");
+    }
+
+    #[test]
+    fn unescape_with_escapes() {
+        assert_eq!(unescape_string_literal(r#""a\"b""#), "a\"b");
+        assert_eq!(unescape_string_literal(r#""a\\b""#), "a\\b");
+    }
+
+    #[test]
+    fn unescape_no_quotes() {
+        assert_eq!(unescape_string_literal("plain"), "plain");
+    }
+
+    #[test]
+    fn invoke_preprocessor_missing_compiler() {
+        let result =
+            invoke_preprocessor("nonexistent_compiler_xyz_12345", "#include <stdio.h>", &[]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RegistryError::PreprocessorError { message, .. } => {
+                assert!(
+                    message.contains("nonexistent_compiler_xyz_12345"),
+                    "error should mention the compiler: {message}"
+                );
+            }
+            other => panic!("expected PreprocessorError, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn invoke_preprocessor_bad_include() {
+        let result = invoke_preprocessor(
+            "clang++",
+            "#include \"nonexistent_header_xyz_12345.h\"",
+            &[],
+        );
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RegistryError::PreprocessorError { stderr, .. } => {
+                assert!(
+                    !stderr.is_empty(),
+                    "preprocessor stderr should not be empty"
+                );
+            }
+            other => panic!("expected PreprocessorError, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn find_balanced_paren_basic() {
+        assert_eq!(find_balanced_paren_string_aware("(abc)", 0), Some(4));
+        assert_eq!(find_balanced_paren_string_aware("(a(b)c)", 0), Some(6));
+    }
+
+    #[test]
+    fn find_balanced_paren_with_string() {
+        assert_eq!(find_balanced_paren_string_aware(r#"("a)")"#, 0), Some(5));
+    }
+
+    #[test]
+    fn build_probe_tu_includes_headers() {
+        let h1 = PathBuf::from("/test/a.h");
+        let h2 = PathBuf::from("/test/b.h");
+        let tu = build_probe_tu(&[&h1, &h2]);
+        assert!(tu.contains("#include \"/test/a.h\""));
+        assert!(tu.contains("#include \"/test/b.h\""));
+        assert!(tu.contains("#undef ACTOR"));
+        assert!(tu.contains("PIPIT_REC_V1"));
+    }
 }
