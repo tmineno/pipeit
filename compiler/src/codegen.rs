@@ -220,6 +220,10 @@ impl<'a> CodegenCtx<'a> {
             return;
         }
         for buf in &lir.inter_task_buffers {
+            // Skip dead ring buffers (bind-only OUT with no local readers)
+            if buf.skip_writes && buf.reader_tasks.is_empty() {
+                continue;
+            }
             let _ = writeln!(
                 self.out,
                 "static pipit::RingBuffer<{}, {}, {}> _ringbuf_{};",
@@ -588,17 +592,18 @@ impl<'a> CodegenCtx<'a> {
         };
         let _ = writeln!(self.out, "void task_{}() {{", task_name);
         self.emit_task_prologue(task_name, meta, task_graph);
+        self.emit_edge_buffer_declarations(task_name);
+        let tick_hoisted_actors = self.emit_tick_hoisted_actor_declarations(
+            task_name,
+            task_graph,
+            &meta.schedule,
+            "    ",
+        );
         self.out
             .push_str("    while (!_stop.load(std::memory_order_acquire)) {\n");
         self.out.push_str("        _timer.wait();\n");
 
         let policy = self.emit_task_overrun_policy(task_name);
-        let tick_hoisted_actors = self.emit_tick_hoisted_actor_declarations(
-            task_name,
-            task_graph,
-            &meta.schedule,
-            "        ",
-        );
         let indent =
             self.emit_task_iteration_setup(task_name, task_graph, meta.k_factor, &meta.schedule);
         self.emit_task_schedule_dispatch(
@@ -617,6 +622,35 @@ impl<'a> CodegenCtx<'a> {
         }
         self.out.push_str("    }\n");
         self.out.push_str("}\n\n");
+    }
+
+    /// Emit edge buffer declarations at task scope (before the while loop).
+    /// Collects all non-feedback, non-alias edge buffers from all subgraphs.
+    fn emit_edge_buffer_declarations(&mut self, task_name: &str) {
+        let lir = self.lir;
+        let Some(lir_task) = lir.tasks.iter().find(|t| t.name == task_name) else {
+            return;
+        };
+        let subgraphs: Vec<&LirSubgraph> = match &lir_task.body {
+            LirTaskBody::Pipeline(sg) => vec![sg],
+            LirTaskBody::Modal(modal) => {
+                let mut sgs = vec![&modal.control];
+                sgs.extend(modal.modes.iter().map(|(_, sg)| sg));
+                sgs
+            }
+        };
+        for sg in subgraphs {
+            for eb in &sg.edge_buffers {
+                if eb.is_feedback || eb.alias_of.is_some() {
+                    continue;
+                }
+                let _ = writeln!(
+                    self.out,
+                    "    alignas(64) static {} {}[{}];",
+                    eb.cpp_type, eb.var_name, eb.tokens
+                );
+            }
+        }
     }
 
     fn emit_tick_hoisted_actor_declarations(
@@ -1013,11 +1047,16 @@ impl<'a> CodegenCtx<'a> {
         }
         self.out.push_str("    };\n");
 
-        // Buffer descriptors
-        if !lir.inter_task_buffers.is_empty() {
+        // Buffer descriptors (skip dead ring buffers: bind-only OUT with no readers)
+        let active_bufs: Vec<&_> = lir
+            .inter_task_buffers
+            .iter()
+            .filter(|b| !(b.skip_writes && b.reader_tasks.is_empty()))
+            .collect();
+        if !active_bufs.is_empty() {
             self.out
                 .push_str("    static const pipit::BufferStatsDesc _buffer_descs[] = {\n");
-            for buf in &lir.inter_task_buffers {
+            for buf in &active_bufs {
                 let _ = writeln!(
                     self.out,
                     "        {{\"{}\", []() -> size_t {{ return _ringbuf_{}.available(); }}, sizeof({})}},",
@@ -1121,7 +1160,7 @@ impl<'a> CodegenCtx<'a> {
 
         self.out.push_str("    _desc.tasks = _task_descs;\n");
 
-        if lir.inter_task_buffers.is_empty() {
+        if active_bufs.is_empty() {
             self.out
                 .push_str("    _desc.buffers = std::span<const pipit::BufferStatsDesc>{};\n");
         } else {
@@ -1164,7 +1203,7 @@ impl<'a> CodegenCtx<'a> {
 
     // ── LIR-based emission methods ────────────────────────────────────────
 
-    /// Emit all firings for a LIR subgraph: edge buffer declarations + firing groups.
+    /// Emit all firings for a LIR subgraph (edge buffers already declared at task scope).
     fn emit_lir_subgraph(
         &mut self,
         task_name: &str,
@@ -1172,18 +1211,6 @@ impl<'a> CodegenCtx<'a> {
         indent: &str,
         tick_hoisted: &HashMap<NodeId, String>,
     ) {
-        // Declare edge buffers (skip feedback and aliased)
-        for eb in &lir_sg.edge_buffers {
-            if eb.is_feedback || eb.alias_of.is_some() {
-                continue;
-            }
-            let _ = writeln!(
-                self.out,
-                "{}alignas(64) static {} {}[{}];",
-                indent, eb.cpp_type, eb.var_name, eb.tokens
-            );
-        }
-
         // Emit firing groups
         for group in &lir_sg.firings {
             match group {
