@@ -1,0 +1,1618 @@
+{
+  "schema": 1,
+  "actors": [
+    {
+      "name": "abs",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Literal": 1
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": []
+    },
+    {
+      "name": "add",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Literal": 2
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 2
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": []
+    },
+    {
+      "name": "binread",
+      "type_params": [],
+      "in_type": {
+        "Concrete": "Void"
+      },
+      "in_count": {
+        "Literal": 0
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 0
+          }
+        ]
+      },
+      "out_type": {
+        "Concrete": "Float"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "RuntimeParam",
+          "param_type": "SpanChar",
+          "name": "path"
+        },
+        {
+          "kind": "RuntimeParam",
+          "param_type": "SpanChar",
+          "name": "dtype"
+        }
+      ]
+    },
+    {
+      "name": "binwrite",
+      "type_params": [],
+      "in_type": {
+        "Concrete": "Float"
+      },
+      "in_count": {
+        "Literal": 1
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "out_type": {
+        "Concrete": "Void"
+      },
+      "out_count": {
+        "Literal": 0
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 0
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "RuntimeParam",
+          "param_type": "SpanChar",
+          "name": "path"
+        },
+        {
+          "kind": "RuntimeParam",
+          "param_type": "SpanChar",
+          "name": "dtype"
+        }
+      ]
+    },
+    {
+      "name": "c2r",
+      "type_params": [],
+      "in_type": {
+        "Concrete": "Cfloat"
+      },
+      "in_count": {
+        "Symbolic": "N"
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "out_type": {
+        "Concrete": "Float"
+      },
+      "out_count": {
+        "Symbolic": "N"
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    },
+    {
+      "name": "constant",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "Concrete": "Void"
+      },
+      "in_count": {
+        "Literal": 0
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 0
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Symbolic": "N"
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "RuntimeParam",
+          "param_type": {
+            "TypeParam": "T"
+          },
+          "name": "value"
+        },
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    },
+    {
+      "name": "convolve",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Symbolic": "N"
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Symbolic": "N"
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": {
+            "SpanTypeParam": "T"
+          },
+          "name": "kernel"
+        },
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    },
+    {
+      "name": "correlate",
+      "type_params": [],
+      "in_type": {
+        "Concrete": "Float"
+      },
+      "in_count": {
+        "Literal": 64
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 64
+          }
+        ]
+      },
+      "out_type": {
+        "Concrete": "Float"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": []
+    },
+    {
+      "name": "csvwrite",
+      "type_params": [],
+      "in_type": {
+        "Concrete": "Float"
+      },
+      "in_count": {
+        "Literal": 1
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "out_type": {
+        "Concrete": "Void"
+      },
+      "out_count": {
+        "Literal": 0
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 0
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": "SpanChar",
+          "name": "path"
+        }
+      ]
+    },
+    {
+      "name": "decimate",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Symbolic": "N"
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    },
+    {
+      "name": "delay",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Literal": 1
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        },
+        {
+          "kind": "Param",
+          "param_type": {
+            "TypeParam": "T"
+          },
+          "name": "init"
+        }
+      ]
+    },
+    {
+      "name": "detect",
+      "type_params": [],
+      "in_type": {
+        "Concrete": "Float"
+      },
+      "in_count": {
+        "Literal": 1
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "out_type": {
+        "Concrete": "Int32"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": []
+    },
+    {
+      "name": "div",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Literal": 2
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 2
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": []
+    },
+    {
+      "name": "fft",
+      "type_params": [],
+      "in_type": {
+        "Concrete": "Float"
+      },
+      "in_count": {
+        "Symbolic": "N"
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "out_type": {
+        "Concrete": "Cfloat"
+      },
+      "out_count": {
+        "Symbolic": "N"
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    },
+    {
+      "name": "fir",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Symbolic": "N"
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": {
+            "SpanTypeParam": "T"
+          },
+          "name": "coeff"
+        },
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    },
+    {
+      "name": "impulse",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "Concrete": "Void"
+      },
+      "in_count": {
+        "Literal": 0
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 0
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Symbolic": "N"
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "period"
+        },
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    },
+    {
+      "name": "mag",
+      "type_params": [],
+      "in_type": {
+        "Concrete": "Cfloat"
+      },
+      "in_count": {
+        "Symbolic": "N"
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "out_type": {
+        "Concrete": "Float"
+      },
+      "out_count": {
+        "Symbolic": "N"
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    },
+    {
+      "name": "max",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Symbolic": "N"
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    },
+    {
+      "name": "mean",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Symbolic": "N"
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    },
+    {
+      "name": "min",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Symbolic": "N"
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    },
+    {
+      "name": "mul",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Symbolic": "N"
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Symbolic": "N"
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "RuntimeParam",
+          "param_type": {
+            "TypeParam": "T"
+          },
+          "name": "gain"
+        },
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    },
+    {
+      "name": "noise",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "Concrete": "Void"
+      },
+      "in_count": {
+        "Literal": 0
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 0
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Symbolic": "N"
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": "Float",
+          "name": "amp"
+        },
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    },
+    {
+      "name": "poly_accum",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Literal": 1
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": []
+    },
+    {
+      "name": "poly_block_pass",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Symbolic": "N"
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Symbolic": "N"
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    },
+    {
+      "name": "poly_pass",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Literal": 1
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": []
+    },
+    {
+      "name": "poly_scale",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Literal": 1
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": {
+            "TypeParam": "T"
+          },
+          "name": "gain"
+        }
+      ]
+    },
+    {
+      "name": "rms",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Symbolic": "N"
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    },
+    {
+      "name": "sawtooth",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "Concrete": "Void"
+      },
+      "in_count": {
+        "Literal": 0
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 0
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Symbolic": "N"
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": "Float",
+          "name": "freq"
+        },
+        {
+          "kind": "Param",
+          "param_type": "Float",
+          "name": "amp"
+        },
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    },
+    {
+      "name": "sine",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "Concrete": "Void"
+      },
+      "in_count": {
+        "Literal": 0
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 0
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Symbolic": "N"
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": "Float",
+          "name": "freq"
+        },
+        {
+          "kind": "Param",
+          "param_type": "Float",
+          "name": "amp"
+        },
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    },
+    {
+      "name": "socket_read",
+      "type_params": [],
+      "in_type": {
+        "Concrete": "Void"
+      },
+      "in_count": {
+        "Literal": 0
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 0
+          }
+        ]
+      },
+      "out_type": {
+        "Concrete": "Float"
+      },
+      "out_count": {
+        "Symbolic": "N"
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": "SpanChar",
+          "name": "addr"
+        },
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    },
+    {
+      "name": "socket_write",
+      "type_params": [],
+      "in_type": {
+        "Concrete": "Float"
+      },
+      "in_count": {
+        "Symbolic": "N"
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "out_type": {
+        "Concrete": "Void"
+      },
+      "out_count": {
+        "Literal": 0
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 0
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": "SpanChar",
+          "name": "addr"
+        },
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "chan_id"
+        },
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    },
+    {
+      "name": "sqrt",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Literal": 1
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": []
+    },
+    {
+      "name": "square",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "Concrete": "Void"
+      },
+      "in_count": {
+        "Literal": 0
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 0
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Symbolic": "N"
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": "Float",
+          "name": "freq"
+        },
+        {
+          "kind": "Param",
+          "param_type": "Float",
+          "name": "amp"
+        },
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    },
+    {
+      "name": "stderr",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Literal": 1
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "out_type": {
+        "Concrete": "Void"
+      },
+      "out_count": {
+        "Literal": 0
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 0
+          }
+        ]
+      },
+      "params": []
+    },
+    {
+      "name": "stdin",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "Concrete": "Void"
+      },
+      "in_count": {
+        "Literal": 0
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 0
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": []
+    },
+    {
+      "name": "stdout",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Literal": 1
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "out_type": {
+        "Concrete": "Void"
+      },
+      "out_count": {
+        "Literal": 0
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 0
+          }
+        ]
+      },
+      "params": []
+    },
+    {
+      "name": "stdout_fmt",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Literal": 1
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "out_type": {
+        "Concrete": "Void"
+      },
+      "out_count": {
+        "Literal": 0
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 0
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "RuntimeParam",
+          "param_type": "SpanChar",
+          "name": "format"
+        }
+      ]
+    },
+    {
+      "name": "sub",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Literal": 2
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 2
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": []
+    },
+    {
+      "name": "sync_process",
+      "type_params": [],
+      "in_type": {
+        "Concrete": "Float"
+      },
+      "in_count": {
+        "Literal": 256
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 256
+          }
+        ]
+      },
+      "out_type": {
+        "Concrete": "Float"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": []
+    },
+    {
+      "name": "threshold",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "TypeParam": "T"
+      },
+      "in_count": {
+        "Literal": 1
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "out_type": {
+        "Concrete": "Int32"
+      },
+      "out_count": {
+        "Literal": 1
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Literal": 1
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "RuntimeParam",
+          "param_type": {
+            "TypeParam": "T"
+          },
+          "name": "value"
+        }
+      ]
+    },
+    {
+      "name": "triangle",
+      "type_params": [
+        "T"
+      ],
+      "in_type": {
+        "Concrete": "Void"
+      },
+      "in_count": {
+        "Literal": 0
+      },
+      "in_shape": {
+        "dims": [
+          {
+            "Literal": 0
+          }
+        ]
+      },
+      "out_type": {
+        "TypeParam": "T"
+      },
+      "out_count": {
+        "Symbolic": "N"
+      },
+      "out_shape": {
+        "dims": [
+          {
+            "Symbolic": "N"
+          }
+        ]
+      },
+      "params": [
+        {
+          "kind": "Param",
+          "param_type": "Float",
+          "name": "freq"
+        },
+        {
+          "kind": "Param",
+          "param_type": "Float",
+          "name": "amp"
+        },
+        {
+          "kind": "Param",
+          "param_type": "Int",
+          "name": "N"
+        }
+      ]
+    }
+  ]
+}
