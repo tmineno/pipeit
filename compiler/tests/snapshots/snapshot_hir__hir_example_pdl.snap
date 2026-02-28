@@ -2,7 +2,7 @@
 source: compiler/tests/snapshot_hir.rs
 expression: output
 ---
-HirProgram (2 consts, 1 params, 2 directives, 2 tasks)
+HirProgram (2 consts, 1 params, 2 directives, 0 binds, 2 tasks)
   const coeff = [0.1, 0.2, 0.4, 0.2, 0.1]
   const fft_size = 256
   param gain = 1

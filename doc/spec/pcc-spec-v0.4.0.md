@@ -20,7 +20,7 @@ v0.4.0 keeps the v0.3 language surface, but tightens compiler contracts:
 - generated runtime shell delegation via `pipit_shell.h`
 - deterministic registry fingerprint and build provenance output
 
-Refer to [pipit-lang-spec](pipit-lang-spec-v0.3.0.md) for language semantics.
+Refer to [pipit-lang-spec-v0.4.0](pipit-lang-spec-v0.4.0.md) for language semantics.
 This document defines `pcc` behavior as a compiler tool.
 
 ## 2. Non-goals
@@ -29,11 +29,29 @@ This document defines `pcc` behavior as a compiler tool.
 - `pcc` does not provide mandatory incremental/watch mode.
 - `pcc` does not include distributed build cache in v0.4.0.
 - `pcc` does not manage external C++ dependencies beyond `libpipit`.
+- No protocol-level reliability guarantees beyond each transport spec (`PPKT` / `PSHM`).
 - IDE/LSP behavior is out of scope for this spec.
 
 ---
 
-## 3. Implementation
+## 3. Compatibility Gate
+
+v0.4.0 adopts a compatibility gate:
+
+- Default behavior keeps v0.3.x language and CLI compatibility unless v0.4.0 language spec deltas are explicitly enabled.
+- Any breaking behavior requires all of:
+  - explicit spec delta in this file (or successor spec),
+  - dedicated ADR with migration reasoning,
+  - release-note entry with impact and migration path.
+
+Compatibility gate scope includes:
+
+- language parsing/typing behavior,
+- `pcc` CLI options and defaults,
+- output-stage semantics (`--emit`),
+- runtime option behavior in generated binaries (`--duration`, `--param`, `--bind`, `--probe`, `--probe-output`, `--stats`).
+
+### 3.1 Implementation
 
 `pcc` is implemented in Rust (see [ADR-001](../adr/001-rust-for-pcc.md)).
 Generated C++ targets C++17 and links `libpipit`.
@@ -99,6 +117,17 @@ There is no Rust/C++ FFI boundary inside compiler phases. `pcc`:
 
 ### 4.1 Module mapping (Rust crate: `pcc`)
 
+| Pass | Input IR | Output IR/Artifact | Owns |
+|---|---|---|---|
+| Parse | source text | `AST` | grammar/lexing |
+| Resolve + Normalize | `AST`, registry | `HIR` | symbols, scope, normalization |
+| Type Infer + Mono + Lower Verify | `HIR`, registry | `THIR` | typing, monomorphization, widening safety |
+| Graph/Analyze/Schedule | `THIR` | `LIR` | graph facts, rates, buffers, schedule |
+| Bind Infer + Contract Check | `LIR` | `BindInterface` | bind direction/contract inference, stable-id assignment |
+| Codegen | `LIR`, `BindInterface` | C++ source | serialization only |
+
+Module detail:
+
 | Module | Responsibility |
 |--------|---------------|
 | `lexer` | Tokenize `.pdl` source |
@@ -133,8 +162,24 @@ There is no Rust/C++ FFI boundary inside compiler phases. `pcc`:
   -> C++ code generation
 ```
 
-`--emit` stage selection determines terminal artifact.
-v0.4.0 pass manager runs only the required dependency closure for that terminal.
+### 4.3 Pass Manager Contract
+
+Each pass declares:
+
+- `inputs`: required artifacts and config fields,
+- `outputs`: produced artifacts,
+- `invariants`: pre/post conditions,
+- `invalidation_key`: deterministic hash inputs used for cache validity.
+
+`--emit` targets resolve required artifacts via dependency graph and evaluate the minimal pass subset.
+
+### 4.4 Artifact/Caching Contract
+
+- Artifact keys are deterministic across machines for equal inputs/config.
+- Registry provenance (manifest/header hash set, schema version) participates in invalidation.
+- Cache miss or verification failure falls back to recompute.
+- Cache behavior must not change observable compiler semantics.
+- `BindInterface` (backing optional interface manifest output) is a first-class artifact and participates in deterministic invalidation.
 
 ---
 
@@ -144,9 +189,28 @@ v0.4.0 pass manager runs only the required dependency closure for that terminal.
 
 Primary input for compile stages:
 
+- `.pdl` source (required),
+- actor metadata:
+  - preferred: `--actor-meta` manifest (`actors.meta.json`),
+  - fallback: header scanning via `-I` / `--include` / `--actor-path`,
+- compilation config (`--emit`, `--cc`, `--cflags`, `--release`, etc.),
+- bind endpoint overrides (`--bind <name>=<endpoint>`, optional, repeatable),
+- optional interface manifest output path (`--interface-out <path>`).
+
 ```bash
 pcc example.pdl [OPTIONS]
 ```
+
+Emit stages:
+
+- `--emit ast`: AST dump,
+- `--emit graph`: analysis graph dump,
+- `--emit graph-dot`: DOT graph,
+- `--emit schedule`: schedule dump,
+- `--emit timing-chart`: Mermaid timing chart,
+- `--emit cpp`: generated C++,
+- `--emit interface` (optional): bind contract manifest (`stable_id`, direction, contract, endpoint),
+- default `--emit exe`: executable via system C++ compiler.
 
 Exceptions:
 
@@ -185,6 +249,34 @@ pcc example.pdl --actor-path ./actors --actor-path ./vendor/actors
 ```
 
 Name conflict rule: `-I` entries have precedence over `--actor-path`.
+
+### 5.5 Bind Compilation Contract
+
+For the `bind` specification (`pipit-lang-spec-v0.4.0`, section 5.11), `pcc` must satisfy the following.
+
+1. **direction inference**
+   - If `-> name` exists, infer `out`.
+   - If `-> name` does not exist and only `@name` exists, infer `in`.
+   - Otherwise, emit a compile-time error.
+
+1. **contract inference**
+   - `dtype` / `shape`: determined from buffer type information in LIR.
+   - `rate_hz`: determined from `tokens_per_iter * task_rate_hz` on writer/reader sides.
+   - For an `in` bind, if required rates from multiple readers do not match, emit an error.
+
+1. **stable_id assignment**
+   - `stable_id` is generated deterministically from semantic IDs (task/node/edge lineage), not span/name text.
+   - It must remain stable for identical input and compiler configuration (deterministic).
+
+1. **endpoint validation**
+   - Validate `udp` / `unix_dgram` endpoint arguments against the PPKT spec.
+   - Validate `shm` endpoint arguments against the PSHM spec.
+
+1. **manifest emission**
+   - Emit an interface manifest when `--emit interface` or `--interface-out <path>` is specified.
+   - When emitted, the manifest must contain bind contract information consistent with generated C++.
+
+`pcc` MUST NOT change the SDF schedule as a side effect of bind inference/validation.
 
 ---
 
@@ -265,6 +357,17 @@ Fields:
 - `manifest_schema_version`
 - `compiler_version`
 
+### 6.10 Diagnostics
+
+- Human-readable diagnostics remain default CLI output.
+- Machine-readable mode (`json`) provides structured diagnostics for tooling.
+- Diagnostic stability policy: adding codes is allowed; changing meaning of existing codes requires versioned note.
+- Bind-related diagnostics include at least:
+  - direction inference failure,
+  - contract ambiguity/mismatch,
+  - duplicate bind target,
+  - unsupported endpoint option/value.
+
 ---
 
 ## 7. CLI Interface
@@ -279,16 +382,30 @@ pcc [source.pdl] [OPTIONS]
 | `--actor-meta <file>` | PATH | — | Actor metadata manifest |
 | `-I, --include <path>` | PATH (repeatable) | — | Actor header or search path |
 | `--actor-path <dir>` | PATH (repeatable) | — | Recursive actor search directory |
-| `--emit <stage>` | enum | `exe` | `exe`, `cpp`, `ast`, `graph`, `graph-dot`, `schedule`, `timing-chart`, `manifest`, `build-info` |
+| `--emit <stage>` | enum | `exe` | `exe`, `cpp`, `ast`, `graph`, `graph-dot`, `schedule`, `timing-chart`, `manifest`, `build-info`, `interface` |
 | `--release` | flag | off | Release codegen profile |
 | `--cc <compiler>` | STRING | `clang++` | System C++ compiler command |
 | `--cflags <flags>` | STRING | mode-dependent | Additional C++ compiler flags |
+| `--bind <name>=<endpoint>` | STRING (repeatable) | — | Bind endpoint override |
+| `--interface-out <path>` | PATH | — | Interface manifest output path |
 | `--diagnostic-format <fmt>` | enum | `human` | `human` or `json` |
 | `--verbose` | flag | off | Phase timing and pass trace |
 | `--version` | flag | — | Print version and exit |
 | `--help` | flag | — | Print help and exit |
 
-### 7.1 Release vs Debug build
+### 7.1 Compilation failure conditions
+
+Compilation fails (exit code 1) when any of the following occur:
+
+- parsing fails,
+- resolution fails,
+- type/lowering verification fails,
+- analysis/scheduling invariants fail,
+- bind inference/contract validation fails,
+- backend emission prerequisites are missing,
+- external C++ compilation fails for `--emit exe`.
+
+### 7.2 Release vs Debug build
 
 | Behavior | Debug (default) | Release (`--release`) |
 |----------|------------------|----------------------|
@@ -418,6 +535,19 @@ source + registry inputs
 | 9. LIR Build + C++ Codegen | Emit C++ from LIR | `--emit cpp` |
 | 10. C++ Compilation | Compile and link executable | `--emit exe` |
 
+Spec-level acceptance criteria:
+
+- `AST -> HIR -> THIR -> LIR` boundary and ownership are documented and internally consistent.
+- Pass-manager contract (inputs/outputs/invalidation/invariants) is documented.
+- Compatibility gate is documented and explicit.
+- Bind inference contract is documented (`direction`, `dtype/shape/rate`, deterministic `stable_id`).
+- Optional interface manifest artifact contract is documented.
+- ADR set for Phase 0 architecture decisions is published:
+  - `ADR-020` pass-manager artifact model,
+  - `ADR-021` stable semantic IDs,
+  - `ADR-022` diagnostics model,
+  - `ADR-023` backward-compatibility gate.
+
 ### 9.1 Rate-domain (fusion-domain) optimization
 
 `pcc` may fuse adjacent firings to reduce loop overhead when all are true:
@@ -538,7 +668,7 @@ error[E0601]: lowering verification failed (L3 rate/shape preservation)
 
 ### 10.6 Assigned diagnostic codes
 
-#### 10.6.1 Resolve (E0001-E0023, W0001-W0002)
+#### 10.6.1 Resolve (E0001-E0025, W0001-W0002)
 
 | Code | Description |
 |------|-------------|
@@ -565,6 +695,8 @@ error[E0601]: lowering verification failed (L3 rate/shape preservation)
 | E0021 | Mode listed multiple times in switch |
 | E0022 | Undefined tap as actor input |
 | E0023 | Shared buffer has no writer |
+| E0024 | Duplicate bind definition |
+| E0025 | Bind target not referenced (reserved) |
 | W0001 | Define shadows actor with same name |
 | W0002 | Deprecated switch default clause |
 
@@ -588,7 +720,7 @@ error[E0601]: lowering verification failed (L3 rate/shape preservation)
 | E0205 | L5: Unresolved input type |
 | E0206 | L5: Unresolved output type |
 
-#### 10.6.4 Analysis (E0300-E0310, W0300)
+#### 10.6.4 Analysis (E0300-E0312, W0300)
 
 | Code | Description |
 |------|-------------|
@@ -603,6 +735,8 @@ error[E0601]: lowering verification failed (L3 rate/shape preservation)
 | E0308 | Param type mismatch |
 | E0309 | Switch param non-int32 default |
 | E0310 | Control buffer type mismatch |
+| E0311 | Bind target not referenced in any task |
+| E0312 | Bind contract conflict (readers disagree on type/shape/rate) |
 | W0300 | Inferred dimension param ordering warning |
 
 #### 10.6.5 Schedule (E0400, W0400)

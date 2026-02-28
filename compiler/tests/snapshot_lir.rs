@@ -175,3 +175,166 @@ fn snapshot_lir_complex() {
 fn snapshot_lir_socket_stream() {
     snapshot_example("socket_stream.pdl");
 }
+
+#[test]
+fn snapshot_lir_bind_basic() {
+    let (registry, _) = load_full_registry();
+    let source = r#"bind iq = udp("127.0.0.1:9100", chan=10)
+clock 48kHz audio {
+    constant(0) -> iq
+}
+"#;
+    let output = lir_snapshot(source, &registry);
+    insta::assert_snapshot!("lir_bind_basic", output);
+}
+
+#[test]
+fn snapshot_lir_bind_ident_arg() {
+    let (registry, _) = load_full_registry();
+    let source = r#"const addr = "127.0.0.1:9100"
+bind iq = udp(addr, chan=10)
+clock 48kHz audio {
+    constant(0) -> iq
+}
+"#;
+    let output = lir_snapshot(source, &registry);
+    insta::assert_snapshot!("lir_bind_ident_arg", output);
+}
+
+#[test]
+fn snapshot_lir_bind_in() {
+    let (registry, _) = load_full_registry();
+    let source = r#"bind iq = udp("127.0.0.1:9100", chan=10)
+clock 48kHz audio {
+    @iq | binwrite("/dev/null")
+}
+"#;
+    let output = lir_snapshot(source, &registry);
+    insta::assert_snapshot!("lir_bind_in", output);
+}
+
+/// Build an LirProgram from source (same pipeline as lir_snapshot but returns the struct).
+fn build_lir(source: &str, registry: &pcc::registry::Registry) -> pcc::lir::LirProgram {
+    let parse_result = pcc::parser::parse(source);
+    assert!(
+        parse_result.errors.is_empty(),
+        "parse errors: {:?}",
+        parse_result.errors
+    );
+    let program = parse_result.program.unwrap();
+    let mut resolve_result = pcc::resolve::resolve(&program, registry);
+    assert!(
+        resolve_result
+            .diagnostics
+            .iter()
+            .all(|d| d.level != pcc::diag::DiagLevel::Error),
+        "resolve errors: {:?}",
+        resolve_result.diagnostics
+    );
+    let hir = pcc::hir::build_hir(
+        &program,
+        &resolve_result.resolved,
+        &mut resolve_result.id_alloc,
+    );
+    let type_result = pcc::type_infer::type_infer(&hir, &resolve_result.resolved, registry);
+    assert!(
+        type_result
+            .diagnostics
+            .iter()
+            .all(|d| d.level != pcc::diag::DiagLevel::Error),
+        "type_infer errors: {:?}",
+        type_result.diagnostics
+    );
+    let lower_result =
+        pcc::lower::lower_and_verify(&hir, &resolve_result.resolved, &type_result.typed, registry);
+    assert!(
+        !lower_result.has_errors(),
+        "lower errors: {:?}",
+        lower_result.diagnostics
+    );
+    let graph_result = pcc::graph::build_graph(&hir, &resolve_result.resolved, registry);
+    assert!(
+        graph_result
+            .diagnostics
+            .iter()
+            .all(|d| d.level != pcc::diag::DiagLevel::Error),
+        "graph errors: {:?}",
+        graph_result.diagnostics
+    );
+    let thir = pcc::thir::build_thir_context(
+        &hir,
+        &resolve_result.resolved,
+        &type_result.typed,
+        &lower_result.lowered,
+        registry,
+        &graph_result.graph,
+    );
+    let analysis_result = pcc::analyze::analyze(&thir, &graph_result.graph);
+    assert!(
+        analysis_result
+            .diagnostics
+            .iter()
+            .all(|d| d.level != pcc::diag::DiagLevel::Error),
+        "analysis errors: {:?}",
+        analysis_result.diagnostics
+    );
+    let schedule_result =
+        pcc::schedule::schedule(&thir, &graph_result.graph, &analysis_result.analysis);
+    assert!(
+        schedule_result
+            .diagnostics
+            .iter()
+            .all(|d| d.level != pcc::diag::DiagLevel::Error),
+        "schedule errors: {:?}",
+        schedule_result.diagnostics
+    );
+    pcc::lir::build_lir(
+        &thir,
+        &graph_result.graph,
+        &analysis_result.analysis,
+        &schedule_result.schedule,
+    )
+}
+
+#[test]
+fn snapshot_lir_bind_interface_manifest() {
+    let (registry, _) = load_full_registry();
+    let source = r#"bind iq = udp("127.0.0.1:9100", chan=10)
+clock 48kHz audio {
+    constant(0) -> iq
+}
+"#;
+    let lir = build_lir(source, &registry);
+    let manifest = lir.generate_interface_manifest(&std::collections::HashMap::new());
+    insta::assert_snapshot!("lir_bind_interface_manifest", manifest);
+}
+
+#[test]
+fn lir_bind_format_endpoint_spec() {
+    let (registry, _) = load_full_registry();
+    let source = r#"bind iq = udp("127.0.0.1:9100", chan=10)
+clock 48kHz audio {
+    constant(0) -> iq
+}
+"#;
+    let lir = build_lir(source, &registry);
+    assert_eq!(lir.binds.len(), 1);
+    let spec = lir.binds[0].format_endpoint_spec();
+    assert_eq!(spec, r#"udp("127.0.0.1:9100", chan=10)"#);
+}
+
+#[test]
+fn lir_bind_manifest_with_override() {
+    let (registry, _) = load_full_registry();
+    let source = r#"bind iq = udp("127.0.0.1:9100", chan=10)
+clock 48kHz audio {
+    constant(0) -> iq
+}
+"#;
+    let lir = build_lir(source, &registry);
+    let mut overrides = std::collections::HashMap::new();
+    overrides.insert("iq".to_string(), "shm(\"/dev/shm/iq\")".to_string());
+    let manifest = lir.generate_interface_manifest(&overrides);
+    assert!(manifest.contains("endpoint_override"));
+    assert!(manifest.contains("shm(\\\"/dev/shm/iq\\\")"));
+}

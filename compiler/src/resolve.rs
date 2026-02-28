@@ -38,6 +38,7 @@ pub struct ResolvedProgram {
     pub params: HashMap<String, ParamEntry>,
     pub defines: HashMap<String, DefineEntry>,
     pub tasks: HashMap<String, TaskEntry>,
+    pub binds: HashMap<String, BindEntry>,
     pub buffers: HashMap<String, BufferInfo>,
     pub call_resolutions: HashMap<CallId, CallResolution>,
     pub task_resolutions: HashMap<String, TaskResolution>,
@@ -93,6 +94,13 @@ pub struct DefineEntry {
 pub struct TaskEntry {
     pub stmt_index: usize,
     pub name_span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct BindEntry {
+    pub stmt_index: usize,
+    pub name_span: Span,
+    pub endpoint: BindEndpoint,
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +188,7 @@ impl<'a> ResolveCtx<'a> {
                 params: HashMap::new(),
                 defines: HashMap::new(),
                 tasks: HashMap::new(),
+                binds: HashMap::new(),
                 buffers: HashMap::new(),
                 call_resolutions: HashMap::new(),
                 task_resolutions: HashMap::new(),
@@ -304,6 +313,28 @@ impl<'a> ResolveCtx<'a> {
                         );
                     }
                 }
+                StatementKind::Bind(b) => {
+                    let name = &b.name.name;
+                    if let Some(existing) = self.resolved.binds.get(name) {
+                        self.error(
+                            codes::E0024,
+                            b.name.span,
+                            format!(
+                                "duplicate bind '{}' (first defined at offset {})",
+                                name, existing.name_span.start
+                            ),
+                        );
+                    } else {
+                        self.resolved.binds.insert(
+                            name.clone(),
+                            BindEntry {
+                                stmt_index: i,
+                                name_span: b.name.span,
+                                endpoint: b.endpoint.clone(),
+                            },
+                        );
+                    }
+                }
                 StatementKind::Set(_) => {}
             }
         }
@@ -334,6 +365,27 @@ impl<'a> ResolveCtx<'a> {
                 collision_errors.push((
                     define_entry.name_span,
                     format!("'{}' is defined as both a param and a define", name),
+                ));
+            }
+        }
+
+        for (name, bind_entry) in &self.resolved.binds {
+            if self.resolved.consts.contains_key(name) {
+                collision_errors.push((
+                    bind_entry.name_span,
+                    format!("'{}' is defined as both a const and a bind", name),
+                ));
+            }
+            if self.resolved.params.contains_key(name) {
+                collision_errors.push((
+                    bind_entry.name_span,
+                    format!("'{}' is defined as both a param and a bind", name),
+                ));
+            }
+            if self.resolved.defines.contains_key(name) {
+                collision_errors.push((
+                    bind_entry.name_span,
+                    format!("'{}' is defined as both a define and a bind", name),
                 ));
             }
         }
@@ -841,6 +893,18 @@ impl<'a> ResolveCtx<'a> {
         for (buf_name, task_name, span) in &pending {
             if let Some(info) = self.resolved.buffers.get_mut(buf_name) {
                 info.readers.push((task_name.clone(), *span));
+            } else if self.resolved.binds.contains_key(buf_name) {
+                // Bind-backed buffer: writer is external (IN bind).
+                // Pre-create BufferInfo so graph builder can emit BufferRead nodes.
+                // writer_task="" → graph::link_inter_task_edges() creates no InterTaskEdge.
+                self.resolved.buffers.insert(
+                    buf_name.clone(),
+                    BufferInfo {
+                        writer_task: String::new(),
+                        writer_span: self.resolved.binds[buf_name].name_span,
+                        readers: vec![(task_name.clone(), *span)],
+                    },
+                );
             } else {
                 self.error(
                     codes::E0023,
@@ -1607,5 +1671,74 @@ mod tests {
         let errs = errors(&result);
         // Should have at least 3 errors: unknown1, unknown2, $missing
         assert!(errs.len() >= 3, "expected >=3 errors, got: {:#?}", errs);
+    }
+
+    // ── bind ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn bind_collected() {
+        let r = resolve_ok(r#"bind iq = udp("127.0.0.1:9100", chan=10)"#);
+        assert!(r.binds.contains_key("iq"));
+        assert_eq!(r.binds["iq"].endpoint.transport.name, "udp");
+    }
+
+    #[test]
+    fn duplicate_bind() {
+        let reg = Registry::new();
+        let result = resolve_source("bind x = udp(\"a\")\nbind x = udp(\"b\")", &reg);
+        let errs = errors(&result);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("duplicate bind 'x'"));
+    }
+
+    #[test]
+    fn bind_const_collision_order() {
+        // bind before const — should still detect collision
+        let reg = Registry::new();
+        let result = resolve_source("bind x = udp(\"a\")\nconst x = 1", &reg);
+        let errs = errors(&result);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("both a"));
+    }
+
+    #[test]
+    fn const_bind_collision_order() {
+        // const before bind — should still detect collision
+        let reg = Registry::new();
+        let result = resolve_source("const x = 1\nbind x = udp(\"a\")", &reg);
+        let errs = errors(&result);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("both a"));
+    }
+
+    #[test]
+    fn bind_in_suppresses_e0023() {
+        // @iq with bind iq declared → should NOT produce E0023 (no writer).
+        // Instead, resolve pre-creates BufferInfo with empty writer_task.
+        let reg = test_registry();
+        let source = r#"bind iq = udp("127.0.0.1:9100")
+clock 1kHz t {
+    @iq | stdout()
+}
+"#;
+        let result = resolve_source(source, &reg);
+        let errs = errors(&result);
+        assert!(
+            errs.is_empty(),
+            "expected no errors for bind-backed @iq, got: {:#?}",
+            errs
+        );
+        // Verify BufferInfo was pre-created with empty writer_task
+        let buf_info = result
+            .resolved
+            .buffers
+            .get("iq")
+            .expect("BufferInfo for 'iq'");
+        assert_eq!(
+            buf_info.writer_task, "",
+            "IN-bind should have empty writer_task"
+        );
+        assert_eq!(buf_info.readers.len(), 1);
+        assert_eq!(buf_info.readers[0].0, "t");
     }
 }

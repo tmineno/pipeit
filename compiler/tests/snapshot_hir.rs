@@ -111,3 +111,15 @@ fn snapshot_hir_complex() {
 fn snapshot_hir_socket_stream() {
     snapshot_example("socket_stream.pdl");
 }
+
+#[test]
+fn snapshot_hir_bind_basic() {
+    let (registry, _) = load_full_registry();
+    let source = r#"bind iq = udp("127.0.0.1:9100", chan=10)
+clock 48kHz audio {
+    constant(0) | stdout()
+}
+"#;
+    let output = hir_snapshot(source, &registry);
+    insta::assert_snapshot!("hir_bind_basic", output);
+}

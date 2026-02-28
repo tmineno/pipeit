@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Arg, Scalar, SetValue, ShapeDim, Span, Value};
 use crate::graph::{NodeKind, ProgramGraph};
-use crate::hir::{HirConst, HirParam, HirProgram, HirSetDirective, HirTask};
+use crate::hir::{HirBind, HirConst, HirParam, HirProgram, HirSetDirective, HirTask};
 use crate::id::CallId;
 use crate::lower::LoweredProgram;
 use crate::registry::{ActorMeta, ParamKind, ParamType, PortShape, Registry, TokenCount};
@@ -43,6 +43,7 @@ pub struct ThirContext<'a> {
     const_index: HashMap<String, usize>,
     param_index: HashMap<String, usize>,
     set_index: HashMap<String, usize>,
+    bind_index: HashMap<String, usize>,
 
     // ── Precomputed set-directive values ──
     pub mem_bytes: u64,
@@ -97,6 +98,12 @@ pub fn build_thir_context<'a>(
         .enumerate()
         .map(|(i, s)| (s.name.clone(), i))
         .collect();
+    let bind_index: HashMap<String, usize> = hir
+        .binds
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.name.clone(), i))
+        .collect();
 
     // Extract common set-directive values
     let (mem_bytes, mem_span) = find_set_size_with_span(&hir.set_directives, &set_index, "mem")
@@ -122,6 +129,7 @@ pub fn build_thir_context<'a>(
         const_index,
         param_index,
         set_index,
+        bind_index,
         mem_bytes,
         mem_span,
         tick_rate_hz,
@@ -155,6 +163,16 @@ impl<'a> ThirContext<'a> {
         self.set_index
             .get(name)
             .map(|&i| &self.hir.set_directives[i])
+    }
+
+    /// Look up a bind by name.
+    pub fn bind_info(&self, name: &str) -> Option<&HirBind> {
+        self.bind_index.get(name).map(|&i| &self.hir.binds[i])
+    }
+
+    /// All bind declarations in source order.
+    pub fn binds(&self) -> &[HirBind] {
+        &self.hir.binds
     }
 
     /// Get the C++ type for a runtime param. Falls back to type inferred from
@@ -263,6 +281,53 @@ impl<'a> ThirContext<'a> {
             rate = rate.checked_mul(dim_val)?;
         }
         Some(rate)
+    }
+
+    /// Like `resolve_port_rate()` but returns individual resolved dim values
+    /// instead of their product. Returns `None` if any dim is unresolvable.
+    ///
+    /// Resolution precedence per dimension (same as `resolve_port_rate`):
+    /// 1. Literal values in shape definition
+    /// 2. Explicit actor arguments
+    /// 3. Call-site shape constraint
+    /// 4. Span-derived inference
+    pub fn resolve_port_shape(
+        &self,
+        shape: &PortShape,
+        actor_meta: &ActorMeta,
+        actor_args: &[Arg],
+        shape_constraint: Option<&[ShapeDim]>,
+    ) -> Option<Vec<u32>> {
+        let mut dims = Vec::new();
+        for (dim_idx, dim) in shape.dims.iter().enumerate() {
+            let dim_val = match dim {
+                TokenCount::Literal(n) => *n,
+                TokenCount::Symbolic(name) => {
+                    let from_arg = actor_meta
+                        .params
+                        .iter()
+                        .position(|p| p.name == *name)
+                        .and_then(|idx| actor_args.get(idx))
+                        .and_then(|arg| self.resolve_arg_to_u32(arg));
+                    if let Some(v) = from_arg {
+                        v
+                    } else if let Some(v) = shape_constraint
+                        .and_then(|sc| sc.get(dim_idx))
+                        .and_then(|sd| self.resolve_shape_dim(sd))
+                    {
+                        v
+                    } else if let Some(v) =
+                        self.infer_dim_param_from_span_args(name, actor_meta, actor_args)
+                    {
+                        v
+                    } else {
+                        return None;
+                    }
+                }
+            };
+            dims.push(dim_val);
+        }
+        Some(dims)
     }
 
     /// Infer a symbolic dimension parameter value from span-typed arguments.
@@ -386,6 +451,10 @@ impl<'a> ThirContext<'a> {
             .collect();
         set_names.sort();
         writeln!(out, "    sets: [{}]", set_names.join(", ")).unwrap();
+
+        let mut bind_names: Vec<_> = self.hir.binds.iter().map(|b| b.name.as_str()).collect();
+        bind_names.sort();
+        writeln!(out, "    binds: [{}]", bind_names.join(", ")).unwrap();
 
         out
     }
@@ -619,6 +688,7 @@ mod tests {
             params: HashMap::new(),
             defines: HashMap::new(),
             tasks: HashMap::new(),
+            binds: HashMap::new(),
             buffers: HashMap::new(),
             call_resolutions: HashMap::new(),
             task_resolutions: HashMap::new(),
@@ -711,6 +781,7 @@ mod tests {
                     span: sp(86, 95),
                 },
             ],
+            binds: Vec::new(),
             expanded_call_ids: HashMap::new(),
             expanded_call_spans: HashMap::new(),
             program_span: sp(0, 100),

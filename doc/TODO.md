@@ -19,7 +19,57 @@
 | v0.4.0 | — | IR unification (AST→HIR→THIR→LIR), pass manager (ADR-020–023), diagnostics upgrade, `pipit_shell.h`, `codegen.rs` 5106→2630 LOC |
 | v0.4.1 | — | MemoryKind enum (ADR-028), SPSC ring buffer (ADR-029), param sync simplification (ADR-030), `alignas(64)` edges |
 | v0.4.2 | — | Diagnostics completion: all 10 E0100–E0206 enriched with `cause_chain`, `related_spans`, hints |
+| v0.4.2-bind | — | Bind-based external integration: `bind` grammar/IR/inference, stable IDs, `--emit interface`, `BindIoAdapter` codegen, runtime rebind (feat/shm-support) |
 | v0.4.4 | — | PP record manifest extraction (ADR-032), `--actor-meta` required (ADR-033, breaking), E0700 diagnostic, 667 tests |
+
+---
+
+## v0.4.3 - Shared-Memory Bind Transport (PSHM)
+
+**Goal**: Implement `shm(...)` bind transport for multi-process local IPC.
+
+> Depends on v0.4.2-bind (merged). Phase 2 (PSHM runtime core) is parallelizable.
+
+### Phase 1: Compiler Surface Alignment
+
+- [ ] Add `shm(name, slots, slot_bytes)` endpoint parsing/validation
+- [ ] Add endpoint option range checks (`slots > 0`, `slot_bytes > 0`)
+- [ ] Change interface manifest to opt-in (`--emit interface`, `--interface-out`)
+
+### Phase 2: PSHM Runtime Core (Protocol v0.1.0)
+
+- [ ] Superblock + slot header binary layout per spec
+- [ ] Single-writer publish (release-store), reader consume (acquire-load + overwrite detection)
+- [ ] Shared-memory object lifecycle (create/open/map/unmap/close)
+
+### Phase 3: Contract Validation and Attach
+
+- [ ] Validate attach-time contract against compiler-inferred bind contract
+- [ ] Reject mismatched endpoints at startup with diagnostics
+- [ ] Endpoint precedence (`CLI --bind` override vs DSL default)
+
+### Phase 4: Rebind Epoch Semantics
+
+- [ ] Iteration-boundary rebind apply for PSHM endpoints
+- [ ] Epoch fence markers during endpoint switch
+- [ ] Reader resynchronization across epoch transition
+
+### Phase 5: Codegen and Runtime Wiring
+
+- [ ] Lower `bind ... = shm(...)` to PSHM adapter in generated C++
+- [ ] Keep UDP/Unix datagram and `socket_write`/`socket_read` backward compat
+
+### Phase 6: Verification & Performance
+
+- [ ] Struct layout tests (Superblock=128B, SlotHeader=64B)
+- [ ] Protocol, integration, rebind, determinism tests
+- [ ] Throughput/latency vs UDP baseline → `doc/performance/`
+
+### Exit Criteria
+
+- [ ] Two PDL executables exchange data via `bind ... = shm(...)` on one host
+- [ ] Rebind is atomic at iteration boundary, no mixed-epoch visibility
+- [ ] No regressions in existing UDP/Unix bind or legacy socket actors
 
 ---
 
@@ -53,6 +103,8 @@
 - [ ] Re-benchmark two-step manifest workflow (v0.4.4)
 - [ ] KPI exit criteria: complex/modal ≥5% improvement vs v0.3.3, no regressions (v0.3.4)
 - [ ] Task-internal branch parallelization study — safety gate, effect classification, prototype (v0.3.4)
+- [ ] Full provenance tracing through constraint solver (v0.4.5)
+- [ ] Ambiguity/mismatch diagnostics with candidate suggestions (v0.4.5)
 
 ### Standard Actor Library Expansion
 

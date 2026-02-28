@@ -2,7 +2,7 @@
 source: compiler/tests/snapshot_hir.rs
 expression: output
 ---
-HirProgram (0 consts, 1 params, 2 directives, 1 tasks)
+HirProgram (0 consts, 1 params, 2 directives, 0 binds, 1 tasks)
   param alpha = 0.5
   set mem = 16777216B
   set overrun = drop

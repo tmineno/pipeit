@@ -22,6 +22,7 @@ add_executable(test_net test_net.cpp)
 add_executable(test_socket_actors test_socket_actors.cpp)
 add_executable(test_shell test_shell.cpp)
 add_executable(test_ringbuf test_ringbuf.cpp)
+add_executable(test_bind_io test_bind_io.cpp)
 
 # Enable testing
 enable_testing()
@@ -37,3 +38,4 @@ add_test(NAME PpktNet COMMAND test_net)
 add_test(NAME SocketActors COMMAND test_socket_actors)
 add_test(NAME Shell COMMAND test_shell)
 add_test(NAME RingBuffer COMMAND test_ringbuf)
+add_test(NAME BindIo COMMAND test_bind_io)

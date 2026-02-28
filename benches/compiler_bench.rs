@@ -394,6 +394,7 @@ fn bench_kpi_full_compile_latency(c: &mut Criterion) {
         include_paths: vec![],
         provenance: None,
         experimental: false,
+        bind_overrides: std::collections::HashMap::new(),
     };
 
     for (name, source) in scenarios() {
@@ -413,6 +414,7 @@ fn bench_kpi_phase_latency(c: &mut Criterion) {
         include_paths: vec![],
         provenance: None,
         experimental: false,
+        bind_overrides: std::collections::HashMap::new(),
     };
     let source = COMPLEX_PIPELINE;
     bench_parse_phase(c, source);

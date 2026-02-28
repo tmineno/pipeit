@@ -54,6 +54,7 @@ fn build_codegen_options(
         include_paths: vec![root.join("runtime/libpipit/include"), root.join("examples")],
         provenance: Some(provenance),
         experimental: false,
+        bind_overrides: std::collections::HashMap::new(),
     }
 }
 

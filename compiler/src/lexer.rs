@@ -61,6 +61,8 @@ pub enum Token {
     Default,
     #[token("delay")]
     Delay,
+    #[token("bind")]
+    Bind,
 
     // ── Symbols ──
     #[token("|")]
@@ -143,6 +145,7 @@ impl fmt::Display for Token {
             Token::Switch => write!(f, "switch"),
             Token::Default => write!(f, "default"),
             Token::Delay => write!(f, "delay"),
+            Token::Bind => write!(f, "bind"),
             Token::Pipe => write!(f, "|"),
             Token::Arrow => write!(f, "->"),
             Token::At => write!(f, "@"),
@@ -283,7 +286,7 @@ mod tests {
 
     #[test]
     fn keywords() {
-        let tokens = lex_ok("set const param define clock mode control switch default delay");
+        let tokens = lex_ok("set const param define clock mode control switch default delay bind");
         assert_eq!(
             tokens,
             vec![
@@ -297,6 +300,7 @@ mod tests {
                 Token::Switch,
                 Token::Default,
                 Token::Delay,
+                Token::Bind,
             ]
         );
     }
@@ -306,6 +310,13 @@ mod tests {
         // `setting` is an identifier, not keyword `set` + `ting`
         let tokens = lex_ok("set setting");
         assert_eq!(tokens, vec![Token::Set, Token::Ident]);
+    }
+
+    #[test]
+    fn bind_keyword_vs_ident() {
+        // `binding` is an identifier, not keyword `bind` + `ing`
+        let tokens = lex_ok("bind binding");
+        assert_eq!(tokens, vec![Token::Bind, Token::Ident]);
     }
 
     // ── Symbols ──

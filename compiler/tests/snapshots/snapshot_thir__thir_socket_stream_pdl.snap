@@ -16,3 +16,4 @@ ThirContext summary
     consts: []
     params: [amp, freq]
     sets: []
+    binds: []

@@ -8,8 +8,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::analyze::AnalyzedProgram;
-use crate::ast::{Arg, Scalar, SetValue, ShapeConstraint, Value};
+use serde::Serialize;
+
+use crate::analyze::{AnalyzedProgram, BindContract};
+use crate::ast::BindDirection;
+use crate::ast::{Arg, BindArg, Scalar, SetValue, ShapeConstraint, Value};
 use crate::graph::{Edge, NodeId, NodeKind, ProgramGraph, Subgraph, TaskGraph};
 use crate::hir::{HirSwitchSource, HirTaskBody};
 use crate::registry::{ActorMeta, ParamKind, ParamType, PipitType, TokenCount};
@@ -25,6 +28,7 @@ pub struct LirProgram {
     pub consts: Vec<LirConst>,
     pub params: Vec<LirParam>,
     pub directives: LirDirectives,
+    pub binds: Vec<LirBind>,
     pub inter_task_buffers: Vec<LirInterTaskBuffer>,
     pub tasks: Vec<LirTask>,
     pub probes: Vec<LirProbe>,
@@ -284,6 +288,102 @@ pub struct LirProbe {
     pub name: String,
 }
 
+// ── Binds ───────────────────────────────────────────────────────────────────
+
+pub struct LirBind {
+    pub name: String,
+    pub transport: String,
+    pub args: Vec<LirBindArg>,
+    pub contract: Option<BindContract>,
+    /// Deterministic stable ID from graph lineage (§5.5.3).
+    pub stable_id: String,
+}
+
+pub enum LirBindArg {
+    Positional(LirBindValue),
+    Named(String, LirBindValue),
+}
+
+pub enum LirBindValue {
+    String(String),
+    Int(i64),
+    Float(f64),
+    Size(u64),
+    Freq(f64),
+    Ident(String),
+}
+
+impl LirBind {
+    /// Format endpoint as spec string: `transport("pos_arg", named=value, ...)`
+    pub fn format_endpoint_spec(&self) -> String {
+        let mut s = format!("{}(", self.transport);
+        for (i, arg) in self.args.iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            match arg {
+                LirBindArg::Positional(v) => s.push_str(&fmt_bind_value(v)),
+                LirBindArg::Named(k, v) => {
+                    s.push_str(k);
+                    s.push('=');
+                    s.push_str(&fmt_bind_value(v));
+                }
+            }
+        }
+        s.push(')');
+        s
+    }
+}
+
+// ── Interface manifest ───────────────────────────────────────────────────────
+
+/// Top-level interface manifest (§5.5.5, emitted by `--emit interface`).
+#[derive(Debug, Clone, Serialize)]
+pub struct InterfaceManifest {
+    pub schema: u32,
+    pub binds: Vec<InterfaceBindEntry>,
+}
+
+/// A single bind in the interface manifest.
+#[derive(Debug, Clone, Serialize)]
+pub struct InterfaceBindEntry {
+    pub stable_id: String,
+    pub name: String,
+    pub direction: String,
+    pub dtype: Option<String>,
+    pub shape: Vec<u32>,
+    pub rate_hz: Option<f64>,
+    pub endpoint: InterfaceEndpoint,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint_override: Option<String>,
+}
+
+/// Endpoint description in the interface manifest.
+#[derive(Debug, Clone, Serialize)]
+pub struct InterfaceEndpoint {
+    pub transport: String,
+    pub args: Vec<InterfaceArg>,
+}
+
+/// A single endpoint argument, preserving order and positional/named distinction.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind")]
+pub enum InterfaceArg {
+    #[serde(rename = "positional")]
+    Positional { value: InterfaceValue },
+    #[serde(rename = "named")]
+    Named { name: String, value: InterfaceValue },
+}
+
+/// A scalar value in the interface manifest.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum InterfaceValue {
+    String(String),
+    Int(i64),
+    Float(f64),
+}
+
 // ── Verification ─────────────────────────────────────────────────────────────
 
 /// Machine-checkable evidence for LIR postconditions (R1-R2).
@@ -385,13 +485,88 @@ fn check_firing_actor(firing: &LirFiring) -> bool {
 
 // ── Display ─────────────────────────────────────────────────────────────────
 
+pub(crate) fn fmt_bind_value(v: &LirBindValue) -> String {
+    match v {
+        LirBindValue::String(s) => format!("\"{}\"", s),
+        LirBindValue::Int(n) => format!("{}", n),
+        LirBindValue::Float(n) => format!("{}", n),
+        LirBindValue::Size(n) => format!("{}B", n),
+        LirBindValue::Freq(f) => format!("{}Hz", f),
+        LirBindValue::Ident(s) => s.clone(),
+    }
+}
+
+impl LirProgram {
+    /// Generate a JSON interface manifest for all binds.
+    pub fn generate_interface_manifest(
+        &self,
+        bind_overrides: &std::collections::HashMap<String, String>,
+    ) -> String {
+        let binds = self
+            .binds
+            .iter()
+            .map(|b| {
+                let (direction, dtype, shape, rate_hz) = match &b.contract {
+                    Some(c) => (
+                        c.direction.to_string(),
+                        c.dtype.map(|t| t.to_string()),
+                        c.shape.clone(),
+                        c.rate_hz,
+                    ),
+                    None => ("unknown".to_string(), None, Vec::new(), None),
+                };
+                InterfaceBindEntry {
+                    stable_id: b.stable_id.clone(),
+                    name: b.name.clone(),
+                    direction,
+                    dtype,
+                    shape,
+                    rate_hz,
+                    endpoint: InterfaceEndpoint {
+                        transport: b.transport.clone(),
+                        args: b.args.iter().map(lir_bind_arg_to_interface).collect(),
+                    },
+                    endpoint_override: bind_overrides.get(&b.name).cloned(),
+                }
+            })
+            .collect();
+
+        let manifest = InterfaceManifest { schema: 1, binds };
+        serde_json::to_string_pretty(&manifest).expect("interface manifest serialization")
+    }
+}
+
+fn lir_bind_arg_to_interface(arg: &LirBindArg) -> InterfaceArg {
+    match arg {
+        LirBindArg::Positional(v) => InterfaceArg::Positional {
+            value: lir_bind_value_to_interface(v),
+        },
+        LirBindArg::Named(name, v) => InterfaceArg::Named {
+            name: name.clone(),
+            value: lir_bind_value_to_interface(v),
+        },
+    }
+}
+
+fn lir_bind_value_to_interface(v: &LirBindValue) -> InterfaceValue {
+    match v {
+        LirBindValue::String(s) => InterfaceValue::String(s.clone()),
+        LirBindValue::Int(i) => InterfaceValue::Int(*i),
+        LirBindValue::Float(f) => InterfaceValue::Float(*f),
+        LirBindValue::Size(s) => InterfaceValue::Int(*s as i64),
+        LirBindValue::Freq(f) => InterfaceValue::Float(*f),
+        LirBindValue::Ident(s) => InterfaceValue::String(s.clone()),
+    }
+}
+
 impl std::fmt::Display for LirProgram {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(
             f,
-            "LirProgram ({} consts, {} params, {} inter-task bufs, {} tasks, {} probes)",
+            "LirProgram ({} consts, {} params, {} binds, {} inter-task bufs, {} tasks, {} probes)",
             self.consts.len(),
             self.params.len(),
+            self.binds.len(),
             self.inter_task_buffers.len(),
             self.tasks.len(),
             self.probes.len()
@@ -438,6 +613,42 @@ impl std::fmt::Display for LirProgram {
             "  directives: mem={}, overrun={}, timer={}",
             self.directives.mem_bytes, self.directives.overrun_policy, timer
         )?;
+
+        // Binds
+        for b in &self.binds {
+            write!(f, "  bind {}", b.name)?;
+            if let Some(contract) = &b.contract {
+                write!(f, " [{} {}", b.stable_id, contract.direction)?;
+                if let Some(dtype) = contract.dtype {
+                    write!(f, " {}", dtype)?;
+                }
+                if !contract.shape.is_empty() {
+                    write!(f, "[")?;
+                    for (i, d) in contract.shape.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}", d)?;
+                    }
+                    write!(f, "]")?;
+                }
+                if let Some(rate) = contract.rate_hz {
+                    write!(f, " @ {} Hz", rate)?;
+                }
+                write!(f, "]")?;
+            }
+            write!(f, " = {}(", b.transport)?;
+            for (i, arg) in b.args.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                match arg {
+                    LirBindArg::Positional(v) => write!(f, "{}", fmt_bind_value(v))?,
+                    LirBindArg::Named(k, v) => write!(f, "{}={}", k, fmt_bind_value(v))?,
+                }
+            }
+            writeln!(f, ")")?;
+        }
 
         // Inter-task buffers
         for buf in &self.inter_task_buffers {
@@ -699,6 +910,7 @@ impl<'a> LirBuilder<'a> {
             consts: self.build_consts(),
             params: self.build_params(),
             directives: self.build_directives(),
+            binds: self.build_binds(),
             inter_task_buffers: self.build_inter_task_buffers(),
             tasks: self.build_tasks(),
             probes: self.build_probes(),
@@ -772,7 +984,20 @@ impl<'a> LirBuilder<'a> {
     // ── Inter-task buffers ─────────────────────────────────────────────
 
     fn build_inter_task_buffers(&self) -> Vec<LirInterTaskBuffer> {
-        let mut buf_names: Vec<&String> = self.thir.resolved.buffers.keys().collect();
+        let mut buf_names: Vec<&String> = self
+            .thir
+            .resolved
+            .buffers
+            .keys()
+            .filter(|name| {
+                // Skip IN-bind buffers: no internal writer, managed externally.
+                // OUT-bind buffers must remain: pipeline writes to them via ring buffer.
+                !matches!(
+                    self.analysis.bind_contracts.get(name.as_str()),
+                    Some(c) if c.direction == BindDirection::In
+                )
+            })
+            .collect();
         buf_names.sort();
         buf_names
             .into_iter()
@@ -811,6 +1036,37 @@ impl<'a> LirBuilder<'a> {
             .iter()
             .map(|p| LirProbe {
                 name: p.name.clone(),
+            })
+            .collect()
+    }
+
+    // ── Binds ──────────────────────────────────────────────────────────
+
+    fn build_binds(&self) -> Vec<LirBind> {
+        self.thir
+            .binds()
+            .iter()
+            .map(|b| LirBind {
+                name: b.name.clone(),
+                transport: b.endpoint.transport.name.clone(),
+                args: b
+                    .endpoint
+                    .args
+                    .iter()
+                    .map(|a| match a {
+                        BindArg::Positional(s) => LirBindArg::Positional(lower_bind_scalar(s)),
+                        BindArg::Named(ident, s) => {
+                            LirBindArg::Named(ident.name.clone(), lower_bind_scalar(s))
+                        }
+                    })
+                    .collect(),
+                contract: self.analysis.bind_contracts.get(&b.name).cloned(),
+                stable_id: self
+                    .analysis
+                    .bind_contracts
+                    .get(&b.name)
+                    .map(|c| c.stable_id.clone())
+                    .unwrap_or_default(),
             })
             .collect()
     }
@@ -2068,7 +2324,15 @@ impl<'a> LirBuilder<'a> {
         };
         let task_graph = match self.graph.tasks.get(&buf_info.writer_task) {
             Some(g) => g,
-            None => return PipitType::Float,
+            None => {
+                // No writer task — check bind contract for type (IN-bind)
+                if let Some(contract) = self.analysis.bind_contracts.get(buffer_name) {
+                    if let Some(dtype) = contract.dtype {
+                        return dtype;
+                    }
+                }
+                return PipitType::Float;
+            }
         };
         for sub in subgraphs_of(task_graph) {
             for node in &sub.nodes {
@@ -2146,6 +2410,23 @@ fn scalar_literal(scalar: &Scalar) -> String {
         Scalar::Size(s, _) => format!("{}", s),
         Scalar::StringLit(s, _) => format!("\"{}\"", s),
         Scalar::Ident(ident) => format!("_const_{}", ident.name),
+    }
+}
+
+fn lower_bind_scalar(scalar: &Scalar) -> LirBindValue {
+    match scalar {
+        Scalar::Number(n, _, _) => {
+            let v = *n;
+            if v == v.trunc() && v >= i64::MIN as f64 && v <= i64::MAX as f64 {
+                LirBindValue::Int(v as i64)
+            } else {
+                LirBindValue::Float(v)
+            }
+        }
+        Scalar::StringLit(s, _) => LirBindValue::String(s.clone()),
+        Scalar::Size(s, _) => LirBindValue::Size(*s),
+        Scalar::Freq(f, _) => LirBindValue::Freq(*f),
+        Scalar::Ident(ident) => LirBindValue::Ident(ident.name.clone()),
     }
 }
 

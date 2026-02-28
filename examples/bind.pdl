@@ -1,0 +1,42 @@
+# bind.pdl — Bind-based external I/O
+# ====================================
+# Demonstrates: bind declarations, automatic PPKT send/recv,
+#               runtime rebind via --bind flag
+#
+# A bind declaration connects a named buffer to an external endpoint.
+# The compiler infers direction (out/in), dtype, shape, and rate from
+# the pipeline context — no explicit socket_write/socket_read needed.
+#
+# Usage:
+#   # Compile
+#   pcc examples/bind.pdl \
+#     -I runtime/libpipit/include \
+#     --cflags=-std=c++20 -o bind_demo
+#
+#   # Run with default endpoints
+#   ./bind_demo --duration 5s --stats
+#
+#   # Override endpoint at runtime
+#   ./bind_demo --bind iq=udp("10.0.0.1:5000") --duration 5s
+#
+#   # List all bindings
+#   ./bind_demo --list-bindings
+
+# OUT bind: samples written to 'iq' are sent via UDP to 127.0.0.1:9100
+bind iq = udp("127.0.0.1:9100", chan=10)
+
+# IN bind: samples read from 'rf' arrive via UDP on 127.0.0.1:9200
+bind rf = udp("127.0.0.1:9200", chan=20)
+
+param freq = 1000
+param amp  = 0.5
+
+# Generate IQ samples and publish to the 'iq' bind endpoint
+clock 48kHz transmitter {
+    sine<float>($freq, $amp) | mul(1.0) -> iq
+}
+
+# Receive RF samples from the 'rf' bind endpoint and display
+clock 48kHz receiver {
+    @rf | stdout<float>()
+}

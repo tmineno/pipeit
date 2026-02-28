@@ -1,0 +1,12 @@
+---
+source: compiler/tests/snapshot_lir.rs
+expression: output
+---
+LirProgram (0 consts, 0 params, 1 binds, 0 inter-task bufs, 1 tasks, 0 probes)
+  directives: mem=67108864, overrun=drop, timer=Fixed(10000)
+  bind iq [7a0cd474fb5020f2 in float[1] @ 48000 Hz] = udp("127.0.0.1:9100", chan=10)
+  task 'audio' @ 48000Hz K=5
+    edge_buffers: _e0_1: float[1] [local]
+    firings:
+      buf_read(iq) -> _e0_1 tokens=1
+      Actor_binwrite<void>("/dev/null") [_e0_1] -> []

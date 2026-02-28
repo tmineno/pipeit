@@ -266,6 +266,8 @@ pub mod codes {
     pub const E0021: DiagCode = DiagCode("E0021"); // mode listed multiple times in switch
     pub const E0022: DiagCode = DiagCode("E0022"); // undefined tap as actor input
     pub const E0023: DiagCode = DiagCode("E0023"); // shared buffer has no writer
+    pub const E0024: DiagCode = DiagCode("E0024"); // duplicate bind
+    pub const E0025: DiagCode = DiagCode("E0025"); // bind target not referenced (reserved for Phase 2)
     pub const W0001: DiagCode = DiagCode("W0001"); // define shadows actor
     pub const W0002: DiagCode = DiagCode("W0002"); // deprecated switch default clause
 
@@ -295,6 +297,8 @@ pub mod codes {
     pub const E0308: DiagCode = DiagCode("E0308"); // param type mismatch
     pub const E0309: DiagCode = DiagCode("E0309"); // switch param non-int32 default
     pub const E0310: DiagCode = DiagCode("E0310"); // ctrl buffer type mismatch
+    pub const E0311: DiagCode = DiagCode("E0311"); // bind target not referenced in any task
+    pub const E0312: DiagCode = DiagCode("E0312"); // bind contract conflict (readers disagree on type/shape/rate)
     pub const W0300: DiagCode = DiagCode("W0300"); // inferred dim param ordering
 
     // ── Schedule (E0400-E0499, W0400-W0499) ──────────────────────────
@@ -310,16 +314,23 @@ pub mod codes {
     pub const E0602: DiagCode = DiagCode("E0602"); // schedule verification failed
     pub const E0603: DiagCode = DiagCode("E0603"); // LIR verification failed
 
-    // ── Usage (E0700-E0799) ─────────────────────────────────────────
+    // ── Usage (E0700-E0709) ────────────────────────────────────────
     pub const E0700: DiagCode = DiagCode("E0700"); // --actor-meta required for emit stage
+
+    // ── Codegen / Bind (E0710-E0799, W0710-W0799) ──────────────────
+    pub const E0710: DiagCode = DiagCode("E0710"); // bind: unsupported transport
+    pub const E0711: DiagCode = DiagCode("E0711"); // bind: unsupported dtype for PPKT
+    pub const E0712: DiagCode = DiagCode("E0712"); // bind: unresolved endpoint argument
+    pub const W0710: DiagCode = DiagCode("W0710"); // bind: no endpoint address (placeholder)
+    pub const W0711: DiagCode = DiagCode("W0711"); // bind: dtype unresolved, no I/O adapter
 
     /// All assigned codes for uniqueness enforcement.
     pub const ALL_CODES: &[DiagCode] = &[
         E0001, E0002, E0003, E0004, E0005, E0006, E0007, E0008, E0009, E0010, E0011, E0012, E0013,
-        E0014, E0015, E0016, E0017, E0018, E0019, E0020, E0021, E0022, E0023, W0001, W0002, E0100,
-        E0101, E0102, E0200, E0201, E0202, E0203, E0204, E0205, E0206, E0300, E0301, E0302, E0303,
-        E0304, E0305, E0306, E0307, E0308, E0309, E0310, W0300, E0400, W0400, E0500, E0600, E0601,
-        E0602, E0603, E0700,
+        E0014, E0015, E0016, E0017, E0018, E0019, E0020, E0021, E0022, E0023, E0024, E0025, W0001,
+        W0002, E0100, E0101, E0102, E0200, E0201, E0202, E0203, E0204, E0205, E0206, E0300, E0301,
+        E0302, E0303, E0304, E0305, E0306, E0307, E0308, E0309, E0310, E0311, E0312, W0300, E0400,
+        W0400, E0500, E0600, E0601, E0602, E0603, E0700, E0710, E0711, E0712, W0710, W0711,
     ];
 }
 
@@ -425,10 +436,10 @@ mod tests {
 
     #[test]
     fn code_count() {
-        // 23 resolve errors + 2 resolve warnings
-        // + 3 type_infer + 7 lower + 11 analyze errors + 1 analyze warning
+        // 25 resolve errors + 2 resolve warnings
+        // + 3 type_infer + 7 lower + 13 analyze errors + 1 analyze warning
         // + 1 schedule error + 1 schedule warning + 1 graph + 4 pipeline
-        // + 1 usage (E0700)
-        assert_eq!(codes::ALL_CODES.len(), 55);
+        // + 1 usage (E0700) + 3 codegen errors (E0710-E0712) + 2 codegen warnings (W0710-W0711)
+        assert_eq!(codes::ALL_CODES.len(), 64);
     }
 }

@@ -1,0 +1,8 @@
+---
+source: compiler/tests/snapshot_hir.rs
+expression: output
+---
+HirProgram (0 consts, 0 params, 0 directives, 1 binds, 1 tasks)
+  bind iq = udp(2 args)
+  task 'audio' @ 48000 (pipeline)
+    constant(0) | stdout()

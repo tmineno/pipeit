@@ -605,6 +605,77 @@ fn dfs_cycle(
     visited.insert(node, 2); // done
 }
 
+/// Traverse from a BufferWrite/BufferRead node to find the adjacent Actor's CallId.
+///
+/// For `walk_predecessors = true`: walks incoming edges (predecessors) — use for
+/// BufferWrite nodes to find the upstream actor.
+/// For `walk_predecessors = false`: walks outgoing edges (successors) — use for
+/// BufferRead nodes to find the downstream actor.
+///
+/// Handles Fork/Probe intermediaries via BFS. Handles modal tasks by searching
+/// all subgraphs (control + modes).
+///
+/// Returns `None` only for disconnected or actor-free paths.
+pub fn adjacent_actor_call_id(
+    task_graph: &TaskGraph,
+    node_id: NodeId,
+    walk_predecessors: bool,
+) -> Option<CallId> {
+    let subgraphs: Vec<&Subgraph> = match task_graph {
+        TaskGraph::Pipeline(sub) => vec![sub],
+        TaskGraph::Modal { control, modes } => {
+            let mut subs = vec![control];
+            for (_, sub) in modes {
+                subs.push(sub);
+            }
+            subs
+        }
+    };
+
+    for sub in subgraphs {
+        // Check if this subgraph contains the target node.
+        if !sub.nodes.iter().any(|n| n.id == node_id) {
+            continue;
+        }
+
+        // BFS from node_id following edges in the specified direction.
+        let mut queue = std::collections::VecDeque::new();
+        let mut visited = std::collections::HashSet::new();
+        queue.push_back(node_id);
+        visited.insert(node_id);
+
+        while let Some(current) = queue.pop_front() {
+            // Check if current node is an Actor.
+            if let Some(node) = sub.nodes.iter().find(|n| n.id == current) {
+                if let NodeKind::Actor { call_id, .. } = &node.kind {
+                    return Some(*call_id);
+                }
+            }
+
+            // Follow edges in the specified direction.
+            for edge in &sub.edges {
+                let next = if walk_predecessors {
+                    if edge.target == current {
+                        edge.source
+                    } else {
+                        continue;
+                    }
+                } else if edge.source == current {
+                    edge.target
+                } else {
+                    continue;
+                };
+
+                if visited.insert(next) {
+                    queue.push_back(next);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

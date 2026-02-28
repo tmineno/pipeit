@@ -1085,6 +1085,7 @@ mod tests {
             consts: vec![],
             params: vec![],
             set_directives: vec![],
+            binds: vec![],
             expanded_call_ids: HashMap::new(),
             expanded_call_spans: HashMap::new(),
             program_span: Span::new((), 0..30),
@@ -1118,6 +1119,7 @@ mod tests {
             call_spans: HashMap::new(),
             def_ids: HashMap::new(),
             task_ids: HashMap::new(),
+            binds: HashMap::new(),
         };
         let result = type_infer(&hir, &resolved, &registry);
         let diag = result

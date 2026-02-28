@@ -2,7 +2,7 @@
 source: compiler/tests/snapshot_hir.rs
 expression: output
 ---
-HirProgram (1 consts, 0 params, 0 directives, 1 tasks)
+HirProgram (1 consts, 0 params, 0 directives, 0 binds, 1 tasks)
   const lp_coeff = [0.25, 0.5, 0.25]
   task 'analyzer' @ 1000 (pipeline)
     constant(0) | ~sig | fir(:lp_coeff) | stdout()
