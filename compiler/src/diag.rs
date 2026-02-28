@@ -310,13 +310,16 @@ pub mod codes {
     pub const E0602: DiagCode = DiagCode("E0602"); // schedule verification failed
     pub const E0603: DiagCode = DiagCode("E0603"); // LIR verification failed
 
+    // ── Usage (E0700-E0799) ─────────────────────────────────────────
+    pub const E0700: DiagCode = DiagCode("E0700"); // --actor-meta required for emit stage
+
     /// All assigned codes for uniqueness enforcement.
     pub const ALL_CODES: &[DiagCode] = &[
         E0001, E0002, E0003, E0004, E0005, E0006, E0007, E0008, E0009, E0010, E0011, E0012, E0013,
         E0014, E0015, E0016, E0017, E0018, E0019, E0020, E0021, E0022, E0023, W0001, W0002, E0100,
         E0101, E0102, E0200, E0201, E0202, E0203, E0204, E0205, E0206, E0300, E0301, E0302, E0303,
         E0304, E0305, E0306, E0307, E0308, E0309, E0310, W0300, E0400, W0400, E0500, E0600, E0601,
-        E0602, E0603,
+        E0602, E0603, E0700,
     ];
 }
 
@@ -425,6 +428,7 @@ mod tests {
         // 23 resolve errors + 2 resolve warnings
         // + 3 type_infer + 7 lower + 11 analyze errors + 1 analyze warning
         // + 1 schedule error + 1 schedule warning + 1 graph + 4 pipeline
-        assert_eq!(codes::ALL_CODES.len(), 54);
+        // + 1 usage (E0700)
+        assert_eq!(codes::ALL_CODES.len(), 55);
     }
 }

@@ -8,6 +8,42 @@ const EXIT_COMPILE_ERROR: i32 = 1;
 const EXIT_USAGE_ERROR: i32 = 2;
 const EXIT_SYSTEM_ERROR: i32 = 3;
 
+/// Emit a usage error respecting --diagnostic-format, then exit.
+fn emit_usage_error(
+    diagnostic_format: DiagnosticFormat,
+    code: Option<pcc::diag::DiagCode>,
+    message: &str,
+    hint: Option<&str>,
+) -> ! {
+    match diagnostic_format {
+        DiagnosticFormat::Human => {
+            if let Some(c) = code {
+                eprint!("error[{}]: {}", c, message);
+            } else {
+                eprint!("error: {}", message);
+            }
+            if let Some(h) = hint {
+                eprint!("\n  hint: {}", h);
+            }
+            eprintln!();
+        }
+        DiagnosticFormat::Json => {
+            let json = pcc::diag::DiagnosticJson {
+                kind: "usage",
+                level: "error",
+                code: code.map(|c| c.0),
+                message: message.to_string(),
+                span: pcc::diag::SpanJson { start: 0, end: 0 },
+                hint: hint.map(|h| h.to_string()),
+                related_spans: vec![],
+                cause_chain: vec![],
+            };
+            eprintln!("{}", serde_json::to_string(&json).unwrap_or_default());
+        }
+    }
+    std::process::exit(EXIT_USAGE_ERROR);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum DiagnosticFormat {
     Human,
@@ -25,6 +61,22 @@ enum EmitStage {
     TimingChart,
     Manifest,
     BuildInfo,
+}
+
+impl EmitStage {
+    fn cli_name(&self) -> &'static str {
+        match self {
+            EmitStage::Exe => "exe",
+            EmitStage::Cpp => "cpp",
+            EmitStage::Ast => "ast",
+            EmitStage::Graph => "graph",
+            EmitStage::GraphDot => "graph-dot",
+            EmitStage::Schedule => "schedule",
+            EmitStage::TimingChart => "timing-chart",
+            EmitStage::Manifest => "manifest",
+            EmitStage::BuildInfo => "build-info",
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -98,8 +150,12 @@ fn main() {
     // ── --emit manifest: early exit before source reading ──
     if matches!(cli.emit, EmitStage::Manifest) {
         if cli.actor_meta.is_some() {
-            eprintln!("error: cannot combine --emit manifest with --actor-meta");
-            std::process::exit(EXIT_USAGE_ERROR);
+            emit_usage_error(
+                cli.diagnostic_format,
+                None,
+                "cannot combine --emit manifest with --actor-meta",
+                None,
+            );
         }
         let (registry, _headers) = match load_actor_registry_from_headers(&cli) {
             Ok(v) => v,
@@ -117,8 +173,12 @@ fn main() {
     let source_path = match cli.source {
         Some(ref p) => p.clone(),
         None => {
-            eprintln!("error: source file is required for --emit {:?}", cli.emit);
-            std::process::exit(EXIT_USAGE_ERROR);
+            emit_usage_error(
+                cli.diagnostic_format,
+                None,
+                &format!("source file is required for --emit {}", cli.emit.cli_name()),
+                None,
+            );
         }
     };
 
