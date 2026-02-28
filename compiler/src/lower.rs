@@ -533,6 +533,8 @@ impl<'a> LowerEngine<'a> {
                 let call_id = call.call_id;
                 if let Some(concrete) = self.concrete_actors.get(&call_id) {
                     if concrete.is_polymorphic() {
+                        let unresolved: Vec<&str> =
+                            concrete.type_params.iter().map(|p| p.as_str()).collect();
                         self.diagnostics.push(
                             Diagnostic::new(
                                 DiagLevel::Error,
@@ -544,7 +546,14 @@ impl<'a> LowerEngine<'a> {
                                 ),
                             )
                             .with_code(codes::E0203)
-                            .with_hint("specify type arguments explicitly"),
+                            .with_cause(
+                                format!("unresolved type parameters: {}", unresolved.join(", ")),
+                                Some(call.call_span),
+                            )
+                            .with_hint(format!(
+                                "specify type arguments explicitly, e.g. {}<float>",
+                                call.name
+                            )),
                         );
                         *ok = false;
                     }
@@ -560,7 +569,18 @@ impl<'a> LowerEngine<'a> {
                             ),
                         )
                         .with_code(codes::E0204)
-                        .with_hint("specify type arguments explicitly"),
+                        .with_cause(
+                            "type inference did not produce a concrete instance for this call",
+                            Some(call.call_span),
+                        )
+                        .with_cause(
+                            "this usually means the pipe context was insufficient to resolve all type parameters",
+                            None,
+                        )
+                        .with_hint(format!(
+                            "specify type arguments explicitly, e.g. {}<float>",
+                            call.name
+                        )),
                     );
                     *ok = false;
                 }
@@ -594,7 +614,18 @@ impl<'a> LowerEngine<'a> {
                             meta.name, meta.in_type
                         ),
                     )
-                    .with_code(codes::E0205),
+                    .with_code(codes::E0205)
+                    .with_cause(
+                        format!(
+                            "input type expression '{}' was not resolved to a concrete type",
+                            meta.in_type
+                        ),
+                        Some(span),
+                    )
+                    .with_hint(format!(
+                        "specify type arguments explicitly, e.g. {}<float>",
+                        meta.name
+                    )),
                 );
                 ok = false;
             }
@@ -609,7 +640,18 @@ impl<'a> LowerEngine<'a> {
                             meta.name, meta.out_type
                         ),
                     )
-                    .with_code(codes::E0206),
+                    .with_code(codes::E0206)
+                    .with_cause(
+                        format!(
+                            "output type expression '{}' was not resolved to a concrete type",
+                            meta.out_type
+                        ),
+                        Some(span),
+                    )
+                    .with_hint(format!(
+                        "specify type arguments explicitly, e.g. {}<float>",
+                        meta.name
+                    )),
                 );
                 ok = false;
             }
@@ -1147,7 +1189,63 @@ mod tests {
 
         let cert = engine.verify_obligations();
         assert!(!cert.l4_monomorphization_soundness);
-        assert!(engine.diagnostics.iter().any(|d| d.message.contains("L4")));
+        let l4_diag = engine
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("L4"))
+            .expect("expected L4 diagnostic");
+        assert!(
+            !l4_diag.cause_chain.is_empty(),
+            "L4 diagnostic should have cause_chain"
+        );
+        assert!(l4_diag.hint.is_some(), "L4 diagnostic should have a hint");
+    }
+
+    #[test]
+    fn l4_no_concrete_instance_e0204() {
+        // Polymorphic actor in registry, but no concrete_actors entry — E0204
+        let s1 = span(0, 10);
+        let c1 = CallId(0);
+
+        // No entry in concrete_actors for c1
+        let concrete_actors = HashMap::new();
+
+        let typed = make_empty_typed();
+        let hir = make_hir_with_pipe(vec![make_hir_actor_call("scale", c1, s1)]);
+        let resolved = make_resolved_for_calls(&[(s1, c1)]);
+
+        let mut registry = Registry::empty();
+        registry.insert(make_polymorphic_meta("scale"));
+
+        let mut engine = LowerEngine {
+            hir: &hir,
+            resolved: &resolved,
+            typed: &typed,
+            registry: &registry,
+            concrete_actors,
+            widening_nodes: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+
+        let cert = engine.verify_obligations();
+        assert!(!cert.l4_monomorphization_soundness);
+        let e0204 = engine
+            .diagnostics
+            .iter()
+            .find(|d| d.code == Some(codes::E0204))
+            .expect("expected E0204 diagnostic");
+        assert!(
+            !e0204.cause_chain.is_empty(),
+            "E0204 should have cause_chain"
+        );
+        assert!(
+            e0204
+                .cause_chain
+                .iter()
+                .any(|c| c.message.contains("type inference")),
+            "E0204 cause should mention type inference"
+        );
+        assert!(e0204.hint.is_some(), "E0204 should have a hint");
     }
 
     // ── L5 tests ────────────────────────────────────────────────────────
@@ -1207,7 +1305,19 @@ mod tests {
 
         let cert = engine.verify_obligations();
         assert!(!cert.l5_no_fallback_typing);
-        assert!(engine.diagnostics.iter().any(|d| d.message.contains("L5")));
+        let l5_diags: Vec<_> = engine
+            .diagnostics
+            .iter()
+            .filter(|d| d.message.contains("L5"))
+            .collect();
+        assert!(!l5_diags.is_empty(), "expected L5 diagnostics");
+        for d in &l5_diags {
+            assert!(
+                !d.cause_chain.is_empty(),
+                "L5 diagnostic should have cause_chain"
+            );
+            assert!(d.hint.is_some(), "L5 diagnostic should have a hint");
+        }
     }
 
     // ── Cert tests ──────────────────────────────────────────────────────
