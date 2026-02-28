@@ -357,7 +357,7 @@ impl<'a> TypeInferEngine<'a> {
 
         // Parse type argument names to PipitType
         let mut concrete_types = Vec::new();
-        for (type_name, type_span) in &call.type_args {
+        for (i, (type_name, type_span)) in call.type_args.iter().enumerate() {
             match parse_type_name(type_name) {
                 Some(t) => concrete_types.push(t),
                 None => {
@@ -370,6 +370,18 @@ impl<'a> TypeInferEngine<'a> {
                         .with_code(codes::E0100)
                         .with_hint(
                             "valid types: int8, int16, int32, float, double, cfloat, cdouble",
+                        )
+                        .with_related(
+                            call.call_span,
+                            format!("type argument {} of '{}'", i + 1, call.name),
+                        )
+                        .with_cause(
+                            format!(
+                                "'{}' expects type params <{}>",
+                                call.name,
+                                meta.type_params.join(", ")
+                            ),
+                            Some(call.call_span),
                         ),
                     );
                     return;
@@ -1032,6 +1044,100 @@ mod tests {
             errors.is_empty(),
             "unexpected type_infer errors: {:#?}",
             errors
+        );
+    }
+
+    #[test]
+    fn e0100_diagnostic_has_provenance() {
+        // E0100 is defense-in-depth: the parser rejects invalid type names,
+        // but if HIR reaches type_infer with an unknown type, E0100 fires.
+        // Test via direct engine construction to verify enrichment.
+        use crate::hir::{HirPipeline, HirTask, HirTaskBody};
+        use crate::id::{CallId, TaskId};
+        use crate::registry::{ActorParam, ParamKind, ParamType, PortShape, TokenCount, TypeExpr};
+        use chumsky::span::Span as _;
+
+        let call_span = Span::new((), 10..20);
+        let call = HirActorCall {
+            name: "scale".to_string(),
+            call_id: CallId(0),
+            call_span,
+            args: vec![],
+            type_args: vec![("badtype".to_string(), Span::new((), 16..23))],
+            shape_constraint: None,
+        };
+        let hir = HirProgram {
+            tasks: vec![HirTask {
+                name: "t".to_string(),
+                task_id: TaskId(0),
+                freq_hz: 1000.0,
+                freq_span: Span::new((), 0..5),
+                body: HirTaskBody::Pipeline(HirPipeline {
+                    pipes: vec![HirPipeExpr {
+                        source: HirPipeSource::ActorCall(call),
+                        elements: vec![],
+                        sink: None,
+                        span: Span::new((), 0..30),
+                    }],
+                    span: Span::new((), 0..30),
+                }),
+            }],
+            consts: vec![],
+            params: vec![],
+            set_directives: vec![],
+            expanded_call_ids: HashMap::new(),
+            expanded_call_spans: HashMap::new(),
+            program_span: Span::new((), 0..30),
+        };
+        let mut registry = Registry::empty();
+        registry.insert(ActorMeta {
+            name: "scale".to_string(),
+            type_params: vec!["T".to_string()],
+            in_type: TypeExpr::TypeParam("T".to_string()),
+            in_count: TokenCount::Literal(1),
+            in_shape: PortShape::rank1(TokenCount::Literal(1)),
+            out_type: TypeExpr::TypeParam("T".to_string()),
+            out_count: TokenCount::Literal(1),
+            out_shape: PortShape::rank1(TokenCount::Literal(1)),
+            params: vec![ActorParam {
+                kind: ParamKind::Param,
+                param_type: ParamType::TypeParam("T".to_string()),
+                name: "gain".to_string(),
+            }],
+        });
+        let resolved = crate::resolve::ResolvedProgram {
+            consts: HashMap::new(),
+            params: HashMap::new(),
+            defines: HashMap::new(),
+            tasks: HashMap::new(),
+            buffers: HashMap::new(),
+            call_resolutions: HashMap::new(),
+            task_resolutions: HashMap::new(),
+            probes: vec![],
+            call_ids: HashMap::new(),
+            call_spans: HashMap::new(),
+            def_ids: HashMap::new(),
+            task_ids: HashMap::new(),
+        };
+        let result = type_infer(&hir, &resolved, &registry);
+        let diag = result
+            .diagnostics
+            .iter()
+            .find(|d| d.code == Some(codes::E0100))
+            .expect("expected E0100 diagnostic for unknown type");
+        assert!(
+            !diag.related_spans.is_empty(),
+            "E0100 should have related_spans for call site"
+        );
+        assert!(
+            !diag.cause_chain.is_empty(),
+            "E0100 should have cause_chain showing expected type params"
+        );
+        assert!(
+            diag.cause_chain
+                .iter()
+                .any(|c| c.message.contains("expects type params")),
+            "cause should mention expected type params"
         );
     }
 
