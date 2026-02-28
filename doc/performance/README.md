@@ -89,3 +89,40 @@ Numeric display policy:
 # Explicit id, overwrite existing report
 ./benches/commit_characterize.sh --commit-id <id> --force
 ```
+
+## Gate Decision Methodology
+
+Characterize reports (post-commit hook) use quick settings (`--sample-size 10`,
+`--measurement-time 0.10`) and are intended for **trend monitoring only**.
+They must not be used for gate pass/fail decisions.
+
+Gate decisions use `compiler_bench_stable.sh` with the following protocol:
+
+- **CPU pinning**: `taskset -c 1` (or `$PIPIT_BENCH_CPU`)
+- **Sample size**: 40
+- **Measurement time**: 1.0 s
+- **Warm-up time**: 0.2 s
+- **Runs**: 3 independent runs; take the **median of median estimates**
+
+```bash
+# Gate verification (3× median)
+for i in 1 2 3; do
+  ./benches/compiler_bench_stable.sh \
+    --filter 'kpi/(full_compile_latency|phase_latency)' \
+    --sample-size 40 --measurement-time 1.0 \
+    2>&1 | tee tmp/gate_run${i}.txt
+done
+```
+
+### Benchmark-definition vs algorithmic changes
+
+When a benchmark measurement changes due to a **definition change** (e.g.,
+excluding THIR rebuild from the `build_lir` benchmark closure), the
+reported delta conflates two effects:
+
+1. The measurement scope change (what is being timed)
+2. Any algorithmic improvement applied in the same commit
+
+These must be documented separately in optimization reports. A
+benchmark-definition fix is a measurement hygiene improvement, not an
+algorithmic speedup.
