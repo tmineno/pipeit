@@ -458,7 +458,7 @@ fn collect_all_headers(cli: &Cli) -> Result<Vec<PathBuf>, (String, i32)> {
     Ok(all_headers)
 }
 
-/// Load actor registry from header scanning (pre-v0.3.0 behavior).
+/// Load actor registry from header scanning via PP record extraction (ADR-032).
 fn load_actor_registry_from_headers(
     cli: &Cli,
 ) -> Result<(pcc::registry::Registry, Vec<PathBuf>), (String, i32)> {
@@ -475,30 +475,44 @@ fn load_actor_registry_from_headers(
     }
     let actor_path_headers = discover_actor_headers(&cli.actor_path)?;
 
-    let mut include_registry = pcc::registry::Registry::new();
+    // Collect include directories for the preprocessor
+    let mut extra_include_dirs = Vec::new();
     for path in &include_headers {
-        include_registry
-            .load_header(path)
-            .map_err(map_registry_error)?;
-
-        if cli.verbose {
-            eprintln!("pcc: loaded actors from include {}", path.display());
+        if let Some(dir) = path.parent() {
+            let dir = dir.to_path_buf();
+            if !extra_include_dirs.contains(&dir) {
+                extra_include_dirs.push(dir);
+            }
         }
     }
-
-    let mut actor_path_registry = pcc::registry::Registry::new();
     for path in &actor_path_headers {
-        actor_path_registry
-            .load_header(path)
-            .map_err(map_registry_error)?;
-
-        if cli.verbose {
-            eprintln!("pcc: loaded actors from actor-path {}", path.display());
+        if let Some(dir) = path.parent() {
+            let dir = dir.to_path_buf();
+            if !extra_include_dirs.contains(&dir) {
+                extra_include_dirs.push(dir);
+            }
         }
     }
+
+    if cli.verbose {
+        eprintln!(
+            "pcc: PP extraction with {} include headers, {} actor-path headers",
+            include_headers.len(),
+            actor_path_headers.len()
+        );
+    }
+
+    let (include_registry, actor_path_registry) = pcc::registry::scan_actors_pp(
+        &cli.cc,
+        &include_headers,
+        &actor_path_headers,
+        &extra_include_dirs,
+    )
+    .map_err(map_registry_error)?;
 
     // --actor-path is base registry; -I overlays with precedence.
-    actor_path_registry.overlay_from(&include_registry);
+    let mut merged = actor_path_registry;
+    merged.overlay_from(&include_registry);
 
     let mut all_headers = Vec::new();
     all_headers.extend(actor_path_headers);
@@ -507,7 +521,7 @@ fn load_actor_registry_from_headers(
     let mut dedup = BTreeSet::new();
     all_headers.retain(|p| dedup.insert(p.clone()));
 
-    Ok((actor_path_registry, all_headers))
+    Ok((merged, all_headers))
 }
 
 fn canonicalize_all(paths: &[PathBuf], err_code: i32) -> Result<Vec<PathBuf>, (String, i32)> {
