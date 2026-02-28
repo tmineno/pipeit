@@ -422,6 +422,15 @@
 
 **Goal**: Observability, reliability, security, verification for production deployments.
 
+### Legacy Text Scanner Removal (deferred from v0.4.4)
+
+- [ ] Migrate 54 test/bench `load_header()` call sites across 17 files to golden manifest (`Registry::load_manifest`)
+- [ ] Migrate `test_registry_with_extra_header()` and `dimension_param_order_warning` to `Registry::insert()` pattern
+- [ ] Rewrite registry.rs scanner-specific unit tests (delete dead-code tests, rewrite registry-behavior tests)
+- [ ] Delete dead functions: `load_header`, `scan_actors`, `strip_comments`, `parse_actor_macro`
+- [ ] Mark `load_header` removal as breaking API change (`refactor!:`)
+- See review note: `agent-review/pipeit-clang/2026-02-28-text-scanner-removal-plan.md`
+
 ### Observability
 
 - [ ] Metrics and monitoring (Prometheus, Grafana, OpenTelemetry)
@@ -469,5 +478,6 @@
 - **v0.4.4 summary**: PP record manifest extraction (ADR-032) replaces text scanner (~440 lines deleted). Breaking change: `--actor-meta` required for `--emit cpp|exe|build-info|graph|graph-dot|schedule|timing-chart` (ADR-033). E0700 diagnostic, centralized usage-error emitter, 16 PP extraction unit tests. 667 total tests passing.
 - **v0.4.4 ADRs**: ADR-032 (PP record manifest extraction), ADR-033 (manifest-required inputs)
 - **v0.5.x** open items are currently deferred; now also includes former v0.4.3 latency work
+- **v0.4.4 deferred**: Legacy text scanner removal (54 test call sites across 17 files) deferred to v0.6.x — full migration plan in review note `2026-02-28-text-scanner-removal-plan.md`
 - Performance characterization should inform optimization priorities (measure before optimizing)
 - Spec files renamed to versioned names (`pipit-lang-spec-v0.3.0.md`, `pcc-spec-v0.3.0.md`); `v0.2.0` specs are frozen from tag `v0.2.2`
