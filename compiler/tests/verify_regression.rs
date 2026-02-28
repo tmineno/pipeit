@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 fn project_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -16,6 +17,31 @@ fn project_root() -> PathBuf {
 
 fn pcc_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_pcc"))
+}
+
+/// Generate a shared manifest once per test binary.
+fn shared_manifest() -> &'static Path {
+    static MANIFEST: OnceLock<PathBuf> = OnceLock::new();
+    MANIFEST.get_or_init(|| {
+        let path = std::env::temp_dir().join("pcc_verify_regression_manifest.json");
+        let root = project_root();
+        let output = Command::new(pcc_binary())
+            .arg("--emit")
+            .arg("manifest")
+            .arg("-I")
+            .arg(root.join("runtime/libpipit/include"))
+            .arg("-I")
+            .arg(root.join("examples"))
+            .output()
+            .expect("failed to generate manifest");
+        assert!(
+            output.status.success(),
+            "manifest generation failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::write(&path, &output.stdout).expect("failed to write manifest");
+        path
+    })
 }
 
 /// All 7 example .pdl files compile with --emit cpp and required -I flags.
@@ -39,6 +65,8 @@ fn all_examples_pass_verification() {
         let output = Command::new(pcc_binary())
             .arg("--emit")
             .arg("cpp")
+            .arg("--actor-meta")
+            .arg(shared_manifest())
             .arg("-I")
             .arg(&actors_dir)
             .arg("-I")
@@ -70,6 +98,8 @@ fn unknown_actor_produces_error() {
     let output = Command::new(pcc_binary())
         .arg("--emit")
         .arg("cpp")
+        .arg("--actor-meta")
+        .arg(shared_manifest())
         .arg("-I")
         .arg(&actors_dir)
         .arg(&pdl_path)
@@ -103,6 +133,8 @@ fn json_output_semantic_error() {
     let output = Command::new(pcc_binary())
         .arg("--emit")
         .arg("cpp")
+        .arg("--actor-meta")
+        .arg(shared_manifest())
         .arg("--diagnostic-format")
         .arg("json")
         .arg("-I")
@@ -138,6 +170,8 @@ fn json_output_parse_error() {
     let output = Command::new(pcc_binary())
         .arg("--emit")
         .arg("cpp")
+        .arg("--actor-meta")
+        .arg(shared_manifest())
         .arg("--diagnostic-format")
         .arg("json")
         .arg("-I")

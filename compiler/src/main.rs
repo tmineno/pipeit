@@ -489,8 +489,22 @@ fn load_actor_registry(
         return Ok((registry, all_headers));
     }
 
-    // Otherwise, load from headers (existing behavior)
-    load_actor_registry_from_headers(cli)
+    // E0700: --actor-meta is required for compilation stages (ADR-033)
+    // Only --emit manifest and --emit ast don't require it, and those
+    // are handled before this function is called.
+    emit_usage_error(
+        cli.diagnostic_format,
+        Some(pcc::diag::codes::E0700),
+        &format!(
+            "--actor-meta is required for --emit {}",
+            cli.emit.cli_name()
+        ),
+        Some(
+            "generate a manifest first:\n\
+             \x20       pcc --emit manifest -I <include> -o actors.meta.json\n\
+             \x20       then: pcc source.pdl --actor-meta actors.meta.json --emit <stage>",
+        ),
+    );
 }
 
 /// Collect all header paths from -I and --actor-path for C++ compilation.

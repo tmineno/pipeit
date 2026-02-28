@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 fn pcc_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_pcc"))
@@ -29,6 +30,30 @@ fn runtime_include_dir() -> PathBuf {
 
 fn examples_dir() -> PathBuf {
     project_root().join("examples")
+}
+
+/// Generate a shared manifest once per test binary (runtime + examples).
+fn shared_manifest() -> &'static Path {
+    static MANIFEST: OnceLock<PathBuf> = OnceLock::new();
+    MANIFEST.get_or_init(|| {
+        let path = std::env::temp_dir().join("pcc_integration_pipeline_manifest.json");
+        let output = Command::new(pcc_binary())
+            .arg("--emit")
+            .arg("manifest")
+            .arg("-I")
+            .arg(runtime_include_dir())
+            .arg("-I")
+            .arg(examples_dir())
+            .output()
+            .expect("failed to generate manifest");
+        assert!(
+            output.status.success(),
+            "manifest generation failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::write(&path, &output.stdout).expect("failed to write manifest");
+        path
+    })
 }
 
 /// `--emit ast` succeeds without any -I or --actor-path flags.
@@ -168,10 +193,8 @@ fn emit_build_info_generates_valid_json() {
         .arg("--emit")
         .arg("build-info")
         .arg(&pdl)
-        .arg("-I")
-        .arg(runtime_include_dir())
-        .arg("-I")
-        .arg(examples_dir())
+        .arg("--actor-meta")
+        .arg(shared_manifest())
         .output()
         .expect("failed to run pcc");
 
@@ -209,14 +232,14 @@ fn emit_build_info_generates_valid_json() {
     );
 }
 
-/// `--emit build-info` requires a source file.
+/// `--emit build-info` requires a source file (even with --actor-meta).
 #[test]
 fn emit_build_info_requires_source() {
     let output = Command::new(pcc_binary())
         .arg("--emit")
         .arg("build-info")
-        .arg("-I")
-        .arg(examples_dir())
+        .arg("--actor-meta")
+        .arg(shared_manifest())
         .output()
         .expect("failed to run pcc");
 
@@ -236,10 +259,8 @@ fn emit_build_info_deterministic() {
             .arg("--emit")
             .arg("build-info")
             .arg(&pdl)
-            .arg("-I")
-            .arg(runtime_include_dir())
-            .arg("-I")
-            .arg(examples_dir())
+            .arg("--actor-meta")
+            .arg(shared_manifest())
             .output()
             .expect("failed to run pcc");
         assert!(output.status.success());
@@ -267,8 +288,8 @@ fn emit_build_info_succeeds_with_parse_invalid_source() {
         .arg("--emit")
         .arg("build-info")
         .arg(&bad_pdl)
-        .arg("-I")
-        .arg(examples_dir())
+        .arg("--actor-meta")
+        .arg(shared_manifest())
         .output()
         .expect("failed to run pcc");
 
@@ -347,5 +368,121 @@ fn manifest_then_compile_produces_valid_cpp() {
     assert!(
         cpp.contains("pipit::shell_main"),
         "generated C++ should contain shell_main call"
+    );
+}
+
+// ── E0700: --actor-meta required tests ────────────────────────────────────
+
+/// `--emit cpp` without `--actor-meta` produces E0700 (exit code 2).
+#[test]
+fn emit_cpp_without_actor_meta_produces_e0700() {
+    let pdl = project_root().join("examples/gain.pdl");
+    let output = Command::new(pcc_binary())
+        .arg("--emit")
+        .arg("cpp")
+        .arg(&pdl)
+        .arg("-I")
+        .arg(runtime_include_dir())
+        .output()
+        .expect("failed to run pcc");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "missing --actor-meta should produce exit code 2"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0700"),
+        "stderr should contain E0700: {stderr}"
+    );
+    assert!(
+        stderr.contains("--actor-meta"),
+        "stderr should mention --actor-meta: {stderr}"
+    );
+}
+
+/// `--emit build-info` without `--actor-meta` produces E0700 (exit code 2).
+#[test]
+fn emit_build_info_without_actor_meta_produces_e0700() {
+    let pdl = project_root().join("examples/gain.pdl");
+    let output = Command::new(pcc_binary())
+        .arg("--emit")
+        .arg("build-info")
+        .arg(&pdl)
+        .output()
+        .expect("failed to run pcc");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "missing --actor-meta should produce exit code 2"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0700"),
+        "stderr should contain E0700: {stderr}"
+    );
+}
+
+/// E0700 respects `--diagnostic-format json`.
+#[test]
+fn e0700_respects_diagnostic_format_json() {
+    let pdl = project_root().join("examples/gain.pdl");
+    let output = Command::new(pcc_binary())
+        .arg("--emit")
+        .arg("cpp")
+        .arg("--diagnostic-format")
+        .arg("json")
+        .arg(&pdl)
+        .output()
+        .expect("failed to run pcc");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let json: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|e| panic!("E0700 JSON should be valid: {e}\nstderr: {stderr}"));
+    assert_eq!(json["kind"], "usage");
+    assert_eq!(json["level"], "error");
+    assert_eq!(json["code"], "E0700");
+    assert!(
+        json["message"].as_str().unwrap().contains("--actor-meta"),
+        "message should mention --actor-meta"
+    );
+}
+
+/// `--emit ast` still works without `--actor-meta` (no E0700).
+#[test]
+fn emit_ast_does_not_require_actor_meta() {
+    let pdl = project_root().join("examples/example.pdl");
+    let output = Command::new(pcc_binary())
+        .arg("--emit")
+        .arg("ast")
+        .arg(&pdl)
+        .output()
+        .expect("failed to run pcc");
+
+    assert!(
+        output.status.success(),
+        "pcc --emit ast should succeed without --actor-meta.\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `--emit manifest` still works without `--actor-meta` (no E0700).
+#[test]
+fn emit_manifest_does_not_require_actor_meta() {
+    let output = Command::new(pcc_binary())
+        .arg("--emit")
+        .arg("manifest")
+        .arg("-I")
+        .arg(runtime_include_dir())
+        .output()
+        .expect("failed to run pcc");
+
+    assert!(
+        output.status.success(),
+        "pcc --emit manifest should succeed without --actor-meta.\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }

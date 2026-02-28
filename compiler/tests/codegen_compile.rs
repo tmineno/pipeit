@@ -11,6 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
 fn project_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -61,6 +62,31 @@ fn runtime_include_dir() -> PathBuf {
         .join("include")
 }
 
+/// Generate a shared manifest once per test binary (superset of all actors).
+fn shared_manifest() -> &'static Path {
+    static MANIFEST: OnceLock<PathBuf> = OnceLock::new();
+    MANIFEST.get_or_init(|| {
+        let path = std::env::temp_dir().join("pcc_codegen_compile_manifest.json");
+        let root = project_root();
+        let output = Command::new(pcc_binary())
+            .arg("--emit")
+            .arg("manifest")
+            .arg("-I")
+            .arg(runtime_include_dir())
+            .arg("-I")
+            .arg(root.join("examples"))
+            .output()
+            .expect("failed to generate manifest");
+        assert!(
+            output.status.success(),
+            "manifest generation failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::write(&path, &output.stdout).expect("failed to write manifest");
+        path
+    })
+}
+
 /// Run pcc on a PDL input file with given include paths.
 /// Returns the pcc Output and the path to the generated .cpp file.
 fn run_pcc(pdl_input: &Path, include_paths: &[&Path]) -> (std::process::Output, PathBuf) {
@@ -68,6 +94,7 @@ fn run_pcc(pdl_input: &Path, include_paths: &[&Path]) -> (std::process::Output, 
     let pcc = pcc_binary();
     let mut cmd = Command::new(&pcc);
     cmd.arg(pdl_input.to_str().unwrap());
+    cmd.arg("--actor-meta").arg(shared_manifest());
     for path in include_paths {
         cmd.arg("-I").arg(path.to_str().unwrap());
     }
@@ -85,6 +112,7 @@ fn run_pcc_release(pdl_input: &Path, include_paths: &[&Path]) -> (std::process::
     let pcc = pcc_binary();
     let mut cmd = Command::new(&pcc);
     cmd.arg(pdl_input.to_str().unwrap());
+    cmd.arg("--actor-meta").arg(shared_manifest());
     cmd.arg("--release");
     for path in include_paths {
         cmd.arg("-I").arg(path.to_str().unwrap());

@@ -11,6 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
 fn project_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -42,6 +43,28 @@ fn temp_path(prefix: &str, ext: &str) -> PathBuf {
     }
 }
 
+/// Generate a shared manifest once per test binary.
+fn shared_manifest() -> &'static Path {
+    static MANIFEST: OnceLock<PathBuf> = OnceLock::new();
+    MANIFEST.get_or_init(|| {
+        let path = std::env::temp_dir().join("pcc_compiler_tests_manifest.json");
+        let output = Command::new(pcc_binary())
+            .arg("--emit")
+            .arg("manifest")
+            .arg("-I")
+            .arg(runtime_include_dir())
+            .output()
+            .expect("failed to generate manifest");
+        assert!(
+            output.status.success(),
+            "manifest generation failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::write(&path, &output.stdout).expect("failed to write manifest");
+        path
+    })
+}
+
 fn run_pcc_inline(pdl_source: &str) -> (std::process::Output, PathBuf, PathBuf) {
     let pdl_file = temp_path("pipit_spec_case", "pdl");
     let cpp_out = temp_path("pipit_spec_case", "cpp");
@@ -50,6 +73,8 @@ fn run_pcc_inline(pdl_source: &str) -> (std::process::Output, PathBuf, PathBuf) 
 
     let out = Command::new(pcc_binary())
         .arg(pdl_file.to_str().unwrap())
+        .arg("--actor-meta")
+        .arg(shared_manifest())
         .arg("-I")
         .arg(runtime_include_dir().to_str().unwrap())
         .arg("--emit")
