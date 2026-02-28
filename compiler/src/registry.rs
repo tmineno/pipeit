@@ -235,6 +235,10 @@ pub enum RegistryError {
         first: PathBuf,
         second: PathBuf,
     },
+    PreprocessorError {
+        message: String,
+        stderr: String,
+    },
 }
 
 impl fmt::Display for RegistryError {
@@ -262,6 +266,13 @@ impl fmt::Display for RegistryError {
                     first.display(),
                     second.display()
                 )
+            }
+            RegistryError::PreprocessorError { message, stderr } => {
+                if stderr.is_empty() {
+                    write!(f, "preprocessor: {}", message)
+                } else {
+                    write!(f, "preprocessor: {}\n{}", message, stderr)
+                }
             }
         }
     }
@@ -931,6 +942,405 @@ fn parse_token_count(s: &str) -> TokenCount {
     } else {
         TokenCount::Symbolic(s.to_string())
     }
+}
+
+// ── PP Record Extraction ─────────────────────────────────────────────────────
+
+/// Scan actor headers via C++ preprocessor record extraction.
+///
+/// Builds a probe translation unit that redefines ACTOR() to emit
+/// PIPIT_REC_V1(...) records, pipes it through the preprocessor,
+/// and parses the output.
+///
+/// `cc` is the compiler command (e.g. "clang++").
+/// `include_headers` are the `-I`-sourced headers.
+/// `actor_path_headers` are the `--actor-path`-sourced headers.
+/// `extra_include_dirs` are additional `-I` directories for the preprocessor.
+pub fn scan_actors_pp(
+    cc: &str,
+    include_headers: &[PathBuf],
+    actor_path_headers: &[PathBuf],
+    extra_include_dirs: &[PathBuf],
+) -> Result<(Registry, Registry), RegistryError> {
+    let all_headers: Vec<&Path> = actor_path_headers
+        .iter()
+        .chain(include_headers.iter())
+        .map(|p| p.as_path())
+        .collect();
+
+    let probe_tu = build_probe_tu(&all_headers);
+    let pp_output = invoke_preprocessor(cc, &probe_tu, extra_include_dirs)?;
+    let records = parse_pp_records(&pp_output)?;
+
+    // Split records into two registries by source path
+    let mut include_registry = Registry::new();
+    let mut actor_path_registry = Registry::new();
+
+    for (meta, source_path) in records {
+        let source = PathBuf::from(&source_path);
+
+        // Determine which group this record belongs to
+        let is_actor_path = actor_path_headers.iter().any(|ap| {
+            // Match if the __FILE__ path ends with the same filename,
+            // or if the source path is under an actor-path directory
+            if let (Some(ap_name), Some(src_name)) = (ap.file_name(), source.file_name()) {
+                if ap_name == src_name {
+                    return true;
+                }
+            }
+            if let Some(ap_parent) = ap.parent() {
+                if let Ok(src_canonical) = std::fs::canonicalize(&source) {
+                    if let Ok(ap_canonical) = std::fs::canonicalize(ap_parent) {
+                        return src_canonical.starts_with(&ap_canonical);
+                    }
+                }
+            }
+            false
+        });
+
+        let registry = if is_actor_path {
+            &mut actor_path_registry
+        } else {
+            &mut include_registry
+        };
+
+        // Enforce same-group duplicate check
+        if let Some((_, first_path)) = registry.actors.get(&meta.name) {
+            return Err(RegistryError::DuplicateActor {
+                name: meta.name.clone(),
+                first: first_path.clone(),
+                second: source.clone(),
+            });
+        }
+        registry.actors.insert(meta.name.clone(), (meta, source));
+    }
+
+    Ok((include_registry, actor_path_registry))
+}
+
+/// Build the probe translation unit source text.
+fn build_probe_tu(headers: &[&Path]) -> String {
+    let mut tu = String::with_capacity(2048);
+
+    // 1. Include pipit.h to get type aliases and activate include guard
+    tu.push_str("#include \"pipit.h\"\n\n");
+
+    // 2. Undefine and redefine macros for record emission
+    tu.push_str("#undef ACTOR\n");
+    tu.push_str("#undef IN\n");
+    tu.push_str("#undef OUT\n");
+    tu.push_str("#undef PARAM\n");
+    tu.push_str("#undef RUNTIME_PARAM\n");
+    tu.push_str("#undef _PIPIT_FIRST\n\n");
+
+    // Self-referential macros: prevent expansion, preserve text
+    tu.push_str("#define IN(type, count) IN(type, count)\n");
+    tu.push_str("#define OUT(type, count) OUT(type, count)\n");
+    tu.push_str("#define PARAM(type, name) PARAM(type, name)\n");
+    tu.push_str("#define RUNTIME_PARAM(type, name) RUNTIME_PARAM(type, name)\n");
+    tu.push_str("#define _PIPIT_FIRST(a, ...) void\n\n");
+
+    // Record emission macro
+    tu.push_str("#define ACTOR(name, in_spec, out_spec, ...) \\\n");
+    tu.push_str(
+        "    PIPIT_REC_V1(__FILE__, __LINE__, #name, #in_spec, #out_spec, #__VA_ARGS__)\n\n",
+    );
+
+    // 3. Include all discovered actor headers
+    for header in headers {
+        // Use absolute paths to avoid include path ambiguity
+        let abs = if header.is_absolute() {
+            header.to_path_buf()
+        } else if let Ok(canonical) = std::fs::canonicalize(header) {
+            canonical
+        } else {
+            header.to_path_buf()
+        };
+        tu.push_str(&format!("#include \"{}\"\n", abs.display()));
+    }
+
+    tu
+}
+
+/// Invoke the C++ preprocessor and capture stdout.
+fn invoke_preprocessor(
+    cc: &str,
+    source: &str,
+    include_dirs: &[PathBuf],
+) -> Result<String, RegistryError> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut cmd = Command::new(cc);
+    cmd.arg("-E")
+        .arg("-P")
+        .arg("-x")
+        .arg("c++")
+        .arg("-std=c++20")
+        .arg("-");
+
+    // Auto-add runtime include paths
+    let runtime_include = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("runtime")
+        .join("libpipit")
+        .join("include");
+    if runtime_include.exists() {
+        cmd.arg("-I").arg(&runtime_include);
+        let third_party = runtime_include.join("third_party");
+        if third_party.exists() {
+            cmd.arg("-I").arg(&third_party);
+        }
+    }
+
+    for dir in include_dirs {
+        cmd.arg("-I").arg(dir);
+    }
+
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| RegistryError::PreprocessorError {
+        message: format!("failed to launch '{}': {}", cc, e),
+        stderr: String::new(),
+    })?;
+
+    // Write probe TU to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(source.as_bytes())
+            .map_err(|e| RegistryError::PreprocessorError {
+                message: format!("failed to write to preprocessor stdin: {}", e),
+                stderr: String::new(),
+            })?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| RegistryError::PreprocessorError {
+            message: format!("failed to wait for preprocessor: {}", e),
+            stderr: String::new(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(RegistryError::PreprocessorError {
+            message: format!(
+                "'{}' preprocessing failed (exit code: {})",
+                cc,
+                output.status.code().unwrap_or(-1)
+            ),
+            stderr,
+        });
+    }
+
+    String::from_utf8(output.stdout).map_err(|e| RegistryError::PreprocessorError {
+        message: format!("preprocessor output is not valid UTF-8: {}", e),
+        stderr: String::new(),
+    })
+}
+
+/// Parse all PIPIT_REC_V1(...) records from preprocessor output.
+/// Returns (ActorMeta, source_file_path) pairs.
+fn parse_pp_records(output: &str) -> Result<Vec<(ActorMeta, String)>, RegistryError> {
+    let mut results = Vec::new();
+    let marker = "PIPIT_REC_V1(";
+
+    let mut search_start = 0;
+    while let Some(rel_idx) = output[search_start..].find(marker) {
+        let abs_idx = search_start + rel_idx;
+
+        // Check for template<...> before this record
+        let text_before = &output[..abs_idx];
+        let type_params = extract_template_params(text_before);
+
+        // Find the matching closing paren (string-literal aware)
+        let paren_start = abs_idx + marker.len() - 1; // index of '('
+        let content_end = match find_balanced_paren_string_aware(output, paren_start) {
+            Some(end) => end,
+            None => {
+                return Err(RegistryError::ParseError {
+                    file: PathBuf::from("<pp-output>"),
+                    line: output[..abs_idx].lines().count(),
+                    message: "unbalanced parentheses in PIPIT_REC_V1()".to_string(),
+                });
+            }
+        };
+
+        let inner = &output[paren_start + 1..content_end];
+        let (file, line, name, in_spec, out_spec, params) =
+            parse_record_fields(inner, &output[..abs_idx])?;
+
+        let file_path = PathBuf::from(&file);
+        let (in_type, in_count, in_shape) =
+            parse_port_spec(&in_spec, "IN", &type_params, &file_path, line)?;
+        let (out_type, out_count, out_shape) =
+            parse_port_spec(&out_spec, "OUT", &type_params, &file_path, line)?;
+
+        let mut actor_params = Vec::new();
+        if !params.is_empty() {
+            let specs = split_param_specs(&params);
+            for spec in specs {
+                let param = parse_param_spec(spec, &type_params, &file_path, line)?;
+                actor_params.push(param);
+            }
+        }
+
+        results.push((
+            ActorMeta {
+                name,
+                type_params,
+                in_type,
+                in_count,
+                in_shape,
+                out_type,
+                out_count,
+                out_shape,
+                params: actor_params,
+            },
+            file,
+        ));
+
+        search_start = content_end + 1;
+    }
+
+    Ok(results)
+}
+
+/// Extract 6 fields from PIPIT_REC_V1 inner content.
+/// Fields: (file: String, line: u32, name: String, in_spec: String, out_spec: String, params: String)
+fn parse_record_fields(
+    inner: &str,
+    context_before: &str,
+) -> Result<(String, usize, String, String, String, String), RegistryError> {
+    let fields = split_record_fields(inner);
+    if fields.len() != 6 {
+        let line = context_before.lines().count();
+        return Err(RegistryError::ParseError {
+            file: PathBuf::from("<pp-output>"),
+            line,
+            message: format!("PIPIT_REC_V1 requires 6 fields, found {}", fields.len()),
+        });
+    }
+
+    let file = unescape_string_literal(fields[0].trim());
+    let line: usize = fields[1].trim().parse().unwrap_or(0);
+    let name = unescape_string_literal(fields[2].trim());
+    let in_spec = unescape_string_literal(fields[3].trim());
+    let out_spec = unescape_string_literal(fields[4].trim());
+    let params = unescape_string_literal(fields[5].trim());
+
+    Ok((file, line, name, in_spec, out_spec, params))
+}
+
+/// Split record fields by commas, respecting string literals and nested parens.
+fn split_record_fields(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let bytes = s.as_bytes();
+    let mut start = 0;
+    let mut depth_paren = 0i32;
+    let mut in_string = false;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if in_string {
+            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                i += 2; // skip escaped char
+                continue;
+            }
+            if bytes[i] == b'"' {
+                in_string = false;
+            }
+        } else {
+            match bytes[i] {
+                b'"' => in_string = true,
+                b'(' => depth_paren += 1,
+                b')' => depth_paren -= 1,
+                b',' if depth_paren == 0 => {
+                    parts.push(&s[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+
+    parts.push(&s[start..]);
+    parts
+}
+
+/// Find matching closing paren, aware of string literals.
+fn find_balanced_paren_string_aware(s: &str, start: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    if start >= bytes.len() || bytes[start] != b'(' {
+        return None;
+    }
+
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut i = start;
+
+    while i < bytes.len() {
+        if in_string {
+            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if bytes[i] == b'"' {
+                in_string = false;
+            }
+        } else {
+            match bytes[i] {
+                b'"' => in_string = true,
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+
+    None
+}
+
+/// Unescape a C string literal: remove surrounding quotes and handle escape sequences.
+fn unescape_string_literal(s: &str) -> String {
+    let s = s.trim();
+    let s = s.strip_prefix('"').unwrap_or(s);
+    let s = s.strip_suffix('"').unwrap_or(s);
+
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'n' => result.push('\n'),
+                b't' => result.push('\t'),
+                b'\\' => result.push('\\'),
+                b'"' => result.push('"'),
+                b'\'' => result.push('\''),
+                other => {
+                    result.push('\\');
+                    result.push(other as char);
+                }
+            }
+            i += 2;
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+
+    result
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

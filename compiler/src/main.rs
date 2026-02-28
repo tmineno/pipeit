@@ -591,7 +591,10 @@ fn discover_headers_recursive(
 
 fn map_registry_error(e: pcc::registry::RegistryError) -> (String, i32) {
     match e {
-        pcc::registry::RegistryError::IoError { .. } => (format!("{}", e), EXIT_SYSTEM_ERROR),
+        pcc::registry::RegistryError::IoError { .. }
+        | pcc::registry::RegistryError::PreprocessorError { .. } => {
+            (format!("{}", e), EXIT_SYSTEM_ERROR)
+        }
         pcc::registry::RegistryError::ParseError { .. }
         | pcc::registry::RegistryError::DuplicateActor { .. } => {
             (format!("{}", e), EXIT_COMPILE_ERROR)
