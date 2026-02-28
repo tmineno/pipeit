@@ -314,13 +314,20 @@ pub mod codes {
     pub const E0602: DiagCode = DiagCode("E0602"); // schedule verification failed
     pub const E0603: DiagCode = DiagCode("E0603"); // LIR verification failed
 
+    // ── Codegen (E0700-E0799, W0700-W0799) ──────────────────────────
+    pub const E0700: DiagCode = DiagCode("E0700"); // bind: unsupported transport
+    pub const E0701: DiagCode = DiagCode("E0701"); // bind: unsupported dtype for PPKT
+    pub const E0702: DiagCode = DiagCode("E0702"); // bind: unresolved endpoint argument
+    pub const W0700: DiagCode = DiagCode("W0700"); // bind: no endpoint address (placeholder)
+    pub const W0701: DiagCode = DiagCode("W0701"); // bind: dtype unresolved, no I/O adapter
+
     /// All assigned codes for uniqueness enforcement.
     pub const ALL_CODES: &[DiagCode] = &[
         E0001, E0002, E0003, E0004, E0005, E0006, E0007, E0008, E0009, E0010, E0011, E0012, E0013,
         E0014, E0015, E0016, E0017, E0018, E0019, E0020, E0021, E0022, E0023, E0024, E0025, W0001,
         W0002, E0100, E0101, E0102, E0200, E0201, E0202, E0203, E0204, E0205, E0206, E0300, E0301,
         E0302, E0303, E0304, E0305, E0306, E0307, E0308, E0309, E0310, E0311, E0312, W0300, E0400,
-        W0400, E0500, E0600, E0601, E0602, E0603,
+        W0400, E0500, E0600, E0601, E0602, E0603, E0700, E0701, E0702, W0700, W0701,
     ];
 }
 
@@ -429,6 +436,7 @@ mod tests {
         // 25 resolve errors + 2 resolve warnings
         // + 3 type_infer + 7 lower + 13 analyze errors + 1 analyze warning
         // + 1 schedule error + 1 schedule warning + 1 graph + 4 pipeline
-        assert_eq!(codes::ALL_CODES.len(), 58);
+        // + 3 codegen errors + 2 codegen warnings
+        assert_eq!(codes::ALL_CODES.len(), 63);
     }
 }

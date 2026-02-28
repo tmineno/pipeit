@@ -485,7 +485,7 @@ fn check_firing_actor(firing: &LirFiring) -> bool {
 
 // ── Display ─────────────────────────────────────────────────────────────────
 
-fn fmt_bind_value(v: &LirBindValue) -> String {
+pub(crate) fn fmt_bind_value(v: &LirBindValue) -> String {
     match v {
         LirBindValue::String(s) => format!("\"{}\"", s),
         LirBindValue::Int(n) => format!("{}", n),

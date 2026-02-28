@@ -372,6 +372,11 @@ fn example_file_feedback() {
     assert_pdl_file_compiles("feedback.pdl");
 }
 
+#[test]
+fn example_file_bind() {
+    assert_pdl_file_compiles("bind.pdl");
+}
+
 // ── -I with directory path ──────────────────────────────────────────────
 
 #[test]
@@ -1780,6 +1785,125 @@ fn release_no_probes_compiles() {
         &cxx,
         &cpp,
         "release_no_probes",
+        &runtime_include,
+        &project_root().join("examples"),
+    );
+}
+
+// ── Bind I/O integration compile tests ─────────────────────────────────────
+
+#[test]
+fn bind_out_compiles() {
+    let cxx = match find_cxx_compiler() {
+        Some(c) => c,
+        None => return,
+    };
+    let runtime_include = runtime_include_dir();
+    let cpp = generate_cpp_from_inline(
+        r#"bind iq = udp("127.0.0.1:9100", chan=10)
+clock 48kHz audio {
+    constant(0) -> iq
+}"#,
+        "bind_out",
+        &[&runtime_include],
+    );
+    assert!(
+        cpp.contains("BindIoAdapter"),
+        "bind OUT program should contain BindIoAdapter"
+    );
+    compile_cpp(
+        &cxx,
+        &cpp,
+        "bind_out",
+        &runtime_include,
+        &project_root().join("examples"),
+    );
+}
+
+#[test]
+fn bind_in_compiles() {
+    let cxx = match find_cxx_compiler() {
+        Some(c) => c,
+        None => return,
+    };
+    let runtime_include = runtime_include_dir();
+    let cpp = generate_cpp_from_inline(
+        r#"bind iq = udp("127.0.0.1:9100", chan=10)
+clock 48kHz audio {
+    @iq | binwrite("/dev/null")
+}"#,
+        "bind_in",
+        &[&runtime_include],
+    );
+    assert!(
+        cpp.contains("_bind_io_iq.recv("),
+        "bind IN program should contain recv() call"
+    );
+    compile_cpp(
+        &cxx,
+        &cpp,
+        "bind_in",
+        &runtime_include,
+        &project_root().join("examples"),
+    );
+}
+
+#[test]
+fn bind_mixed_with_socket_actors_compiles() {
+    let cxx = match find_cxx_compiler() {
+        Some(c) => c,
+        None => return,
+    };
+    let runtime_include = runtime_include_dir();
+    let cpp = generate_cpp_from_inline(
+        r#"bind iq = udp("127.0.0.1:9100", chan=10)
+clock 48kHz audio {
+    constant(0) -> iq
+}
+clock 1kHz net {
+    socket_read("127.0.0.1:9200") | stdout()
+}"#,
+        "bind_mixed_socket",
+        &[&runtime_include],
+    );
+    assert!(cpp.contains("BindIoAdapter"), "should have bind adapter");
+    assert!(
+        cpp.contains("Actor_socket_read"),
+        "should have socket_read actor"
+    );
+    compile_cpp(
+        &cxx,
+        &cpp,
+        "bind_mixed_socket",
+        &runtime_include,
+        &project_root().join("examples"),
+    );
+}
+
+#[test]
+fn no_bind_programs_unaffected() {
+    let cxx = match find_cxx_compiler() {
+        Some(c) => c,
+        None => return,
+    };
+    let runtime_include = runtime_include_dir();
+    let cpp = generate_cpp_from_inline(
+        "clock 1kHz t { constant(0.0) | stdout() }",
+        "no_bind",
+        &[&runtime_include],
+    );
+    assert!(
+        !cpp.contains("BindIoAdapter"),
+        "programs without binds should not reference BindIoAdapter"
+    );
+    assert!(
+        !cpp.contains("#include <pipit_bind_io.h>"),
+        "programs without binds should not include pipit_bind_io.h"
+    );
+    compile_cpp(
+        &cxx,
+        &cpp,
+        "no_bind",
         &runtime_include,
         &project_root().join("examples"),
     );
