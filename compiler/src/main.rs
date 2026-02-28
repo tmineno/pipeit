@@ -114,7 +114,7 @@ struct Cli {
     release: bool,
 
     /// C++ compiler command
-    #[arg(long, default_value = "clang++")]
+    #[arg(long, default_value = "g++")]
     cc: String,
 
     /// Additional C++ compiler flags (overrides default optimization flags)
