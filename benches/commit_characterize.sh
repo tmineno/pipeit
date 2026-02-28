@@ -314,14 +314,14 @@ compile_cmd=(
     cargo bench
     --manifest-path "$PROJECT_ROOT/compiler/Cargo.toml"
     --bench compiler_bench
-    -- kpi/full_compile_latency
+    -- "kpi/(full_compile_latency|phase_latency/(build_thir_context|build_lir|emit_cpp))"
     --sample-size "$COMPILE_SAMPLE_SIZE"
     --measurement-time "$COMPILE_MEASUREMENT_TIME"
     --warm-up-time "$COMPILE_WARMUP_TIME"
     --output-format bencher
 )
 runtime_cmd_display="benches/run_all.sh --filter ringbuf --filter timer --filter thread --filter e2e --output-dir ${RUNTIME_OUT_DIR_REL}"
-compile_cmd_display="cargo bench --manifest-path compiler/Cargo.toml --bench compiler_bench -- kpi/full_compile_latency --sample-size ${COMPILE_SAMPLE_SIZE} --measurement-time ${COMPILE_MEASUREMENT_TIME} --warm-up-time ${COMPILE_WARMUP_TIME} --output-format bencher"
+compile_cmd_display="cargo bench --manifest-path compiler/Cargo.toml --bench compiler_bench -- 'kpi/(full_compile_latency|phase_latency/(build_thir_context|build_lir|emit_cpp))' --sample-size ${COMPILE_SAMPLE_SIZE} --measurement-time ${COMPILE_MEASUREMENT_TIME} --warm-up-time ${COMPILE_WARMUP_TIME} --output-format bencher"
 
 log "report id: $COMMIT_ID (source=$ID_SOURCE)"
 log "running runtime/e2e benchmarks..."
@@ -356,12 +356,24 @@ declare -A compile_ns=(
     [modal]="NA"
 )
 
+declare -A phase_latency_ns=(
+    [build_thir_context]="NA"
+    [build_lir]="NA"
+    [emit_cpp]="NA"
+)
+
 if [ -f "$COMPILE_LOG" ]; then
     while read -r scenario ns; do
         if [[ -n "${compile_ns[$scenario]+x}" ]]; then
             compile_ns["$scenario"]="$ns"
         fi
     done < <(sed -nE 's/^test kpi\/full_compile_latency\/([^ ]+) .* bench:[[:space:]]*([0-9]+) ns\/iter.*/\1 \2/p' "$COMPILE_LOG")
+    # Extract decomposed phase latency (complex scenario)
+    while read -r phase ns; do
+        if [[ -n "${phase_latency_ns[$phase]+x}" ]]; then
+            phase_latency_ns["$phase"]="$ns"
+        fi
+    done < <(sed -nE 's/^test kpi\/phase_latency\/([^/]+)\/complex .* bench:[[:space:]]*([0-9]+) ns\/iter.*/\1 \2/p' "$COMPILE_LOG")
 fi
 
 socket_error_count="NA"
@@ -396,6 +408,10 @@ add_metric "compile.full.complex_ns_per_iter" "${compile_ns[complex]}" "ns/iter"
 add_metric "compile.full.modal_ns_per_iter" "${compile_ns[modal]}" "ns/iter"
 add_metric "compile.full.wall_ms" "$compile_wall_ms" "ms"
 add_metric "compile.full.timed_out" "$compile_timed_out" "bool(0/1)"
+
+add_metric "compile.phase.build_thir_context_ns_per_iter" "${phase_latency_ns[build_thir_context]}" "ns/iter"
+add_metric "compile.phase.build_lir_ns_per_iter" "${phase_latency_ns[build_lir]}" "ns/iter"
+add_metric "compile.phase.emit_cpp_ns_per_iter" "${phase_latency_ns[emit_cpp]}" "ns/iter"
 
 add_metric "runtime.thread.deadline_1khz_miss_rate_pct" \
     "$(json_value "$thread_json" "BM_TaskDeadline/1000/2000/iterations:1/manual_time" "miss_rate_pct")" \
@@ -518,6 +534,21 @@ fi
         cur="${metric_values[$key]}"
         prev="${prev_values[$key]:-}"
         echo "| $scenario | $(format_si "$cur") | $(metric_delta "$cur" "$prev") |"
+    done
+    echo ""
+    echo "## Phase Latency (complex scenario)"
+    echo ""
+    echo "| Phase | ns/iter | Delta vs prev |"
+    echo "|---|---:|---:|"
+    for item in \
+        "build_thir_context|compile.phase.build_thir_context_ns_per_iter" \
+        "build_lir|compile.phase.build_lir_ns_per_iter" \
+        "emit_cpp|compile.phase.emit_cpp_ns_per_iter"; do
+        label="${item%%|*}"
+        key="${item##*|}"
+        cur="${metric_values[$key]}"
+        prev="${prev_values[$key]:-}"
+        echo "| $label | $(format_si "$cur") | $(metric_delta "$cur" "$prev") |"
     done
     echo ""
     echo "## Runtime Deadline Miss Rate"

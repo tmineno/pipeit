@@ -23,6 +23,92 @@
 
 ---
 
+## v0.4.5 - Compiler Latency Refactoring
+
+**Goal**: Reduce compiler phase latency (especially `analyze` + codegen path) to the ~8000 ns/iter order with benchmark-locked refactors.
+
+> **Reference**: review note `agent-review/pipeit-refactor/2026-02-28-codegen-analyze-latency-strategy.md`
+
+### Benchmark Decomposition (measurement first)
+
+- [x] Split `kpi/phase_latency/codegen` into explicit buckets: `build_thir_context`, `build_lir`, `emit_cpp` (`codegen_from_lir` only)
+- [x] Keep legacy `kpi/phase_latency/codegen` temporarily for trend continuity during migration
+- [x] Add per-bucket `complex` scenario reporting to commit characterization notes
+
+### Findings Snapshot (2026-02-28 decomposition run)
+
+- [x] `build_lir` measured correctly (benchmark excluded THIR): **6,555 ns/iter** (target `<= 10,000` — **PASS**)
+- [x] `emit_cpp` gate already passes: `7,633 ns/iter` (target `<= 9,000`)
+- [ ] `analyze` gate not met yet: `9,791 ns/iter` (target `<= 8,500`; stable 3× median)
+- [ ] Reconcile latest `full_compile` complex regression signal before declaring gate pass/fail (`tmp/bench_full_compile.txt`)
+
+### Measurement & Report Hygiene (required for trustworthy tuning)
+
+- [ ] Fix scenario label consistency (`complex` vs `multitask`) in benchmark summary tables
+- [ ] Standardize gate decisions on stable 3× median runs (same CPU pinning + Criterion settings)
+- [ ] Treat benchmark-definition changes (e.g., THIR excluded from `build_lir`) as separate from algorithmic speedups in reports
+- [ ] Add one canonical verification command set to each performance report
+
+### Analyze Refactoring & Optimization
+
+- [x] Replace O(N) cycle guards (`Vec::contains`) in trace helpers with O(1) visited tracking
+- [ ] Introduce reusable per-actor symbolic-dimension lookup plans (shared by span-derived and conflict checks)
+- [ ] Merge repeated per-node passes (`record_span_derived_dims` + unresolved-dim checks + source-conflict checks) into one subgraph traversal
+- [ ] Remove `subgraphs_of()` Vec allocation churn in analyze hot paths (use non-alloc traversal helper)
+- [ ] Cache per-actor dim metadata (symbol list / param index / shape index) and reuse across all nodes
+- [x] Reduce temporary allocation churn in shape conflict checks (nested `span_derived_dims` eliminates `sym.clone()`; removed `.cloned()` in conflict checks)
+- [x] Eliminate redundant end-of-pass graph walks where data can be collected during existing traversals (precomputed `node_port_rates`)
+
+### LIR/Codegen Refactoring & Optimization
+
+#### `build_lir` priority actions (dominant bottleneck)
+
+- [x] Eliminate duplicated edge buffer/name construction passes; build one subgraph edge context and reuse (`build_edge_buffers_and_names`)
+- [x] Cache per-subgraph incoming/outgoing edge adjacency and node repetition lookups (`EdgeAdjacency` struct, precomputed `firing_reps` HashMap)
+- [x] Reduce string/HashMap key churn in dim override resolution (nested `span_derived_dims`, eliminated `.to_string()` in lookups)
+- [x] Precompute shared-buffer reader metadata once per buffer (`buffer_readers` cache in `LirBuilder`)
+- [x] Fix `build_lir` benchmark to exclude THIR rebuild from measured closure (was measuring THIR+LIR)
+- [ ] Cache dim-resolution decisions per actor node to avoid repeated shape/span/schedule lookups in `resolve_missing_param_value` and schedule overrides
+- [ ] Memoize inferred wire type during subgraph edge-buffer construction to avoid repeated trace walks
+- [ ] Reduce transient `String`/`HashMap` churn in schedule-dim override construction for empty/single-symbol cases
+
+#### `emit_cpp` follow-up (already below gate, keep improving)
+
+- [x] Precompute hoisted actor lookup maps; remove repeated `format!` + linear `.find()` lookups in firing loops (`task_index` HashMap, `strip_prefix` in fused chain)
+- [x] Reduce repeated indent/call-expression string construction in hot emission paths (`indent_plus4()`)
+- [x] Reduce multi-input temporary allocation churn in `build_lir_input_ptr` and related emit helpers (inline iteration, `Cow<str>`)
+- [x] Improve `cpp_source` output buffer sizing heuristic (dynamic `2048 + tasks * 200`)
+
+### Compilation Parallelization (measurement-driven, deterministic output)
+
+- [ ] Add `--compile-jobs N` (or env equivalent) with default `1`; keep single-thread path as baseline/reference
+- [ ] Add benchmark matrix for compile parallel scaling (`N=1,2,4`) on `multitask`, `complex`, `modal`
+- [ ] Parallelize per-task/subgraph work where dependencies are independent:
+- [ ] `analyze`: run task-local checks/inference in parallel, then deterministic merge of diagnostics/results
+- [ ] `schedule`: parallelize per-task schedule construction with stable reduction order
+- [ ] `build_lir`: parallelize per-task LIR construction, then stable task ordering in final IR
+- [ ] `emit_cpp`: parallelize task-level code emission, then deterministic concatenation
+- [ ] Enforce determinism guardrails: stable sort before merge, deterministic diagnostic order, byte-identical generated C++ across repeated runs
+- [ ] Avoid lock-heavy shared mutation in hot paths (prefer thread-local accumulation + final reduce)
+- [ ] Add compatibility fallback: auto-disable parallel path for tiny programs where overhead exceeds benefit
+
+### Acceptance Gates (must pass before close)
+
+- [x] `kpi/phase_latency/build_lir/complex <= 10k ns/iter` (current: **6,555** — **PASS**, 3× median stable)
+- [ ] `kpi/phase_latency/analyze/complex <= 8.5k ns/iter` (current: **9,791** — MISS, deferred; `node_actor_meta` precomputation tested+reverted)
+- [x] `kpi/phase_latency/emit_cpp/complex <= 9.0k ns/iter` (current: **7,633** — PASS)
+- [ ] `kpi/full_compile_latency/{complex,modal}` no regression (reconfirm after scenario-label cleanup + stable 3× median rerun)
+- [x] Stable 3× median runs recorded in `tmp/build-lir-benchmark-fix/report.md`
+- [ ] Parallel compile speedup gate (opt-in `--compile-jobs`): `multitask`/`modal` full-compile latency improves vs `jobs=1` with no correctness/determinism regressions
+
+### Verification Commands (v0.4.5 performance work)
+
+- [ ] `./benches/compiler_bench_stable.sh --filter 'kpi/phase_latency/(analyze|build_lir|emit_cpp)/complex' --sample-size 40 --measurement-time 1.0 --warm-up-time 0.2`
+- [ ] `./benches/compiler_bench_stable.sh --filter 'kpi/full_compile_latency/(complex|modal)' --sample-size 40 --measurement-time 1.0 --warm-up-time 0.2`
+- [ ] `for n in 1 2 4; do PIPIT_COMPILE_JOBS=$n ./benches/compiler_bench_stable.sh --filter 'kpi/full_compile_latency/(multitask|modal)' --sample-size 30 --measurement-time 0.8 --warm-up-time 0.2; done`
+
+---
+
 ## v0.5.x - Ecosystem & Quality of Life
 
 **Goal**: Make Pipit easier to use and deploy in real projects.

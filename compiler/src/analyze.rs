@@ -55,11 +55,11 @@ pub struct AnalyzedProgram {
     /// For actors with unresolved SHAPE dims, this stores the shapes inferred
     /// from connected edges. NodeId → inferred ShapeConstraint.
     pub inferred_shapes: HashMap<NodeId, ShapeConstraint>,
-    /// Span-derived dimension parameters: (NodeId, param_name) → value.
+    /// Span-derived dimension parameters: NodeId → (param_name → value).
     /// For actors where a symbolic dimension param was inferred from a span
     /// argument length (e.g., `fir(coeff)` with `coeff=[...5 elems...]` → N=5).
     /// Authoritative: takes precedence over SDF edge-derived fallbacks in codegen.
-    pub span_derived_dims: HashMap<(NodeId, String), u32>,
+    pub span_derived_dims: HashMap<NodeId, HashMap<String, u32>>,
     /// Concrete input/output port rates per node, resolved once in analysis.
     /// `None` means the corresponding side could not be resolved statically.
     pub node_port_rates: HashMap<NodeId, NodePortRates>,
@@ -82,6 +82,7 @@ pub fn analyze(thir: &ThirContext, graph: &ProgramGraph) -> AnalysisResult {
     ctx.infer_shapes_from_edges();
     ctx.check_shape_constraints();
     ctx.check_dimension_param_order();
+    ctx.precompute_node_port_rates();
     ctx.solve_balance_equations();
     ctx.check_feedback_delays();
     ctx.check_cross_clock_rates();
@@ -102,11 +103,12 @@ struct AnalyzeCtx<'a> {
     inter_buffers: HashMap<String, u64>,
     total_memory: u64,
     inferred_shapes: HashMap<NodeId, ShapeConstraint>,
-    span_derived_dims: HashMap<(NodeId, String), u32>,
+    span_derived_dims: HashMap<NodeId, HashMap<String, u32>>,
     subgraph_indices: HashMap<usize, SubgraphIndex>,
     subgraph_refs: HashMap<usize, &'a Subgraph>,
     global_node_index: HashMap<NodeId, (usize, usize)>,
     rv_by_task: HashMap<String, HashMap<NodeId, u32>>,
+    node_port_rates: HashMap<NodeId, NodePortRates>,
 }
 
 struct BalanceGraph {
@@ -186,6 +188,7 @@ impl<'a> AnalyzeCtx<'a> {
             subgraph_refs,
             global_node_index,
             rv_by_task: HashMap::new(),
+            node_port_rates: HashMap::new(),
         }
     }
 
@@ -211,7 +214,6 @@ impl<'a> AnalyzeCtx<'a> {
     }
 
     fn build_result(self) -> AnalysisResult {
-        let node_port_rates = self.compute_node_port_rates();
         AnalysisResult {
             analysis: AnalyzedProgram {
                 repetition_vectors: self.repetition_vectors,
@@ -219,18 +221,19 @@ impl<'a> AnalyzeCtx<'a> {
                 total_memory: self.total_memory,
                 inferred_shapes: self.inferred_shapes,
                 span_derived_dims: self.span_derived_dims,
-                node_port_rates,
+                node_port_rates: self.node_port_rates,
             },
             diagnostics: self.diagnostics,
         }
     }
 
-    fn compute_node_port_rates(&self) -> HashMap<NodeId, NodePortRates> {
-        let mut rates = HashMap::new();
+    /// Precompute port rates for all nodes once, after shape inference.
+    /// Reused by balance equation solving and exported in the final result.
+    fn precompute_node_port_rates(&mut self) {
         for task_graph in self.graph.tasks.values() {
             for sub in subgraphs_of(task_graph) {
                 for node in &sub.nodes {
-                    rates.insert(
+                    self.node_port_rates.insert(
                         node.id,
                         NodePortRates {
                             in_rate: self.consumption_rate(node),
@@ -240,7 +243,22 @@ impl<'a> AnalyzeCtx<'a> {
                 }
             }
         }
-        rates
+    }
+
+    /// Look up cached production rate. Falls back to live computation.
+    fn cached_production_rate(&self, node: &Node) -> Option<u32> {
+        self.node_port_rates
+            .get(&node.id)
+            .and_then(|r| r.out_rate)
+            .or_else(|| self.production_rate(node))
+    }
+
+    /// Look up cached consumption rate. Falls back to live computation.
+    fn cached_consumption_rate(&self, node: &Node) -> Option<u32> {
+        self.node_port_rates
+            .get(&node.id)
+            .and_then(|r| r.in_rate)
+            .or_else(|| self.consumption_rate(node))
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────
@@ -312,12 +330,11 @@ impl<'a> AnalyzeCtx<'a> {
     /// the nearest upstream Actor.
     fn trace_type_backward(&self, node_id: NodeId, sub: &Subgraph) -> Option<PipitType> {
         let mut current = node_id;
-        let mut visited = Vec::new();
+        let mut visited = HashSet::new();
         loop {
-            if visited.contains(&current) {
+            if !visited.insert(current) {
                 return None; // cycle guard
             }
-            visited.push(current);
             let node = self.node_in_subgraph(sub, current)?;
             if let NodeKind::Actor { name, .. } = &node.kind {
                 return self.actor_meta(name).and_then(|m| m.out_type.as_concrete());
@@ -634,7 +651,12 @@ impl<'a> AnalyzeCtx<'a> {
                         .and_then(|sc| sc.dims.get(dim_idx))
                         .and_then(|sd| self.resolve_shape_dim(sd))
                 })
-                .or_else(|| self.span_derived_dims.get(&(node_id, sym.clone())).copied())
+                .or_else(|| {
+                    self.span_derived_dims
+                        .get(&node_id)
+                        .and_then(|m| m.get(sym.as_str()))
+                        .copied()
+                })
                 .or_else(|| {
                     existing_inferred_sc
                         .and_then(|sc| sc.dims.get(dim_idx))
@@ -836,12 +858,11 @@ impl<'a> AnalyzeCtx<'a> {
     /// Trace backward from a passthrough node to find resolved output shape dims.
     fn trace_shape_backward(&self, node_id: NodeId, sub: &Subgraph) -> Option<Vec<u32>> {
         let mut current = node_id;
-        let mut visited = Vec::new();
+        let mut visited = HashSet::new();
         loop {
-            if visited.contains(&current) {
+            if !visited.insert(current) {
                 return None;
             }
-            visited.push(current);
             let node = self.node_in_subgraph(sub, current)?;
             if let NodeKind::Actor { .. } = &node.kind {
                 return self.resolve_output_shape_dims(node, sub);
@@ -857,12 +878,11 @@ impl<'a> AnalyzeCtx<'a> {
     /// Trace forward from a passthrough node to find resolved input shape dims.
     fn trace_shape_forward(&self, node_id: NodeId, sub: &Subgraph) -> Option<Vec<u32>> {
         let mut current = node_id;
-        let mut visited = Vec::new();
+        let mut visited = HashSet::new();
         loop {
-            if visited.contains(&current) {
+            if !visited.insert(current) {
                 return None;
             }
-            visited.push(current);
             let node = self.node_in_subgraph(sub, current)?;
             if let NodeKind::Actor { .. } = &node.kind {
                 return self.resolve_input_shape_dims(node, sub);
@@ -967,7 +987,10 @@ impl<'a> AnalyzeCtx<'a> {
             }
         }
         for (node_id, sym, val) in entries {
-            self.span_derived_dims.insert((node_id, sym), val);
+            self.span_derived_dims
+                .entry(node_id)
+                .or_default()
+                .insert(sym, val);
         }
     }
 
@@ -1159,8 +1182,8 @@ impl<'a> AnalyzeCtx<'a> {
         let mut conflicts = Vec::new();
         for node in &sub.nodes {
             if let NodeKind::Actor { name, .. } = &node.kind {
-                if let Some(inferred_sc) = self.inferred_shapes.get(&node.id).cloned() {
-                    if let Some(meta) = self.actor_meta(name).cloned() {
+                if let Some(inferred_sc) = self.inferred_shapes.get(&node.id) {
+                    if let Some(meta) = self.actor_meta(name) {
                         // Check in_shape dims
                         for (i, dim) in meta.in_shape.dims.iter().enumerate() {
                             self.check_span_vs_inferred_dim(
@@ -1168,7 +1191,7 @@ impl<'a> AnalyzeCtx<'a> {
                                 name,
                                 dim,
                                 i,
-                                &inferred_sc,
+                                inferred_sc,
                                 &mut conflicts,
                             );
                         }
@@ -1179,7 +1202,7 @@ impl<'a> AnalyzeCtx<'a> {
                                 name,
                                 dim,
                                 i,
-                                &inferred_sc,
+                                inferred_sc,
                                 &mut conflicts,
                             );
                         }
@@ -1202,7 +1225,11 @@ impl<'a> AnalyzeCtx<'a> {
         conflicts: &mut Vec<(Span, String)>,
     ) {
         if let TokenCount::Symbolic(sym) = dim {
-            if let Some(&span_val) = self.span_derived_dims.get(&(node.id, sym.clone())) {
+            if let Some(&span_val) = self
+                .span_derived_dims
+                .get(&node.id)
+                .and_then(|m| m.get(sym.as_str()))
+            {
                 if let Some(inferred_val) = inferred_sc
                     .dims
                     .get(dim_idx)
@@ -1296,15 +1323,15 @@ impl<'a> AnalyzeCtx<'a> {
                         .collect::<Vec<_>>()
                         .join(", ");
                     self.warning_with_hint(
-                        codes::W0300,
-                        node.span,
-                        format!(
-                            "actor '{}' declares inferred dimension PARAM(s) [{}] before non-dimension parameters",
-                            actor_name, dim_names
-                        ),
-                        "move inferred dimension PARAM(int, ...) to the end of ACTOR(...) parameters"
-                            .to_string(),
-                    );
+                    codes::W0300,
+                    node.span,
+                    format!(
+                        "actor '{}' declares inferred dimension PARAM(s) [{}] before non-dimension parameters",
+                        actor_name, dim_names
+                    ),
+                    "move inferred dimension PARAM(int, ...) to the end of ACTOR(...) parameters"
+                        .to_string(),
+                );
                 }
             }
         }
@@ -1335,20 +1362,14 @@ impl<'a> AnalyzeCtx<'a> {
     // ── Phase 1: Type checking ──────────────────────────────────────────
 
     fn check_types(&mut self) {
-        for (task_name, task_graph) in &self.graph.tasks {
-            match task_graph {
-                TaskGraph::Pipeline(sub) => self.check_types_in_subgraph(task_name, sub),
-                TaskGraph::Modal { control, modes } => {
-                    self.check_types_in_subgraph(task_name, control);
-                    for (_, sub) in modes {
-                        self.check_types_in_subgraph(task_name, sub);
-                    }
-                }
+        for task_graph in self.graph.tasks.values() {
+            for sub in subgraphs_of(task_graph) {
+                self.check_types_in_subgraph(sub);
             }
         }
     }
 
-    fn check_types_in_subgraph(&mut self, _task_name: &str, sub: &Subgraph) {
+    fn check_types_in_subgraph(&mut self, sub: &Subgraph) {
         for edge in &sub.edges {
             let src_node = match self.node_in_subgraph(sub, edge.source) {
                 Some(n) => n,
@@ -1455,8 +1476,8 @@ impl<'a> AnalyzeCtx<'a> {
                 continue;
             };
 
-            let p = self.production_rate(src).unwrap_or(1);
-            let total_c = self.consumption_rate(tgt).unwrap_or(1);
+            let p = self.cached_production_rate(src).unwrap_or(1);
+            let total_c = self.cached_consumption_rate(tgt).unwrap_or(1);
             let num_in = incoming_count.get(&edge.target).copied().unwrap_or(1);
             let c = if num_in > 1 {
                 total_c / num_in
@@ -3031,7 +3052,8 @@ ACTOR(float_src, IN(void, 0), OUT(float, 1), PARAM(float, value)) {
         let n_val = result
             .analysis
             .span_derived_dims
-            .get(&(fir_id, "N".to_string()));
+            .get(&fir_id)
+            .and_then(|m| m.get("N"));
         assert_eq!(
             n_val,
             Some(&5),
@@ -3060,7 +3082,9 @@ ACTOR(float_src, IN(void, 0), OUT(float, 1), PARAM(float, value)) {
             !result
                 .analysis
                 .span_derived_dims
-                .contains_key(&(fir_id, "N".to_string())),
+                .get(&fir_id)
+                .map(|m| m.contains_key("N"))
+                .unwrap_or(false),
             "N should not be in span_derived_dims when provided explicitly"
         );
     }
@@ -3105,7 +3129,8 @@ ACTOR(float_src, IN(void, 0), OUT(float, 1), PARAM(float, value)) {
             result
                 .analysis
                 .span_derived_dims
-                .get(&(fir_id, "N".to_string())),
+                .get(&fir_id)
+                .and_then(|m| m.get("N")),
             Some(&5),
             "fir(coeff) N should be 5, not overridden by edge inference"
         );
@@ -3160,7 +3185,8 @@ ACTOR(float_src, IN(void, 0), OUT(float, 1), PARAM(float, value)) {
             result
                 .analysis
                 .span_derived_dims
-                .get(&(mix_id, "H".to_string())),
+                .get(&mix_id)
+                .and_then(|m| m.get("H")),
             Some(&5),
             "H should be span-derived from coeff length"
         );
