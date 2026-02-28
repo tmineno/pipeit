@@ -18,11 +18,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use chumsky::span::Span as _;
 
+use sha2::{Digest, Sha256};
+
 use crate::ast::*;
 use crate::diag::codes;
 use crate::diag::{DiagCode, DiagLevel, Diagnostic};
 use crate::graph::*;
 use crate::hir::{HirSwitchSource, HirTaskBody};
+use crate::id::CallId;
 use crate::registry::{ActorMeta, ParamKind, ParamType, PipitType, PortShape, TokenCount};
 use crate::subgraph_index::{
     build_global_node_index, build_subgraph_indices, find_node, subgraph_key, subgraphs_of,
@@ -63,6 +66,8 @@ pub struct AnalyzedProgram {
     /// Concrete input/output port rates per node, resolved once in analysis.
     /// `None` means the corresponding side could not be resolved statically.
     pub node_port_rates: HashMap<NodeId, NodePortRates>,
+    /// Bind contracts inferred from graph analysis (§5.5).
+    pub bind_contracts: HashMap<String, BindContract>,
 }
 
 /// Concrete input/output token rates for a node.
@@ -70,6 +75,18 @@ pub struct AnalyzedProgram {
 pub struct NodePortRates {
     pub in_rate: Option<u32>,
     pub out_rate: Option<u32>,
+}
+
+/// Inferred bind contract: direction, data type, shape, rate, and stable ID.
+#[derive(Debug, Clone)]
+pub struct BindContract {
+    pub direction: BindDirection,
+    pub dtype: Option<PipitType>,
+    pub shape: Vec<u32>,
+    pub rate_hz: Option<f64>,
+    /// Deterministic ID from graph lineage (§5.5.3). 16-char hex string derived
+    /// from SHA-256 of (direction, adjacent actor CallIds, transport).
+    pub stable_id: String,
 }
 
 // ── Public entry point ──────────────────────────────────────────────────────
@@ -86,6 +103,7 @@ pub fn analyze(thir: &ThirContext, graph: &ProgramGraph) -> AnalysisResult {
     ctx.check_feedback_delays();
     ctx.check_cross_clock_rates();
     ctx.compute_buffer_sizes();
+    ctx.infer_bind_contracts();
     ctx.check_memory_pool();
     ctx.check_param_types();
     ctx.check_ctrl_types();
@@ -107,6 +125,7 @@ struct AnalyzeCtx<'a> {
     subgraph_refs: HashMap<usize, &'a Subgraph>,
     global_node_index: HashMap<NodeId, (usize, usize)>,
     rv_by_task: HashMap<String, HashMap<NodeId, u32>>,
+    bind_contracts: HashMap<String, BindContract>,
 }
 
 struct BalanceGraph {
@@ -186,6 +205,7 @@ impl<'a> AnalyzeCtx<'a> {
             subgraph_refs,
             global_node_index,
             rv_by_task: HashMap::new(),
+            bind_contracts: HashMap::new(),
         }
     }
 
@@ -220,6 +240,7 @@ impl<'a> AnalyzeCtx<'a> {
                 inferred_shapes: self.inferred_shapes,
                 span_derived_dims: self.span_derived_dims,
                 node_port_rates,
+                bind_contracts: self.bind_contracts,
             },
             diagnostics: self.diagnostics,
         }
@@ -1717,6 +1738,399 @@ impl<'a> AnalyzeCtx<'a> {
             .copied()
     }
 
+    // ── Bind contract inference (§5.5) ──────────────────────────────────
+    //
+    // Infers direction (in/out) and data contract (dtype/shape/rate) for each
+    // bind declaration by scanning the post-expansion graph. Runs after
+    // solve_balance_equations() so repetition vectors are available.
+
+    fn infer_bind_contracts(&mut self) {
+        let bind_names: Vec<String> = self.thir.binds().iter().map(|b| b.name.clone()).collect();
+
+        for bind_name in &bind_names {
+            let has_writer = self.graph_has_buffer_node(bind_name, true);
+            let has_reader = self.graph_has_buffer_node(bind_name, false);
+
+            let direction = if has_writer {
+                // Spec §5.5.1 first-match rule: -> name exists → Out
+                // (regardless of whether @name also exists)
+                BindDirection::Out
+            } else if has_reader {
+                BindDirection::In
+            } else {
+                let span = self
+                    .thir
+                    .bind_info(bind_name)
+                    .map(|b| b.name_span)
+                    .unwrap_or(Span::new((), 0..0));
+                self.error(
+                    codes::E0311,
+                    span,
+                    format!(
+                        "bind '{}' is not referenced by any pipe \
+                         (expected @{0} or -> {0})",
+                        bind_name
+                    ),
+                );
+                continue;
+            };
+
+            let mut contract = match direction {
+                BindDirection::Out => self.infer_out_bind_contract(bind_name),
+                BindDirection::In => self.infer_in_bind_contract(bind_name),
+            };
+
+            // Compute stable_id from graph lineage (§5.5.3).
+            let transport = self
+                .thir
+                .bind_info(bind_name)
+                .map(|b| b.endpoint.transport.name.as_str())
+                .unwrap_or("");
+            let call_ids = self.collect_bind_call_ids(bind_name, direction);
+            contract.stable_id = compute_stable_id(direction, &call_ids, transport);
+
+            self.bind_contracts.insert(bind_name.clone(), contract);
+        }
+    }
+
+    /// Check whether the post-expansion graph contains a BufferWrite or
+    /// BufferRead node matching the given buffer name.
+    fn graph_has_buffer_node(&self, buffer_name: &str, is_write: bool) -> bool {
+        for task_graph in self.graph.tasks.values() {
+            for sub in subgraphs_of(task_graph) {
+                for node in &sub.nodes {
+                    match (&node.kind, is_write) {
+                        (NodeKind::BufferWrite { buffer_name: n }, true) if n == buffer_name => {
+                            return true
+                        }
+                        (NodeKind::BufferRead { buffer_name: n }, false) if n == buffer_name => {
+                            return true
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Collect the adjacent actor CallIds for a bind from the graph.
+    ///
+    /// For OUT binds: searches all task subgraphs for BufferWrite nodes matching
+    /// the bind name, then walks predecessors to the upstream actor.
+    ///
+    /// For IN binds: searches all task subgraphs for BufferRead nodes matching
+    /// the bind name, then walks successors to the downstream actors.
+    ///
+    /// Note: We search subgraphs directly rather than using InterTaskEdge because
+    /// bind-backed buffers may not have inter-task edges (e.g., OUT binds with
+    /// no internal reader, IN binds with no internal writer).
+    fn collect_bind_call_ids(&self, bind_name: &str, direction: BindDirection) -> Vec<CallId> {
+        let mut call_ids = Vec::new();
+        let is_write = direction == BindDirection::Out;
+
+        // Sorted iteration for deterministic ordering.
+        let mut task_names: Vec<&String> = self.graph.tasks.keys().collect();
+        task_names.sort();
+
+        for task_name in task_names {
+            let task_graph = &self.graph.tasks[task_name];
+            for sub in subgraphs_of(task_graph) {
+                for node in &sub.nodes {
+                    let matches = match (&node.kind, is_write) {
+                        (NodeKind::BufferWrite { buffer_name: n }, true) => n == bind_name,
+                        (NodeKind::BufferRead { buffer_name: n }, false) => n == bind_name,
+                        _ => false,
+                    };
+                    if matches {
+                        // walk_predecessors for BufferWrite (find upstream actor),
+                        // walk_successors for BufferRead (find downstream actor).
+                        if let Some(cid) = adjacent_actor_call_id(task_graph, node.id, is_write) {
+                            call_ids.push(cid);
+                        }
+                    }
+                }
+            }
+        }
+
+        if !is_write {
+            call_ids.sort(); // sorted for deterministic hashing (IN may have multiple readers)
+        }
+        call_ids
+    }
+
+    /// Infer contract for an OUT bind (pipeline writes, external reads).
+    fn infer_out_bind_contract(&self, bind_name: &str) -> BindContract {
+        let dtype = self.infer_bind_type_from_writer(bind_name);
+        let shape = self.infer_bind_shape_from_writer(bind_name);
+        let rate_hz = self.infer_bind_rate_from_writer(bind_name);
+
+        BindContract {
+            direction: BindDirection::Out,
+            dtype,
+            shape: shape.unwrap_or_default(),
+            rate_hz,
+            stable_id: String::new(), // filled by infer_bind_contracts after CallId extraction
+        }
+    }
+
+    /// Trace backward from BufferWrite to the nearest Actor, using
+    /// concrete_actor (lowered → registry) for polymorphic type resolution.
+    fn trace_type_backward_concrete(&self, node_id: NodeId, sub: &Subgraph) -> Option<PipitType> {
+        let mut current = node_id;
+        let mut visited = Vec::new();
+        loop {
+            if visited.contains(&current) {
+                return None;
+            }
+            visited.push(current);
+            let node = self.node_in_subgraph(sub, current)?;
+            if let NodeKind::Actor { name, call_id, .. } = &node.kind {
+                return self
+                    .thir
+                    .concrete_actor(name, *call_id)
+                    .and_then(|m| m.out_type.as_concrete());
+            }
+            let pred = self.first_incoming_edge_in_subgraph(sub, current)?;
+            current = pred.source;
+        }
+    }
+
+    /// Infer the wire type of a bind buffer from the writer side,
+    /// using concrete actor metadata for polymorphic type resolution.
+    fn infer_bind_type_from_writer(&self, bind_name: &str) -> Option<PipitType> {
+        let buf_info = self.thir.resolved.buffers.get(bind_name)?;
+        let task_graph = self.graph.tasks.get(&buf_info.writer_task)?;
+        for sub in subgraphs_of(task_graph) {
+            for node in &sub.nodes {
+                if let NodeKind::BufferWrite { buffer_name } = &node.kind {
+                    if buffer_name == bind_name {
+                        return self.trace_type_backward_concrete(node.id, sub);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Infer contract for an IN bind (external writes, pipeline reads).
+    fn infer_in_bind_contract(&mut self, bind_name: &str) -> BindContract {
+        let dtype = self.infer_bind_type_from_readers(bind_name);
+        let shape = self.infer_bind_shape_from_readers(bind_name);
+        let rate_hz = self.infer_bind_rate_from_readers(bind_name);
+
+        BindContract {
+            direction: BindDirection::In,
+            dtype,
+            shape: shape.unwrap_or_default(),
+            rate_hz,
+            stable_id: String::new(), // filled by infer_bind_contracts after CallId extraction
+        }
+    }
+
+    /// Trace forward from a node to the nearest downstream Actor and return
+    /// that actor's input type. Mirror of `trace_type_backward()`.
+    fn trace_type_forward(&self, node_id: NodeId, sub: &Subgraph) -> Option<PipitType> {
+        let mut current = node_id;
+        let mut visited = Vec::new();
+        loop {
+            if visited.contains(&current) {
+                return None;
+            }
+            visited.push(current);
+            let node = self.node_in_subgraph(sub, current)?;
+            if let NodeKind::Actor { name, call_id, .. } = &node.kind {
+                return self
+                    .thir
+                    .concrete_actor(name, *call_id)
+                    .and_then(|m| m.in_type.as_concrete());
+            }
+            let succ = self.first_outgoing_edge_in_subgraph(sub, current)?;
+            current = succ.target;
+        }
+    }
+
+    /// Infer the type from all readers of an IN bind, validating consistency.
+    fn infer_bind_type_from_readers(&mut self, bind_name: &str) -> Option<PipitType> {
+        let mut types: Vec<PipitType> = Vec::new();
+
+        // Sorted iteration for deterministic conflict diagnostics
+        let mut task_names: Vec<&String> = self.graph.tasks.keys().collect();
+        task_names.sort();
+
+        for task_name in task_names {
+            let task_graph = &self.graph.tasks[task_name];
+            for sub in subgraphs_of(task_graph) {
+                for node in &sub.nodes {
+                    if let NodeKind::BufferRead { buffer_name } = &node.kind {
+                        if buffer_name == bind_name {
+                            if let Some(t) = self.trace_type_forward(node.id, sub) {
+                                types.push(t);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if types.is_empty() {
+            return None;
+        }
+
+        let first = types[0];
+        for t in &types[1..] {
+            if *t != first {
+                let span = self
+                    .thir
+                    .bind_info(bind_name)
+                    .map(|b| b.name_span)
+                    .unwrap_or(Span::new((), 0..0));
+                self.error(
+                    codes::E0312,
+                    span,
+                    format!(
+                        "bind '{}' readers disagree on type: {} vs {}",
+                        bind_name, first, t
+                    ),
+                );
+                return Some(first);
+            }
+        }
+        Some(first)
+    }
+
+    /// Get resolved out_shape dims from the upstream actor of a BufferWrite.
+    fn infer_bind_shape_from_writer(&self, bind_name: &str) -> Option<Vec<u32>> {
+        let buf_info = self.thir.resolved.buffers.get(bind_name)?;
+        let task_graph = self.graph.tasks.get(&buf_info.writer_task)?;
+        for sub in subgraphs_of(task_graph) {
+            for node in &sub.nodes {
+                if let NodeKind::BufferWrite { buffer_name } = &node.kind {
+                    if buffer_name == bind_name {
+                        return self.trace_shape_backward(node.id, sub);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Get resolved in_shape dims from downstream actors of BufferRead nodes.
+    /// Validates all readers agree on shape; emits E0312 on mismatch.
+    fn infer_bind_shape_from_readers(&mut self, bind_name: &str) -> Option<Vec<u32>> {
+        let mut shapes: Vec<Vec<u32>> = Vec::new();
+
+        let mut task_names: Vec<&String> = self.graph.tasks.keys().collect();
+        task_names.sort();
+
+        for task_name in task_names {
+            let task_graph = &self.graph.tasks[task_name];
+            for sub in subgraphs_of(task_graph) {
+                for node in &sub.nodes {
+                    if let NodeKind::BufferRead { buffer_name } = &node.kind {
+                        if buffer_name == bind_name {
+                            if let Some(s) = self.trace_shape_forward(node.id, sub) {
+                                shapes.push(s);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if shapes.is_empty() {
+            return None;
+        }
+
+        let first = &shapes[0];
+        for s in &shapes[1..] {
+            if s != first {
+                let span = self
+                    .thir
+                    .bind_info(bind_name)
+                    .map(|b| b.name_span)
+                    .unwrap_or(Span::new((), 0..0));
+                self.error(
+                    codes::E0312,
+                    span,
+                    format!(
+                        "bind '{}' readers disagree on shape: {:?} vs {:?}",
+                        bind_name, first, s
+                    ),
+                );
+                return Some(first.clone());
+            }
+        }
+        Some(first.clone())
+    }
+
+    /// Infer the data rate (Hz) for an OUT bind from the writer side.
+    fn infer_bind_rate_from_writer(&self, bind_name: &str) -> Option<f64> {
+        let buf_info = self.thir.resolved.buffers.get(bind_name)?;
+        if buf_info.writer_task.is_empty() {
+            return None;
+        }
+
+        let task_graph = self.graph.tasks.get(&buf_info.writer_task)?;
+        let write_node_id = find_buffer_write_in_task(task_graph, bind_name)?;
+
+        let rv = self.get_rv_for_node(&buf_info.writer_task, write_node_id)?;
+        let task_info = self.thir.task_info(&buf_info.writer_task)?;
+        Some(rv as f64 * task_info.freq_hz)
+    }
+
+    /// Infer the data rate (Hz) for an IN bind from reader sides.
+    /// Validates all readers agree on rate; emits E0312 on mismatch.
+    fn infer_bind_rate_from_readers(&mut self, bind_name: &str) -> Option<f64> {
+        let mut rates: Vec<f64> = Vec::new();
+
+        // Sorted iteration for deterministic conflict diagnostics
+        let mut task_names: Vec<String> = self.graph.tasks.keys().cloned().collect();
+        task_names.sort();
+
+        for task_name in &task_names {
+            let task_graph = &self.graph.tasks[task_name];
+            for sub in subgraphs_of(task_graph) {
+                for node in &sub.nodes {
+                    if let NodeKind::BufferRead { buffer_name } = &node.kind {
+                        if buffer_name == bind_name {
+                            if let Some(rv) = self.get_rv_for_node(task_name, node.id) {
+                                if let Some(task_info) = self.thir.task_info(task_name) {
+                                    rates.push(rv as f64 * task_info.freq_hz);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if rates.is_empty() {
+            return None;
+        }
+
+        let first = rates[0];
+        for r in &rates[1..] {
+            if (r - first).abs() > 0.001 {
+                let span = self
+                    .thir
+                    .bind_info(bind_name)
+                    .map(|b| b.name_span)
+                    .unwrap_or(Span::new((), 0..0));
+                self.error(
+                    codes::E0312,
+                    span,
+                    format!(
+                        "bind '{}' readers require different rates: {} Hz vs {} Hz",
+                        bind_name, first, r
+                    ),
+                );
+                break;
+            }
+        }
+        Some(first)
+    }
+
     // ── Phase 5: Buffer size computation ────────────────────────────────
 
     fn compute_buffer_sizes(&mut self) {
@@ -2028,6 +2442,29 @@ fn param_type_compatible(inferred: &ParamType, expected: &ParamType) -> bool {
         return true;
     }
     inferred == expected
+}
+
+// ── Stable ID computation ────────────────────────────────────────────────────
+
+/// Compute a deterministic stable_id from graph lineage (§5.5.3).
+///
+/// Hash key: `direction + "\0" + sorted_call_ids.join("\0") + "\0" + transport`
+/// Output: 16-char hex string (first 8 bytes of SHA-256).
+fn compute_stable_id(direction: BindDirection, call_ids: &[CallId], transport: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(direction.to_string().as_bytes());
+    hasher.update(b"\0");
+    for (i, cid) in call_ids.iter().enumerate() {
+        if i > 0 {
+            hasher.update(b"\0");
+        }
+        hasher.update(cid.0.to_string().as_bytes());
+    }
+    hasher.update(b"\0");
+    hasher.update(transport.as_bytes());
+    let hash = hasher.finalize();
+    // Truncate to first 8 bytes → 16 hex chars
+    hash.iter().take(8).map(|b| format!("{:02x}", b)).collect()
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -3257,6 +3694,223 @@ ACTOR(float_src, IN(void, 0), OUT(float, 1), PARAM(float, value)) {
             errors.is_empty(),
             "no conflict expected when sources agree, got: {:#?}",
             errors
+        );
+    }
+
+    // ── Bind contract inference tests ────────────────────────────────────
+
+    #[test]
+    fn bind_direction_out() {
+        let reg = test_registry();
+        let source = r#"bind iq = udp("127.0.0.1:9100")
+clock 48kHz audio {
+    constant(0) -> iq
+}
+"#;
+        let result = analyze_ok(source, &reg);
+        let contract = result
+            .analysis
+            .bind_contracts
+            .get("iq")
+            .expect("contract for 'iq'");
+        assert_eq!(contract.direction, BindDirection::Out);
+    }
+
+    #[test]
+    fn bind_direction_in() {
+        let reg = test_registry();
+        let source = r#"bind iq = udp("127.0.0.1:9100")
+clock 48kHz audio {
+    @iq | stdout()
+}
+"#;
+        let result = analyze_ok(source, &reg);
+        let contract = result
+            .analysis
+            .bind_contracts
+            .get("iq")
+            .expect("contract for 'iq'");
+        assert_eq!(contract.direction, BindDirection::In);
+    }
+
+    #[test]
+    fn bind_unreferenced_e0311() {
+        let reg = test_registry();
+        let source = r#"bind iq = udp("127.0.0.1:9100")
+clock 48kHz audio {
+    constant(0) | stdout()
+}
+"#;
+        let result = analyze_source(source, &reg);
+        assert!(
+            has_error(&result, "not referenced"),
+            "expected E0311 for unreferenced bind"
+        );
+    }
+
+    #[test]
+    fn bind_out_contract_dtype() {
+        let reg = test_registry();
+        // constant(0) with integer literal 0 → concrete type Int32
+        let source = r#"bind iq = udp("127.0.0.1:9100")
+clock 48kHz audio {
+    constant(0) -> iq
+}
+"#;
+        let result = analyze_ok(source, &reg);
+        let contract = result
+            .analysis
+            .bind_contracts
+            .get("iq")
+            .expect("contract for 'iq'");
+        assert_eq!(contract.dtype, Some(PipitType::Int32));
+    }
+
+    #[test]
+    fn bind_out_contract_rate() {
+        let reg = test_registry();
+        let source = r#"bind iq = udp("127.0.0.1:9100")
+clock 48kHz audio {
+    constant(0) -> iq
+}
+"#;
+        let result = analyze_ok(source, &reg);
+        let contract = result
+            .analysis
+            .bind_contracts
+            .get("iq")
+            .expect("contract for 'iq'");
+        // constant() has rate 1, task freq 48000 → rate = 48000 Hz
+        assert!(contract.rate_hz.is_some(), "expected rate_hz for OUT bind");
+        assert!(
+            (contract.rate_hz.unwrap() - 48000.0).abs() < 0.1,
+            "expected ~48000 Hz, got {}",
+            contract.rate_hz.unwrap()
+        );
+    }
+
+    #[test]
+    fn bind_in_contract_dtype() {
+        let reg = test_registry();
+        // binwrite() has concrete IN(float, 1) → dtype = Float
+        let source = r#"bind iq = udp("127.0.0.1:9100")
+clock 48kHz audio {
+    @iq | binwrite("/dev/null")
+}
+"#;
+        let result = analyze_ok(source, &reg);
+        let contract = result
+            .analysis
+            .bind_contracts
+            .get("iq")
+            .expect("contract for 'iq'");
+        assert_eq!(contract.dtype, Some(PipitType::Float));
+    }
+
+    #[test]
+    fn bind_in_contract_rate() {
+        let reg = test_registry();
+        let source = r#"bind iq = udp("127.0.0.1:9100")
+clock 48kHz audio {
+    @iq | stdout()
+}
+"#;
+        let result = analyze_ok(source, &reg);
+        let contract = result
+            .analysis
+            .bind_contracts
+            .get("iq")
+            .expect("contract for 'iq'");
+        // stdout() has rate 1, task freq 48000 → rate = 48000 Hz
+        assert!(contract.rate_hz.is_some(), "expected rate_hz for IN bind");
+        assert!(
+            (contract.rate_hz.unwrap() - 48000.0).abs() < 0.1,
+            "expected ~48000 Hz, got {}",
+            contract.rate_hz.unwrap()
+        );
+    }
+
+    #[test]
+    fn stable_id_deterministic() {
+        let reg = test_registry();
+        let source = r#"bind iq = udp("127.0.0.1:9100")
+clock 48kHz audio {
+    constant(0) -> iq
+}
+"#;
+        let r1 = analyze_ok(source, &reg);
+        let r2 = analyze_ok(source, &reg);
+        let id1 = &r1.analysis.bind_contracts["iq"].stable_id;
+        let id2 = &r2.analysis.bind_contracts["iq"].stable_id;
+        assert_eq!(
+            id1, id2,
+            "stable_id must be deterministic across compilations"
+        );
+        assert_eq!(id1.len(), 16, "stable_id must be 16 hex chars");
+    }
+
+    #[test]
+    fn stable_id_reorder_stable() {
+        let reg = test_registry();
+        // Source A: iq first, rf second
+        let source_a = r#"bind iq = udp("127.0.0.1:9100")
+bind rf = udp("127.0.0.1:9200")
+clock 48kHz audio {
+    constant(0) -> iq
+}
+clock 48kHz ctrl {
+    constant(0) -> rf
+}
+"#;
+        // Source B: rf first, iq second (bind order swapped)
+        let source_b = r#"bind rf = udp("127.0.0.1:9200")
+bind iq = udp("127.0.0.1:9100")
+clock 48kHz audio {
+    constant(0) -> iq
+}
+clock 48kHz ctrl {
+    constant(0) -> rf
+}
+"#;
+        let ra = analyze_ok(source_a, &reg);
+        let rb = analyze_ok(source_b, &reg);
+        let iq_a = &ra.analysis.bind_contracts["iq"].stable_id;
+        let iq_b = &rb.analysis.bind_contracts["iq"].stable_id;
+        let rf_a = &ra.analysis.bind_contracts["rf"].stable_id;
+        let rf_b = &rb.analysis.bind_contracts["rf"].stable_id;
+        assert_eq!(
+            iq_a, iq_b,
+            "stable_id for 'iq' must be stable under bind reordering"
+        );
+        assert_eq!(
+            rf_a, rf_b,
+            "stable_id for 'rf' must be stable under bind reordering"
+        );
+        assert_ne!(iq_a, rf_a, "different binds must have different stable_ids");
+    }
+
+    #[test]
+    fn stable_id_topology_change() {
+        let reg = test_registry();
+        // Source A: constant(0) writes to iq
+        let source_a = r#"bind iq = udp("127.0.0.1:9100")
+clock 48kHz audio {
+    constant(0) -> iq
+}
+"#;
+        // Source B: constant(0) | mul(2.0) writes to iq — different upstream actor
+        let source_b = r#"bind iq = udp("127.0.0.1:9100")
+clock 48kHz audio {
+    constant(0) | mul(2.0) -> iq
+}
+"#;
+        let ra = analyze_ok(source_a, &reg);
+        let rb = analyze_ok(source_b, &reg);
+        let id_a = &ra.analysis.bind_contracts["iq"].stable_id;
+        let id_b = &rb.analysis.bind_contracts["iq"].stable_id;
+        assert_ne!(
+            id_a, id_b,
+            "stable_id must change when graph topology changes"
         );
     }
 }

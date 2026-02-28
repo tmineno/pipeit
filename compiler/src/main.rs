@@ -1,5 +1,5 @@
 use clap::Parser;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -25,6 +25,7 @@ enum EmitStage {
     TimingChart,
     Manifest,
     BuildInfo,
+    Interface,
 }
 
 #[derive(Parser, Debug)]
@@ -80,6 +81,14 @@ struct Cli {
     /// Enable experimental codegen features (no effect currently)
     #[arg(long)]
     experimental: bool,
+
+    /// Write interface manifest JSON to this path (orthogonal to --emit)
+    #[arg(long)]
+    interface_out: Option<PathBuf>,
+
+    /// Bind endpoint override: name=endpoint (repeatable)
+    #[arg(long)]
+    bind: Vec<String>,
 }
 
 fn main() {
@@ -93,6 +102,47 @@ fn main() {
             eprintln!("pcc: output = {}", out.display());
         }
         eprintln!("pcc: emit   = {:?}", cli.emit);
+    }
+
+    // ── --interface-out guard: reject with non-pipeline early-exit stages ──
+    if cli.interface_out.is_some() && matches!(cli.emit, EmitStage::Manifest | EmitStage::BuildInfo)
+    {
+        eprintln!(
+            "error: --interface-out requires source compilation; incompatible with --emit {:?}",
+            cli.emit
+        );
+        std::process::exit(EXIT_USAGE_ERROR);
+    }
+
+    // ── --bind stage guard: reject for stages where it has no observable effect ──
+    if !cli.bind.is_empty()
+        && !matches!(
+            cli.emit,
+            EmitStage::Cpp | EmitStage::Exe | EmitStage::Interface
+        )
+        && cli.interface_out.is_none()
+    {
+        eprintln!("error: --bind requires --emit cpp, exe, or interface (or --interface-out)");
+        std::process::exit(EXIT_USAGE_ERROR);
+    }
+
+    // ── Parse --bind overrides (string split only; validation after pipeline) ──
+    let mut bind_overrides: HashMap<String, String> = HashMap::new();
+    for b in &cli.bind {
+        if let Some(eq) = b.find('=') {
+            let name = b[..eq].to_string();
+            let endpoint = b[eq + 1..].to_string();
+            if name.is_empty() || endpoint.is_empty() {
+                eprintln!("error: --bind requires non-empty name=endpoint: '{}'", b);
+                std::process::exit(EXIT_USAGE_ERROR);
+            }
+            if bind_overrides.insert(name.clone(), endpoint).is_some() {
+                eprintln!("warning: duplicate --bind for '{}', using last value", name);
+            }
+        } else {
+            eprintln!("error: --bind requires name=endpoint format: '{}'", b);
+            std::process::exit(EXIT_USAGE_ERROR);
+        }
     }
 
     // ── --emit manifest: early exit before source reading ──
@@ -186,6 +236,12 @@ fn main() {
     }
 
     if matches!(cli.emit, EmitStage::Ast) {
+        if cli.interface_out.is_some() {
+            eprintln!(
+                "error: --interface-out requires full compilation; incompatible with --emit ast"
+            );
+            std::process::exit(EXIT_USAGE_ERROR);
+        }
         println!("{:#?}", program);
         std::process::exit(EXIT_OK);
     }
@@ -204,14 +260,22 @@ fn main() {
     }
 
     // ── Map EmitStage to terminal PassId ──
-    let terminal = match cli.emit {
+    let mut terminal = match cli.emit {
         EmitStage::Ast | EmitStage::Manifest | EmitStage::BuildInfo => unreachable!(),
+        EmitStage::Interface => pcc::pass::PassId::BuildLir,
         EmitStage::GraphDot => pcc::pass::PassId::BuildGraph,
         EmitStage::Graph | EmitStage::Schedule | EmitStage::TimingChart => {
             pcc::pass::PassId::Schedule
         }
         EmitStage::Cpp | EmitStage::Exe => pcc::pass::PassId::Codegen,
     };
+
+    // Promote terminal if --interface-out requires BuildLir
+    if cli.interface_out.is_some()
+        && !pcc::pass::required_passes(terminal).contains(&pcc::pass::PassId::BuildLir)
+    {
+        terminal = pcc::pass::PassId::BuildLir;
+    }
 
     // ── Run pipeline ──
     let provenance = pcc::pipeline::compute_provenance(&source, &registry);
@@ -220,6 +284,7 @@ fn main() {
         include_paths: loaded_headers.clone(),
         provenance: Some(provenance),
         experimental: cli.experimental,
+        bind_overrides: bind_overrides.clone(),
     };
     let mut state = pcc::pipeline::CompilationState::new(program, registry);
     let mut has_errors = false;
@@ -237,9 +302,47 @@ fn main() {
         std::process::exit(EXIT_COMPILE_ERROR);
     }
 
+    // ── Validate --bind names against LIR ──
+    if !bind_overrides.is_empty() {
+        let lir = state.downstream.lir.as_ref().unwrap();
+        for name in bind_overrides.keys() {
+            if !lir.binds.iter().any(|b| b.name == *name) {
+                eprintln!("error: --bind: unknown bind name '{}'", name);
+                std::process::exit(EXIT_COMPILE_ERROR);
+            }
+        }
+    }
+
+    // ── Write interface manifest side-effect (before emit match exits) ──
+    if let Some(ref path) = cli.interface_out {
+        let lir = state.downstream.lir.as_ref().unwrap();
+        let manifest = lir.generate_interface_manifest(&bind_overrides);
+        if let Err(e) = std::fs::write(path, &manifest) {
+            eprintln!(
+                "error: failed to write interface manifest {}: {}",
+                path.display(),
+                e
+            );
+            std::process::exit(EXIT_SYSTEM_ERROR);
+        }
+        if cli.verbose {
+            eprintln!("pcc: wrote interface manifest {}", path.display());
+        }
+    }
+
+    // ── --emit interface: write to stdout/--output, then exit ──
+    if matches!(cli.emit, EmitStage::Interface) {
+        let lir = state.downstream.lir.as_ref().unwrap();
+        let manifest = lir.generate_interface_manifest(&bind_overrides);
+        emit_output(&cli.output, &manifest);
+        std::process::exit(EXIT_OK);
+    }
+
     // ── Emit-specific output ──
     match cli.emit {
-        EmitStage::Ast | EmitStage::Manifest | EmitStage::BuildInfo => unreachable!(),
+        EmitStage::Ast | EmitStage::Manifest | EmitStage::BuildInfo | EmitStage::Interface => {
+            unreachable!()
+        }
         EmitStage::GraphDot => {
             print!(
                 "{}",

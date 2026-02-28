@@ -46,6 +46,8 @@ pub struct CodegenOptions {
     /// Enable experimental codegen features (e.g., block pool allocator).
     /// No behavioral change currently — reserved for Phase C gating.
     pub experimental: bool,
+    /// Compile-time bind endpoint overrides: name → endpoint spec string.
+    pub bind_overrides: std::collections::HashMap<String, String>,
 }
 
 // ── Public entry point ──────────────────────────────────────────────────────
@@ -112,6 +114,7 @@ impl<'a> CodegenCtx<'a> {
         self.emit_shared_buffers();
         self.emit_stop_flag();
         self.emit_stats_storage();
+        self.emit_bind_storage();
         self.emit_task_functions();
         self.emit_main();
     }
@@ -250,6 +253,52 @@ impl<'a> CodegenCtx<'a> {
             }
         }
         self.out.push('\n');
+    }
+
+    // ── Phase 5b: Bind state ────────────────────────────────────────────
+
+    fn emit_bind_storage(&mut self) {
+        if self.lir.binds.is_empty() {
+            return;
+        }
+
+        self.out.push_str("// ── Bind state ──\n");
+        for bind in &self.lir.binds {
+            let endpoint = self.effective_endpoint(bind);
+            let _ = writeln!(
+                self.out,
+                "static pipit::BindState _bind_state_{}{{\"{}\", \"\"}};",
+                bind.name,
+                escape_cpp_string(&endpoint)
+            );
+        }
+
+        // Emit _apply_pending_rebinds() with double-checked locking
+        self.out
+            .push_str("\nstatic void _apply_pending_rebinds() {\n");
+        for bind in &self.lir.binds {
+            let _ = writeln!(
+                self.out,
+                "    if (_bind_state_{0}.rebind_pending.load(std::memory_order_acquire)) {{\n\
+                 \x20       std::lock_guard<std::mutex> _lk(_bind_state_{0}.mtx);\n\
+                 \x20       if (_bind_state_{0}.rebind_pending.load(std::memory_order_relaxed)) {{\n\
+                 \x20           _bind_state_{0}.current_endpoint = std::move(_bind_state_{0}.pending_endpoint);\n\
+                 \x20           _bind_state_{0}.pending_endpoint.clear();\n\
+                 \x20           _bind_state_{0}.rebind_pending.store(false, std::memory_order_release);\n\
+                 \x20       }}\n\
+                 \x20   }}",
+                bind.name
+            );
+        }
+        self.out.push_str("}\n\n");
+    }
+
+    fn effective_endpoint(&self, bind: &crate::lir::LirBind) -> String {
+        self.options
+            .bind_overrides
+            .get(&bind.name)
+            .cloned()
+            .unwrap_or_else(|| bind.format_endpoint_spec())
     }
 
     // ── Phase 6: Task functions ─────────────────────────────────────────
@@ -454,6 +503,10 @@ impl<'a> CodegenCtx<'a> {
         } else {
             "        "
         };
+        // Per-iteration rebind apply (spec §5.11: MUST apply at iteration boundary)
+        if !self.lir.binds.is_empty() {
+            let _ = writeln!(self.out, "{}_apply_pending_rebinds();", indent);
+        }
         if stride <= 1 {
             // _iter_idx++ is post-increment: passes old value, then increments
             let _ = writeln!(
@@ -725,6 +778,70 @@ impl<'a> CodegenCtx<'a> {
             self.out.push_str("    };\n");
         }
 
+        // Bind descriptors
+        if !lir.binds.is_empty() {
+            // Shape arrays for binds
+            for bind in &lir.binds {
+                if let Some(contract) = &bind.contract {
+                    if !contract.shape.is_empty() {
+                        let dims: String = contract
+                            .shape
+                            .iter()
+                            .map(|d| d.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let _ = writeln!(
+                            self.out,
+                            "    static const uint32_t _bind_shape_{}[] = {{{}}};",
+                            bind.name, dims
+                        );
+                    }
+                }
+            }
+            self.out
+                .push_str("    static const pipit::BindDesc _bind_descs[] = {\n");
+            for bind in &lir.binds {
+                let (dir, dtype, shape_ptr, shape_len, rate) = match &bind.contract {
+                    Some(c) => {
+                        let dir = c.direction.to_string();
+                        let dtype = c
+                            .dtype
+                            .map(|t| format!("\"{}\"", t))
+                            .unwrap_or_else(|| "nullptr".to_string());
+                        let (sp, sl) = if c.shape.is_empty() {
+                            ("nullptr".to_string(), 0)
+                        } else {
+                            (format!("_bind_shape_{}", bind.name), c.shape.len())
+                        };
+                        let rate = c.rate_hz.unwrap_or(-1.0);
+                        (dir, dtype, sp, sl, rate)
+                    }
+                    None => (
+                        "unknown".to_string(),
+                        "nullptr".to_string(),
+                        "nullptr".to_string(),
+                        0,
+                        -1.0,
+                    ),
+                };
+                let endpoint = self.effective_endpoint(bind);
+                let _ = writeln!(
+                    self.out,
+                    "        {{\"{}\", \"{}\", \"{}\", {}, {}, {}, {:.1}, \"{}\", &_bind_state_{}}},",
+                    bind.stable_id,
+                    bind.name,
+                    dir,
+                    dtype,
+                    shape_ptr,
+                    shape_len,
+                    rate,
+                    escape_cpp_string(&endpoint),
+                    bind.name
+                );
+            }
+            self.out.push_str("    };\n");
+        }
+
         // ProgramDesc initialization
         self.out.push_str("    pipit::ProgramDesc _desc{};\n");
         self.out.push_str(
@@ -752,6 +869,13 @@ impl<'a> CodegenCtx<'a> {
         } else {
             self.out
                 .push_str("    _desc.probes = std::span<const pipit::ProbeDesc>{};\n");
+        }
+
+        if lir.binds.is_empty() {
+            self.out
+                .push_str("    _desc.binds = std::span<const pipit::BindDesc>{};\n");
+        } else {
+            self.out.push_str("    _desc.binds = _bind_descs;\n");
         }
 
         let policy = self.get_overrun_policy().to_string();
@@ -1377,6 +1501,10 @@ fn build_lir_output_ptr(actor: &LirActorFiring, rep: u32) -> String {
     }
 }
 
+fn escape_cpp_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 // Unit tests: verify structural and semantic properties of generated C++ strings
 // (firing order, buffer layout, probe stripping) without a C++ compiler.
@@ -1510,6 +1638,7 @@ mod tests {
                 include_paths: vec![],
                 provenance: None,
                 experimental: false,
+                bind_overrides: std::collections::HashMap::new(),
             },
         )
     }
@@ -2003,6 +2132,7 @@ mod tests {
                 include_paths: vec![],
                 provenance: None,
                 experimental: false,
+                bind_overrides: std::collections::HashMap::new(),
             },
         );
         let errors: Vec<_> = release_result
@@ -2326,6 +2456,7 @@ mod tests {
             include_paths: vec![],
             provenance: None,
             experimental: false,
+            bind_overrides: std::collections::HashMap::new(),
         };
         let mut ctx = CodegenCtx::new(
             &graph_result.graph,
@@ -2538,6 +2669,7 @@ mod tests {
                 include_paths: vec![],
                 provenance: Some(prov),
                 experimental: false,
+                bind_overrides: std::collections::HashMap::new(),
             },
         );
         let cpp = result.generated.cpp_source;

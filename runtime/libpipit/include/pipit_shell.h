@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <span>
 #include <string>
 #include <thread>
@@ -51,6 +52,25 @@ struct ProbeDesc {
     bool *enabled; // pointer to per-probe enable flag
 };
 
+struct BindState {
+    std::string current_endpoint;
+    std::string pending_endpoint;
+    std::atomic<bool> rebind_pending{false};
+    std::mutex mtx; // protects {current_endpoint, pending_endpoint, rebind_pending} as a group
+};
+
+struct BindDesc {
+    const char *stable_id;        // 16-char hex from compiler
+    const char *name;             // PDL shared buffer name
+    const char *direction;        // "in" or "out"
+    const char *dtype;            // "float", "int32", etc. (nullptr if unknown)
+    const uint32_t *shape;        // pointer to static shape array (nullptr if rank=0)
+    size_t shape_len;             // number of dims
+    double rate_hz;               // tokens/sec (-1.0 if unknown)
+    const char *default_endpoint; // DSL-default endpoint spec string
+    BindState *state;             // mutable runtime state pointer
+};
+
 struct RuntimeState {
     std::atomic<bool> *stop;
     std::atomic<int> *exit_code;
@@ -65,6 +85,7 @@ struct ProgramDesc {
     std::span<const TaskDesc> tasks;
     std::span<const BufferStatsDesc> buffers;
     std::span<const ProbeDesc> probes;
+    std::span<const BindDesc> binds;
     const char *overrun_policy;
     size_t mem_allocated;
     size_t mem_used;
@@ -100,11 +121,51 @@ inline bool parse_duration(const std::string &s, double *out) {
 
 } // namespace detail
 
+// ── Bind control-plane API ──────────────────────────────────────────────────
+
+inline std::span<const BindDesc> list_bindings(const ProgramDesc &desc) { return desc.binds; }
+
+/// Queue a rebind request. Applied at the next iteration boundary.
+/// Returns: 0 = pending, 1 = unknown stable_id or invalid args.
+inline int rebind(const ProgramDesc &desc, const char *stable_id, const char *endpoint) {
+    if (!stable_id || !endpoint)
+        return 1;
+    for (const auto &b : desc.binds) {
+        if (std::strcmp(b.stable_id, stable_id) == 0) {
+            std::lock_guard<std::mutex> lock(b.state->mtx);
+            b.state->pending_endpoint = std::string(endpoint);
+            b.state->rebind_pending.store(true, std::memory_order_release);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/// Apply pending rebind requests. Called at each iteration boundary.
+/// Double-checked locking: fast-path atomic check (no lock), then
+/// lock + re-check + apply + clear under the same lock.
+inline void apply_pending_rebinds(std::span<const BindDesc> binds) {
+    for (const auto &b : binds) {
+        if (!b.state->rebind_pending.load(std::memory_order_acquire))
+            continue;
+        std::lock_guard<std::mutex> lock(b.state->mtx);
+        if (!b.state->rebind_pending.load(std::memory_order_relaxed))
+            continue;
+        b.state->current_endpoint = std::move(b.state->pending_endpoint);
+        b.state->pending_endpoint.clear();
+        b.state->rebind_pending.store(false, std::memory_order_release);
+        // Phase 5: reconnect I/O adapter here
+    }
+}
+
+// ── Shell entry point ───────────────────────────────────────────────────────
+
 inline int shell_main(int argc, char *argv[], const ProgramDesc &desc) {
     double duration_seconds = std::numeric_limits<double>::infinity();
     int threads = 0;
     std::string probe_output_path = "/dev/stderr";
     std::vector<std::string> enabled_probes;
+    bool list_bindings_requested = false;
 
     // ── CLI argument parsing ────────────────────────────────────────────
     for (int i = 1; i < argc; ++i) {
@@ -197,8 +258,77 @@ inline int shell_main(int argc, char *argv[], const ProgramDesc &desc) {
             *desc.state.stats = true;
             continue;
         }
+        if (opt == "--bind") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "startup error: --bind requires name=endpoint\n");
+                return 2;
+            }
+            std::string arg(argv[++i]);
+            auto eq = arg.find('=');
+            if (eq == std::string::npos || eq == 0 || eq + 1 == arg.size()) {
+                std::fprintf(stderr,
+                             "startup error: --bind requires non-empty name=endpoint format\n");
+                return 2;
+            }
+            auto name = arg.substr(0, eq);
+            auto endpoint = arg.substr(eq + 1);
+            bool found = false;
+            for (const auto &b : desc.binds) {
+                if (name == b.name) {
+                    std::lock_guard<std::mutex> lock(b.state->mtx);
+                    b.state->current_endpoint = endpoint;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                if (desc.binds.empty()) {
+                    std::fprintf(stderr,
+                                 "startup error: --bind is unsupported (no binds defined)\n");
+                } else {
+                    std::fprintf(stderr, "startup error: unknown bind '%s'\n", name.c_str());
+                }
+                return 2;
+            }
+            continue;
+        }
+        if (opt == "--list-bindings") {
+            list_bindings_requested = true;
+            continue;
+        }
         std::fprintf(stderr, "startup error: unknown option '%s'\n", argv[i]);
         return 2;
+    }
+
+    // ── --list-bindings introspection ───────────────────────────────────
+    if (list_bindings_requested) {
+        for (const auto &b : desc.binds) {
+            std::fprintf(stdout, "%s\t%s\t%s", b.stable_id, b.name, b.direction);
+            if (b.dtype)
+                std::fprintf(stdout, "\t%s", b.dtype);
+            else
+                std::fprintf(stdout, "\t-");
+            if (b.shape && b.shape_len > 0) {
+                std::fprintf(stdout, "\t[");
+                for (size_t j = 0; j < b.shape_len; ++j) {
+                    if (j > 0)
+                        std::fprintf(stdout, ",");
+                    std::fprintf(stdout, "%u", b.shape[j]);
+                }
+                std::fprintf(stdout, "]");
+            } else {
+                std::fprintf(stdout, "\t[]");
+            }
+            if (b.rate_hz > 0)
+                std::fprintf(stdout, "\t%.1f", b.rate_hz);
+            else
+                std::fprintf(stdout, "\t-");
+            {
+                std::lock_guard<std::mutex> lock(b.state->mtx);
+                std::fprintf(stdout, "\t%s\n", b.state->current_endpoint.c_str());
+            }
+        }
+        return 0;
     }
 
     // ── Probe initialization ────────────────────────────────────────────

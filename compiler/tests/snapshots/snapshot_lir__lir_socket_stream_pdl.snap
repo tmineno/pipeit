@@ -2,7 +2,7 @@
 source: compiler/tests/snapshot_lir.rs
 expression: output
 ---
-LirProgram (0 consts, 2 params, 0 inter-task bufs, 2 tasks, 0 probes)
+LirProgram (0 consts, 2 params, 0 binds, 0 inter-task bufs, 2 tasks, 0 probes)
   param freq: float = "100000" (cli: std::stof)
   param amp: float = "0.8f" (cli: std::stof)
   directives: mem=67108864, overrun=drop, timer=Fixed(10000)

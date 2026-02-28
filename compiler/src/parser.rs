@@ -322,8 +322,55 @@ where
     let param_stmt = just(Token::Param)
         .ignore_then(ident.clone())
         .then_ignore(just(Token::Equals))
-        .then(scalar)
+        .then(scalar.clone())
         .map(|(name, val)| StatementKind::Param(ParamStmt { name, value: val }));
+
+    // ── Bind statement ──
+
+    let bind_stmt = {
+        // Ident-leading: could be Named(ident '=' scalar) or Positional(Scalar::Ident)
+        let ident_bind_arg = ident
+            .clone()
+            .then(just(Token::Equals).ignore_then(scalar.clone()).or_not())
+            .map(|(name, opt_val)| match opt_val {
+                Some(val) => BindArg::Named(name, val),
+                None => BindArg::Positional(Scalar::Ident(name)),
+            });
+        // Non-ident scalars are always positional
+        let non_ident_bind_arg = select! {
+            Token::Number(n) = e => {
+                let (span, is_int_literal) = classify_number(e.span());
+                Scalar::Number(n, span, is_int_literal)
+            },
+            Token::Freq(f) = e => Scalar::Freq(f, e.span()),
+            Token::Size(s) = e => Scalar::Size(s, e.span()),
+            Token::StringLit(s) = e => Scalar::StringLit(s, e.span()),
+        }
+        .map(BindArg::Positional);
+
+        let bind_arg = ident_bind_arg.or(non_ident_bind_arg);
+
+        let bind_endpoint = ident
+            .clone()
+            .then(
+                bind_arg
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+            )
+            .map_with(|(transport, args), e| BindEndpoint {
+                transport,
+                args,
+                span: e.span(),
+            });
+
+        just(Token::Bind)
+            .ignore_then(ident.clone())
+            .then_ignore(just(Token::Equals))
+            .then(bind_endpoint)
+            .map(|(name, endpoint)| StatementKind::Bind(BindStmt { name, endpoint }))
+    };
 
     let define_stmt = just(Token::Define)
         .ignore_then(ident.clone())
@@ -451,13 +498,18 @@ where
 
     // ── Statement dispatch ──
 
-    let statement =
-        choice((set_stmt, const_stmt, param_stmt, define_stmt, task_stmt)).map_with(|kind, e| {
-            Statement {
-                kind,
-                span: e.span(),
-            }
-        });
+    let statement = choice((
+        set_stmt,
+        const_stmt,
+        param_stmt,
+        bind_stmt,
+        define_stmt,
+        task_stmt,
+    ))
+    .map_with(|kind, e| Statement {
+        kind,
+        span: e.span(),
+    });
 
     // ── Program ──
 
@@ -1172,5 +1224,70 @@ mod tests {
         assert_eq!(a.type_args.len(), 2);
         assert_eq!(a.type_args[0].name, "float");
         assert_eq!(a.type_args[1].name, "double");
+    }
+
+    // ── bind_stmt ──
+
+    #[test]
+    fn bind_stmt_udp() {
+        let s = parse_one_stmt(r#"bind iq = udp("127.0.0.1:9100", chan=10)"#);
+        let StatementKind::Bind(b) = &s.kind else {
+            panic!("expected Bind")
+        };
+        assert_eq!(b.name.name, "iq");
+        assert_eq!(b.endpoint.transport.name, "udp");
+        assert_eq!(b.endpoint.args.len(), 2);
+        assert!(
+            matches!(&b.endpoint.args[0], BindArg::Positional(Scalar::StringLit(s, _)) if s == "127.0.0.1:9100")
+        );
+        assert!(
+            matches!(&b.endpoint.args[1], BindArg::Named(ident, Scalar::Number(n, _, _)) if ident.name == "chan" && *n == 10.0)
+        );
+    }
+
+    #[test]
+    fn bind_stmt_shm() {
+        let s = parse_one_stmt(r#"bind iq2 = shm("rx.iq", slots=1024, slot_bytes=4096)"#);
+        let StatementKind::Bind(b) = &s.kind else {
+            panic!("expected Bind")
+        };
+        assert_eq!(b.name.name, "iq2");
+        assert_eq!(b.endpoint.transport.name, "shm");
+        assert_eq!(b.endpoint.args.len(), 3);
+        assert!(
+            matches!(&b.endpoint.args[0], BindArg::Positional(Scalar::StringLit(s, _)) if s == "rx.iq")
+        );
+        assert!(matches!(&b.endpoint.args[1], BindArg::Named(ident, _) if ident.name == "slots"));
+        assert!(
+            matches!(&b.endpoint.args[2], BindArg::Named(ident, _) if ident.name == "slot_bytes")
+        );
+    }
+
+    #[test]
+    fn bind_stmt_positional_only() {
+        let s = parse_one_stmt(r#"bind x = udp("host:port")"#);
+        let StatementKind::Bind(b) = &s.kind else {
+            panic!("expected Bind")
+        };
+        assert_eq!(b.name.name, "x");
+        assert_eq!(b.endpoint.transport.name, "udp");
+        assert_eq!(b.endpoint.args.len(), 1);
+        assert!(matches!(
+            &b.endpoint.args[0],
+            BindArg::Positional(Scalar::StringLit(..))
+        ));
+    }
+
+    #[test]
+    fn bind_stmt_ident_positional_arg() {
+        let s = parse_one_stmt("bind x = udp(addr, chan=10)");
+        let StatementKind::Bind(b) = &s.kind else {
+            panic!("expected Bind")
+        };
+        assert_eq!(b.endpoint.args.len(), 2);
+        assert!(
+            matches!(&b.endpoint.args[0], BindArg::Positional(Scalar::Ident(id)) if id.name == "addr")
+        );
+        assert!(matches!(&b.endpoint.args[1], BindArg::Named(ident, _) if ident.name == "chan"));
     }
 }

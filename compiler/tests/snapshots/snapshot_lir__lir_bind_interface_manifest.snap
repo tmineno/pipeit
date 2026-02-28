@@ -1,0 +1,31 @@
+---
+source: compiler/tests/snapshot_lir.rs
+expression: manifest
+---
+{
+  "schema": 1,
+  "binds": [
+    {
+      "stable_id": "51b3a1272d161e98",
+      "name": "iq",
+      "direction": "out",
+      "dtype": "int32",
+      "shape": [],
+      "rate_hz": 48000.0,
+      "endpoint": {
+        "transport": "udp",
+        "args": [
+          {
+            "kind": "positional",
+            "value": "127.0.0.1:9100"
+          },
+          {
+            "kind": "named",
+            "name": "chan",
+            "value": 10
+          }
+        ]
+      }
+    }
+  ]
+}

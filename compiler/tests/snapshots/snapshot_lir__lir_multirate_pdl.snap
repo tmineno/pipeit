@@ -2,7 +2,7 @@
 source: compiler/tests/snapshot_lir.rs
 expression: output
 ---
-LirProgram (1 consts, 0 params, 0 inter-task bufs, 1 tasks, 0 probes)
+LirProgram (1 consts, 0 params, 0 binds, 0 inter-task bufs, 1 tasks, 0 probes)
   const lp_coeff: float[3] = [0.25f, 0.5f, 0.25f]
   directives: mem=67108864, overrun=drop, timer=Fixed(10000)
   task 'analyzer' @ 1000Hz K=1

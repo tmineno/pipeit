@@ -1,0 +1,14 @@
+---
+source: compiler/tests/snapshot_lir.rs
+expression: output
+---
+LirProgram (1 consts, 0 params, 1 binds, 1 inter-task bufs, 1 tasks, 0 probes)
+  const addr = "127.0.0.1:9100"
+  directives: mem=67108864, overrun=drop, timer=Fixed(10000)
+  bind iq [51b3a1272d161e98 out int32 @ 48000 Hz] = udp(addr, chan=10)
+  inter-task iq: int32_t[256] readers=1 [] skip_writes [shared]
+  task 'audio' @ 48000Hz K=5
+    edge_buffers: _e0_1: int32_t[1] [local]
+    firings:
+      Actor_constant<int32_t><int32_t>(0, dim(1)) -> [_e0_1]
+      buf_write(iq) <- _e0_1 tokens=1 skip

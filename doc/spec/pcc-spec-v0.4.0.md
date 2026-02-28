@@ -647,7 +647,7 @@ error[E0601]: lowering verification failed (L3 rate/shape preservation)
 
 ### 10.6 Assigned diagnostic codes
 
-#### 10.6.1 Resolve (E0001-E0023, W0001-W0002)
+#### 10.6.1 Resolve (E0001-E0025, W0001-W0002)
 
 | Code | Description |
 |------|-------------|
@@ -674,6 +674,8 @@ error[E0601]: lowering verification failed (L3 rate/shape preservation)
 | E0021 | Mode listed multiple times in switch |
 | E0022 | Undefined tap as actor input |
 | E0023 | Shared buffer has no writer |
+| E0024 | Duplicate bind definition |
+| E0025 | Bind target not referenced (reserved) |
 | W0001 | Define shadows actor with same name |
 | W0002 | Deprecated switch default clause |
 
@@ -697,7 +699,7 @@ error[E0601]: lowering verification failed (L3 rate/shape preservation)
 | E0205 | L5: Unresolved input type |
 | E0206 | L5: Unresolved output type |
 
-#### 10.6.4 Analysis (E0300-E0310, W0300)
+#### 10.6.4 Analysis (E0300-E0312, W0300)
 
 | Code | Description |
 |------|-------------|
@@ -712,6 +714,8 @@ error[E0601]: lowering verification failed (L3 rate/shape preservation)
 | E0308 | Param type mismatch |
 | E0309 | Switch param non-int32 default |
 | E0310 | Control buffer type mismatch |
+| E0311 | Bind target not referenced in any task |
+| E0312 | Bind contract conflict (readers disagree on type/shape/rate) |
 | W0300 | Inferred dimension param ordering warning |
 
 #### 10.6.5 Schedule (E0400, W0400)

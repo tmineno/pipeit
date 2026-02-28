@@ -75,6 +75,7 @@ static pipit::ProgramDesc make_empty_desc() {
     desc.tasks = std::span<const pipit::TaskDesc>{};
     desc.buffers = std::span<const pipit::BufferStatsDesc>{};
     desc.probes = std::span<const pipit::ProbeDesc>{};
+    desc.binds = std::span<const pipit::BindDesc>{};
     desc.overrun_policy = "drop";
     desc.mem_allocated = 1024;
     desc.mem_used = 0;
@@ -226,6 +227,116 @@ TEST(shell_release_probe_output_ignored) {
                           "--duration", "0"};
     int rc = call_shell(args, desc);
     ASSERT_EQ(rc, 0);
+}
+
+// ── Bind tests ──────────────────────────────────────────────────────────────
+
+static pipit::BindState g_bind_state_iq{"udp(\"127.0.0.1:9100\")", ""};
+
+static const pipit::BindDesc g_bind_descs[] = {
+    {"abcdef0123456789", "iq", "out", "float", nullptr, 0, 48000.0, "udp(\"127.0.0.1:9100\")",
+     &g_bind_state_iq},
+};
+
+TEST(shell_bind_known) {
+    reset_state();
+    g_bind_state_iq.current_endpoint = "udp(\"127.0.0.1:9100\")";
+    static const pipit::TaskDesc tasks[] = {{"mock", mock_task, &g_task_stats}};
+    auto desc = make_empty_desc();
+    desc.tasks = tasks;
+    desc.binds = g_bind_descs;
+
+    const char *args[] = {"prog", "--bind", "iq=udp(\"10.0.0.1:5000\")", "--duration", "0"};
+    int rc = call_shell(args, desc);
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(g_bind_state_iq.current_endpoint == "udp(\"10.0.0.1:5000\")");
+    g_bind_state_iq.current_endpoint = "udp(\"127.0.0.1:9100\")";
+}
+
+TEST(shell_bind_unknown) {
+    reset_state();
+    auto desc = make_empty_desc();
+    desc.binds = g_bind_descs;
+
+    const char *args[] = {"prog", "--bind", "nosuch=endpoint"};
+    int rc = call_shell(args, desc);
+    ASSERT_EQ(rc, 2);
+}
+
+TEST(shell_bind_missing_eq) {
+    reset_state();
+    auto desc = make_empty_desc();
+    desc.binds = g_bind_descs;
+
+    const char *args[] = {"prog", "--bind", "iq"};
+    int rc = call_shell(args, desc);
+    ASSERT_EQ(rc, 2);
+}
+
+TEST(shell_bind_empty_name) {
+    reset_state();
+    auto desc = make_empty_desc();
+    desc.binds = g_bind_descs;
+
+    const char *args[] = {"prog", "--bind", "=endpoint"};
+    int rc = call_shell(args, desc);
+    ASSERT_EQ(rc, 2);
+}
+
+TEST(shell_bind_empty_endpoint) {
+    reset_state();
+    auto desc = make_empty_desc();
+    desc.binds = g_bind_descs;
+
+    const char *args[] = {"prog", "--bind", "iq="};
+    int rc = call_shell(args, desc);
+    ASSERT_EQ(rc, 2);
+}
+
+TEST(shell_list_bindings_api) {
+    auto desc = make_empty_desc();
+    desc.binds = g_bind_descs;
+
+    auto binds = pipit::list_bindings(desc);
+    ASSERT_EQ(binds.size(), 1u);
+    ASSERT_TRUE(std::strcmp(binds[0].name, "iq") == 0);
+}
+
+TEST(shell_rebind_pending) {
+    g_bind_state_iq.current_endpoint = "udp(\"127.0.0.1:9100\")";
+    g_bind_state_iq.pending_endpoint.clear();
+    g_bind_state_iq.rebind_pending.store(false);
+
+    auto desc = make_empty_desc();
+    desc.binds = g_bind_descs;
+
+    int rc = pipit::rebind(desc, "abcdef0123456789", "shm(\"/new\")");
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(g_bind_state_iq.rebind_pending.load());
+    ASSERT_TRUE(g_bind_state_iq.pending_endpoint == "shm(\"/new\")");
+
+    pipit::apply_pending_rebinds(desc.binds);
+    ASSERT_TRUE(g_bind_state_iq.current_endpoint == "shm(\"/new\")");
+    ASSERT_TRUE(!g_bind_state_iq.rebind_pending.load());
+    ASSERT_TRUE(g_bind_state_iq.pending_endpoint.empty());
+
+    g_bind_state_iq.current_endpoint = "udp(\"127.0.0.1:9100\")";
+}
+
+TEST(shell_rebind_unknown_id) {
+    auto desc = make_empty_desc();
+    desc.binds = g_bind_descs;
+
+    int rc = pipit::rebind(desc, "0000000000000000", "endpoint");
+    ASSERT_EQ(rc, 1);
+}
+
+TEST(shell_rebind_null_guard) {
+    auto desc = make_empty_desc();
+    desc.binds = g_bind_descs;
+
+    ASSERT_EQ(pipit::rebind(desc, nullptr, "endpoint"), 1);
+    ASSERT_EQ(pipit::rebind(desc, "abcdef0123456789", nullptr), 1);
 }
 
 int main() {

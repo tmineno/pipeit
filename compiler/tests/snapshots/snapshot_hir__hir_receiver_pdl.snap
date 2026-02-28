@@ -2,7 +2,7 @@
 source: compiler/tests/snapshot_hir.rs
 expression: output
 ---
-HirProgram (2 consts, 0 params, 2 directives, 2 tasks)
+HirProgram (2 consts, 0 params, 2 directives, 0 binds, 2 tasks)
   const sync_coeff = [1, -1, 1, -1]
   const data_coeff = [0.1, 0.2, 0.4, 0.2, 0.1]
   set mem = 134217728B

@@ -2,7 +2,7 @@
 source: compiler/tests/snapshot_hir.rs
 expression: output
 ---
-HirProgram (2 consts, 1 params, 2 directives, 3 tasks)
+HirProgram (2 consts, 1 params, 2 directives, 0 binds, 3 tasks)
   const lp_coeff = [0.1, 0.2, 0.4, 0.2, 0.1]
   const bp_coeff = [0.05, -0.1, 0.3, -0.1, 0.05]
   param agc_gain = 1

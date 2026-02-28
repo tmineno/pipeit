@@ -208,31 +208,54 @@ v0.4.5 (Diagnostics)                                    ████
 
 > **Priority rationale**: Critical foundation — unlocks PSHM transport (v0.4.3) and all future transport backends. No external integration is possible without this infrastructure.
 
-### Phase 1: Frontend & IR Wiring (Mechanical)
+### Phase 1: Frontend & IR Wiring (Mechanical) ✅
 
-- [ ] Add `bind` to lexer/parser/AST (`bind <name> = <endpoint>`) with source-span diagnostics
-- [ ] Thread bind declarations into HIR/THIR/LIR as first-class artifacts (no ad-hoc side tables)
-- [ ] Add deterministic serialization format for endpoint options (`udp("host:port", chan=10)`)
+- [x] Add `bind` to lexer/parser/AST (`bind <name> = <endpoint>`) with source-span diagnostics
+- [x] Thread bind declarations into HIR/THIR/LIR as first-class artifacts (no ad-hoc side tables)
+- [x] Add structured bind args through all IR layers (`LirBindValue` variants: String, Int, Float, Size, Freq, Ident)
+- [x] Add diagnostics E0024 (duplicate bind), E0025 (reserved: bind target not referenced)
+- [x] Add cross-namespace collision detection (bind vs const/param/define)
+- [x] Add unit tests (lexer, parser, resolve) and HIR/LIR snapshot tests
 
-### Phase 2: Semantic Inference & Validation (Behavior Change)
+### Phase 2: Semantic Inference & Validation (Behavior Change) ✅
 
-- [ ] Implement bind direction inference (`->name` => out, `@name` only => in, otherwise error)
-- [ ] Implement bind contract inference (dtype/shape/rate derivation from existing graph semantics)
-- [ ] Add compile-time diagnostics for bind failures (unknown target, direction inference failure, in-bind contract ambiguity, duplicate bind)
-- [ ] Enforce "bind does not alter SDF schedule/FIFO semantics" invariants via verifier checks
+- [x] Implement bind direction inference (`->name` => out, `@name` only => in, otherwise E0311)
+- [x] Implement bind contract inference (dtype/shape/rate from post-expansion graph via concrete actors)
+- [x] Add diagnostics E0311 (bind unreferenced), E0312 (bind contract conflict: type/shape/rate mismatch)
+- [x] Suppress E0023 for IN-bind buffers; pre-create BufferInfo with empty writer_task in resolve
+- [x] Skip IN-bind buffers in LIR `build_inter_task_buffers()`; OUT-bind buffers retained for ring-buffer codegen
+- [x] Thread `BindContract` into LIR (`LirBind.contract`) with Display showing direction/dtype/shape/rate
+- [x] Add `resolve_port_shape()` to THIR (companion to `resolve_port_rate()`, returns individual dims)
+- [x] Sorted iteration in all multi-reader inference loops for deterministic conflict diagnostics
+- [x] Update spec diagnostic table (§10.6.4: E0300-E0312)
+- [x] Unit tests (resolve, analyze: direction/dtype/shape/rate/unreferenced), snapshot tests (LIR bind-in/out)
 
-### Phase 3: Stable ID & Interface Manifest
+### Phase 3: Stable ID & Interface Manifest ✅
 
-- [ ] Generate deterministic bind `stable_id` from semantic IDs (not source span/name text)
-- [ ] Emit `pipeline.interface.json` with `stable_id`, `name`, `direction`, `dtype`, `shape`, `rate_hz`, `endpoint`
-- [ ] Add reproducibility tests: same semantic graph and config => identical interface manifest
+- [x] Generate deterministic bind `stable_id` from graph-lineage CallIds (SHA-256 of direction + adjacent actor CallIds + transport, 16 hex chars)
+- [x] Add `adjacent_actor_call_id()` graph helper (BFS from BufferWrite/BufferRead to adjacent Actor, handles modal tasks)
+- [x] Thread `stable_id` into `BindContract` → `LirBind` → Display
+- [x] Add `InterfaceManifest` struct with lossless ordered typed args (`InterfaceArg::Positional`/`Named`)
+- [x] Add `LirProgram::generate_interface_manifest()` → JSON serialization
+- [x] Add `--emit interface` (maps to `PassId::BuildLir`) and `--interface-out <path>` (orthogonal side-effect with terminal promotion)
+- [x] Early-exit guard: `--interface-out` rejects `--emit manifest/build-info/ast`
+- [x] Add determinism test (same source × 2 → identical stable_ids)
+- [x] Add bind-reorder stability test (swapped bind declarations → same stable_ids)
+- [x] Add topology-change detection test (different upstream actor → different stable_id)
+- [x] Manifest snapshot test (`snapshot_lir_bind_interface_manifest`)
 
-### Phase 4: Runtime Control Plane & Rebind
+### Phase 4: Runtime Control Plane & Rebind ✅
 
-- [ ] Add runtime control-plane API (`list_bindings`, `rebind(stable_id, endpoint)`)
-- [ ] Apply rebind atomically at iteration boundary (no mid-iteration endpoint swap)
-- [ ] Keep I/O non-blocking behavior equivalent to current socket actors
-- [ ] Add CLI override `--bind <name>=<endpoint>` and precedence rules vs DSL defaults
+- [x] Add `BindState`/`BindDesc` runtime structs with per-bind mutex for thread-safe endpoint access
+- [x] Add runtime control-plane API (`list_bindings`, `rebind(stable_id, endpoint)`, `apply_pending_rebinds`)
+- [x] Apply rebind atomically at iteration boundary via double-checked locking (per-iteration inside K-factor loop)
+- [x] Add compiler `--bind name=endpoint` CLI flag with two-phase processing (parse before pipeline, validate after)
+- [x] Add runtime `--bind name=endpoint` and `--list-bindings` introspection CLI flags
+- [x] Codegen: emit BindState globals, BindDesc table, `_apply_pending_rebinds()`, ProgramDesc.binds wiring
+- [x] Add `format_endpoint_spec()` and `endpoint_override` to interface manifest (with `skip_serializing_if`)
+- [x] Precedence chain: DSL default < compiler `--bind` < runtime `--bind` < `rebind()`
+- [x] Stage guard: reject `--bind` for non-effect stages (accept only `cpp|exe|interface` or with `--interface-out`)
+- [x] Tests: 9 runtime bind tests (CLI, list, rebind, null guard), 2 LIR snapshot tests, codegen plumbing updates
 
 ### Phase 5: Codegen Lowering & Backward Compatibility
 
@@ -576,6 +599,7 @@ v0.4.5 (Diagnostics)                                    ████
 - **v0.4.x deferred work placement**: follow-up items from v0.4.0 are grouped into `v0.4.1` through `v0.4.5` by priority (criticality → performance impact → complexity). Deterministic artifact keys moved from memory plan to v0.4.4 (compiler caching).
 - **v0.4.1 summary**: MemoryKind classification (ADR-028), SPSC ring buffer (ADR-029), param sync simplification (ADR-030), `alignas(64)` edge buffers, `--experimental` flag. Audited for over-engineering; scalarization/assume_aligned/locality-scoring deferred.
 - **v0.4.1 ADRs**: ADR-028 (edge memory classification), ADR-029 (SPSC ring buffer specialization), ADR-030 (param sync simplification)
+- **v0.4.2 Phase 4 summary**: Runtime control plane with `BindState`/`BindDesc` structs, double-checked locking for `rebind()`/`apply_pending_rebinds()`, compiler `--bind` flag (reject-based stage guard, two-phase processing), runtime `--bind`/`--list-bindings` CLI, per-iteration rebind apply in K-factor loop, interface manifest `endpoint_override` field. 9 runtime + 2 LIR snapshot tests added.
 - **v0.5.x** open items are currently deferred
 - Performance characterization should inform optimization priorities (measure before optimizing)
 - Spec files renamed to versioned names (`pipit-lang-spec-v0.3.0.md`, `pcc-spec-v0.3.0.md`); `v0.2.0` specs are frozen from tag `v0.2.2`

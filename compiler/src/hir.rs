@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Arg, Scalar, SetValue, ShapeConstraint, Span, Value};
+use crate::ast::{Arg, BindEndpoint, Scalar, SetValue, ShapeConstraint, Span, Value};
 use crate::id::{CallId, DefId, TaskId};
 
 // ── Program ─────────────────────────────────────────────────────────────────
@@ -29,6 +29,7 @@ pub struct HirProgram {
     pub consts: Vec<HirConst>,
     pub params: Vec<HirParam>,
     pub set_directives: Vec<HirSetDirective>,
+    pub binds: Vec<HirBind>,
     /// CallId maps for define-expanded calls (supplements resolve-phase maps).
     pub expanded_call_ids: HashMap<Span, CallId>,
     pub expanded_call_spans: HashMap<CallId, Span>,
@@ -157,6 +158,14 @@ pub struct HirSetDirective {
     pub span: Span,
 }
 
+/// Bind declaration (e.g., `bind iq = udp("127.0.0.1:9100", chan=10)`).
+#[derive(Debug, Clone)]
+pub struct HirBind {
+    pub name: String,
+    pub name_span: Span,
+    pub endpoint: BindEndpoint,
+}
+
 // ── Display ─────────────────────────────────────────────────────────────────
 
 use std::fmt;
@@ -165,10 +174,11 @@ impl fmt::Display for HirProgram {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
-            "HirProgram ({} consts, {} params, {} directives, {} tasks)",
+            "HirProgram ({} consts, {} params, {} directives, {} binds, {} tasks)",
             self.consts.len(),
             self.params.len(),
             self.set_directives.len(),
+            self.binds.len(),
             self.tasks.len()
         )?;
         for c in &self.consts {
@@ -179,6 +189,15 @@ impl fmt::Display for HirProgram {
         }
         for d in &self.set_directives {
             writeln!(f, "  set {} = {}", d.name, fmt_set_value(&d.value))?;
+        }
+        for b in &self.binds {
+            writeln!(
+                f,
+                "  bind {} = {}({} args)",
+                b.name,
+                b.endpoint.transport.name,
+                b.endpoint.args.len()
+            )?;
         }
         for task in &self.tasks {
             fmt_task(f, task)?;
@@ -512,17 +531,32 @@ impl<'a> HirBuilder<'a> {
                         span: stmt.span,
                     });
                 }
-                StatementKind::Define(_) => {
-                    // Defines are consumed during expansion, not emitted to HIR.
+                StatementKind::Define(_) | StatementKind::Bind(_) => {
+                    // Defines: consumed during expansion, not emitted to HIR.
+                    // Binds: collected separately below from resolved.binds.
                 }
             }
         }
+
+        // Binds: sorted by stmt_index for source-order stability.
+        let mut bind_entries: Vec<(&String, &crate::resolve::BindEntry)> =
+            self.resolved.binds.iter().collect();
+        bind_entries.sort_by_key(|(_, e)| e.stmt_index);
+        let binds: Vec<HirBind> = bind_entries
+            .into_iter()
+            .map(|(name, entry)| HirBind {
+                name: name.clone(),
+                name_span: entry.name_span,
+                endpoint: entry.endpoint.clone(),
+            })
+            .collect();
 
         HirProgram {
             tasks,
             consts,
             params,
             set_directives,
+            binds,
             expanded_call_ids: std::mem::take(&mut self.expanded_call_ids),
             expanded_call_spans: std::mem::take(&mut self.expanded_call_spans),
             program_span: self.program.span,

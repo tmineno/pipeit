@@ -38,6 +38,7 @@ pub enum StatementKind {
     Param(ParamStmt),
     Define(DefineStmt),
     Task(TaskStmt),
+    Bind(BindStmt),
 }
 
 // ── set_stmt: 'set' IDENT '=' set_value ──
@@ -81,6 +82,49 @@ pub struct DefineStmt {
     pub name: Ident,
     pub params: Vec<Ident>,
     pub body: PipelineBody,
+}
+
+// ── bind_stmt: 'bind' IDENT '=' bind_endpoint ──
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BindStmt {
+    pub name: Ident,
+    pub endpoint: BindEndpoint,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BindEndpoint {
+    pub transport: Ident,
+    pub args: Vec<BindArg>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BindArg {
+    /// Positional argument: a scalar value.
+    Positional(Scalar),
+    /// Named argument: `IDENT '=' scalar`.
+    Named(Ident, Scalar),
+}
+
+// ── Bind direction (inferred in analyze phase) ──
+
+/// Direction of a bind declaration: whether the pipeline writes (Out) or reads (In).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindDirection {
+    /// External writes, pipeline reads (`@name` source).
+    In,
+    /// Pipeline writes, external reads (`-> name` sink).
+    Out,
+}
+
+impl std::fmt::Display for BindDirection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BindDirection::In => write!(f, "in"),
+            BindDirection::Out => write!(f, "out"),
+        }
+    }
 }
 
 // ── task_stmt: 'clock' FREQ IDENT '{' task_body '}' ──

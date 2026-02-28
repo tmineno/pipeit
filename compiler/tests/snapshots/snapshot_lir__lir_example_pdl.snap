@@ -2,7 +2,7 @@
 source: compiler/tests/snapshot_lir.rs
 expression: output
 ---
-LirProgram (2 consts, 1 params, 1 inter-task bufs, 2 tasks, 1 probes)
+LirProgram (2 consts, 1 params, 0 binds, 1 inter-task bufs, 2 tasks, 1 probes)
   const coeff: float[5] = [0.1f, 0.2f, 0.4f, 0.2f, 0.1f]
   const fft_size = 256
   param gain: float = "1" (cli: std::stof)
