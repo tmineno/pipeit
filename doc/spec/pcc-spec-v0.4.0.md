@@ -161,9 +161,11 @@ JSON metadata manifest (schema v1) consumed by actor registry:
 pcc example.pdl --actor-meta ./build/actors.meta.json
 ```
 
-When omitted, registry metadata is loaded from header scanning (`-I` / `--actor-path`).
+**Required** for all stages that need actor metadata (`cpp`, `exe`, `build-info`, `graph`, `graph-dot`, `schedule`, `timing-chart`). Omitting `--actor-meta` on these stages produces E0700 (exit code 2).
 
-### 5.3 Actor headers (`-I`, `--include`) — registry fallback and C++ declaration input
+Not required for `--emit manifest` (which generates the manifest) or `--emit ast` (parse-only dump).
+
+### 5.3 Actor headers (`-I`, `--include`) — manifest generation and C++ declaration input
 
 One or more header files or directories:
 
@@ -171,8 +173,8 @@ One or more header files or directories:
 pcc example.pdl -I ./actors.h -I ./include/
 ```
 
-If `--actor-meta` is omitted, headers provide metadata for registry construction.
-For `--emit exe` and `--emit cpp`, headers are also used as generated C++ declaration inputs.
+For `--emit manifest`, headers provide the source for metadata extraction (via preprocessor-based scanning).
+For `--emit exe` and `--emit cpp`, headers are used as generated C++ declaration inputs (not for metadata — that comes from `--actor-meta`).
 
 ### 5.4 Actor search path (`--actor-path`)
 
@@ -301,12 +303,30 @@ When `--cflags` is explicitly set, optimization defaults are overridden.
 
 ## 8. Actor Metadata Loading
 
-Metadata loading order:
+### 8.1 Compilation stages (`cpp`, `exe`, `build-info`, `graph`, `graph-dot`, `schedule`, `timing-chart`)
 
-1. If `--actor-meta` is present, load manifest metadata directly.
-2. Otherwise, scan actors from `--actor-path` then overlay `-I` entries.
-3. Validate schema and required fields.
-4. Build registry keyed by actor name and type parameters.
+`--actor-meta` is required. Loading order:
+
+1. Load manifest metadata from `--actor-meta`.
+2. Validate schema and required fields.
+3. Build registry keyed by actor name and type parameters.
+
+Missing `--actor-meta` produces E0700 (exit code 2).
+
+### 8.2 Manifest generation (`--emit manifest`)
+
+`--actor-meta` is NOT used. Metadata is extracted from headers:
+
+1. Discover actor headers from `-I` and `--actor-path`.
+2. Build probe translation unit with redefined `ACTOR` macro (ADR-032).
+3. Invoke preprocessor (`<cc> -E -P -x c++ -std=c++20 -`) to resolve includes/conditionals.
+4. Parse `PIPIT_REC_V1(...)` records in Rust.
+5. Apply overlay precedence: `--actor-path` is base, `-I` overlays with higher precedence on name collision. Duplicates within the same source class are errors.
+6. Emit canonical schema v1 JSON.
+
+### 8.3 Parse-only dump (`--emit ast`)
+
+No actor metadata required. Registry is not loaded.
 
 Manifest schema (minimum):
 
@@ -511,6 +531,7 @@ error[E0601]: lowering verification failed (L3 rate/shape preservation)
 | E0400-E0499 | schedule | Scheduling errors |
 | E0500-E0599 | graph | Graph construction errors |
 | E0600-E0699 | pipeline | Stage certification failures |
+| E0700-E0799 | usage | CLI usage errors |
 | W0001-W0099 | resolve | Name resolution warnings |
 | W0300-W0399 | analyze | SDF analysis warnings |
 | W0400-W0499 | schedule | Scheduling warnings |
@@ -605,6 +626,17 @@ error[E0601]: lowering verification failed (L3 rate/shape preservation)
 | E0601 | Lowering verification failed (L1-L5) |
 | E0602 | Schedule verification failed (S1-S2) |
 | E0603 | LIR verification failed (R1-R2) |
+
+#### 10.6.8 Usage (E0700)
+
+| Code | Description |
+|------|-------------|
+| E0700 | `--actor-meta` is required for the requested `--emit` stage |
+
+E0700 respects `--diagnostic-format`:
+
+- **Human**: `error[E0700]: --actor-meta is required for --emit <stage>` with hint showing manifest generation and compile commands.
+- **JSON**: `{"kind":"usage","level":"error","code":"E0700",...}` with `"usage"` kind.
 
 ---
 
