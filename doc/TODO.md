@@ -176,12 +176,15 @@
 
 - Deterministic `invalidation_key` hashing — no caching infrastructure to consume keys
 
-## v0.4.2 - Diagnostics Completion (Medium Complexity)
+## v0.4.2 - Diagnostics Completion ✅
 
 **Goal**: Complete diagnostics provenance and ambiguity guidance to improve debuggability and remediation clarity.
 
-- [ ] Add full provenance tracing through the constraint solver.
-- [ ] Improve ambiguity/mismatch diagnostics with candidate and remediation suggestions.
+- [x] Enrich `type_infer.rs` E0100/E0101/E0102 with `cause_chain`, `related_spans`, and actionable hints
+- [x] Refactor `infer_type_from_args()` to return partial results (`Option<Vec<Option<PipitType>>>`) for E0102 provenance
+- [x] Enrich `lower.rs` E0200-E0206 with `cause_chain`, `related_spans`, and remediation hints
+- [x] Dedicated tests for E0202 (L3), E0204 (L4), and E0100 paths
+- [x] All 10 diagnostics in type_infer + lower now have full provenance (cause_chain + hints)
 
 ## v0.4.3 - Compiler Latency Profiling & Recovery (High Complexity)
 
@@ -428,6 +431,7 @@
 - **v0.4.x deferred work placement**: follow-up items from v0.4.0 are grouped into `v0.4.1`/`v0.4.2`/`v0.4.3` by complexity and release criticality.
 - **v0.4.1 summary**: MemoryKind classification (ADR-028), SPSC ring buffer (ADR-029), param sync simplification (ADR-030), `alignas(64)` edge buffers, `--experimental` flag. Audited for over-engineering; scalarization/assume_aligned/locality-scoring deferred.
 - **v0.4.1 ADRs**: ADR-028 (edge memory classification), ADR-029 (SPSC ring buffer specialization), ADR-030 (param sync simplification)
+- **v0.4.2 summary**: Diagnostics completion — enriched all 10 diagnostics in `type_infer.rs` (E0100-E0102) and `lower.rs` (E0200-E0206) with `cause_chain`, `related_spans`, and actionable hints. Refactored `infer_type_from_args()` for partial-result provenance.
 - **v0.5.x** open items are currently deferred
 - Performance characterization should inform optimization priorities (measure before optimizing)
 - Spec files renamed to versioned names (`pipit-lang-spec-v0.3.0.md`, `pcc-spec-v0.3.0.md`); `v0.2.0` specs are frozen from tag `v0.2.2`
