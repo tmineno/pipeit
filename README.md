@@ -36,8 +36,15 @@ clock 1kHz drain {
 # Build the compiler (from repo root)
 cargo build --release -p pcc
 
+# Generate actor metadata manifest (required before compilation)
+target/release/pcc --emit manifest \
+  -I runtime/libpipit/include \
+  -I examples \
+  -o actors.meta.json
+
 # Compile a pipeline to C++
 target/release/pcc examples/gain.pdl \
+  --actor-meta actors.meta.json \
   -I runtime/libpipit/include/std_actors.h \
   --emit cpp -o gain.cpp
 
@@ -49,6 +56,7 @@ clang++ -std=c++20 -O2 gain.cpp \
 
 # Or compile directly to executable (one step, requires C++20)
 target/release/pcc examples/gain.pdl \
+  --actor-meta actors.meta.json \
   -I runtime/libpipit/include/std_actors.h \
   --cflags="-std=c++20 -O2" \
   -o gain

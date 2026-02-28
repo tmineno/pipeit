@@ -43,37 +43,15 @@ pcc [source.pdl] [options]
 
 ## Actor Metadata Loading Rules
 
-- With `--actor-meta`, metadata is loaded from manifest only.
-- Without `--actor-meta`, metadata is built by scanning headers.
-- In header-scan mode, `--actor-path` is the base and `-I` overlays with higher precedence on name conflicts.
+- `--actor-meta` is **required** for all compilation stages (`cpp`, `exe`, `build-info`, `graph`, `graph-dot`, `schedule`, `timing-chart`). Missing `--actor-meta` produces error E0700 (exit code 2).
+- `--emit manifest` generates the manifest from headers — no `--actor-meta` needed.
+- `--emit ast` is a parse-only dump — no manifest needed.
+- For `--emit manifest`, `--actor-path` is the base and `-I` overlays with higher precedence on name conflicts.
 - Even with `--actor-meta`, `-I` / `--actor-path` are still used to collect header includes for generated C++ compilation inputs.
 
 ## Common Workflows
 
-### 1) Compile to executable (single step)
-
-```bash
-pcc examples/gain.pdl \
-  -I runtime/libpipit/include/std_actors.h \
-  --cflags "-std=c++20 -O2" \
-  -o gain
-```
-
-Note: generated code and runtime headers use `std::span`; use a C++20-capable toolchain.
-
-### 2) Emit generated C++ (stdout)
-
-```bash
-pcc examples/gain.pdl -I runtime/libpipit/include/std_actors.h --emit cpp
-```
-
-### 3) Emit generated C++ (file)
-
-```bash
-pcc examples/gain.pdl -I runtime/libpipit/include/std_actors.h --emit cpp -o gain.cpp
-```
-
-### 4) Generate manifest for hermetic builds
+### 1) Generate manifest (required first step)
 
 ```bash
 pcc --emit manifest \
@@ -82,17 +60,37 @@ pcc --emit manifest \
   -o actors.meta.json
 ```
 
-### 5) Compile using manifest metadata
+### 2) Compile to executable
 
 ```bash
 pcc examples/gain.pdl \
   --actor-meta actors.meta.json \
-  -I runtime/libpipit/include \
-  -I examples \
+  -I runtime/libpipit/include/std_actors.h \
+  --cflags "-std=c++20 -O2" \
+  -o gain
+```
+
+Note: generated code and runtime headers use `std::span`; use a C++20-capable toolchain.
+
+### 3) Emit generated C++ (stdout)
+
+```bash
+pcc examples/gain.pdl \
+  --actor-meta actors.meta.json \
+  -I runtime/libpipit/include/std_actors.h \
+  --emit cpp
+```
+
+### 4) Emit generated C++ (file)
+
+```bash
+pcc examples/gain.pdl \
+  --actor-meta actors.meta.json \
+  -I runtime/libpipit/include/std_actors.h \
   --emit cpp -o gain.cpp
 ```
 
-### 6) Emit provenance build info
+### 5) Emit provenance build info
 
 ```bash
 pcc examples/gain.pdl \
