@@ -183,34 +183,31 @@
 - [x] Dedicated tests for E0202 (L3), E0204 (L4), and E0100 paths
 - [x] All 10 diagnostics in type_infer + lower now have full provenance (cause_chain + hints)
 
-## v0.4.4 - Clang Registry Extraction & Manifest-Required Inputs (Breaking)
+## v0.4.4 - PP Record Manifest Extraction & Manifest-Required Inputs (Breaking) ✅
 
-**Goal**: Move `ACTOR` metadata extraction to a dedicated Clang toolchain path and require manifest input for `pcc` compile/build-info paths while keeping `pcc` itself Clang-independent.
+**Goal**: Replace text-based actor metadata scanning with preprocessor-based extraction (ADR-032) and require `--actor-meta` for all compilation stages (ADR-033, breaking change).
 
-- [ ] **M0: Contract lock (spec/ADR/docs)**
-  - [ ] Update `pcc-spec`, usage guide, and README for manifest-required behavior.
-  - [ ] Document breaking change: non-`--emit manifest` compile paths require `--actor-meta`.
-  - [ ] Define stable usage-error contract for missing manifest input (code + message).
-- [ ] **M1: Clang extractor skeleton**
-  - [ ] Add dedicated registry generator target (working name: `pipit-reggen`).
-  - [ ] Ingest `compile_commands.json` and run TU-aware extraction.
-  - [ ] Emit deterministic schema v1 `actors.meta.json`.
-- [ ] **M2: Accurate metadata extraction**
-  - [ ] Capture `ACTOR(...)` signatures in include/define-resolved context.
-  - [ ] Extract template type parameter names via AST.
-  - [ ] Map canonical `QualType` forms to manifest types (`float`, `std::complex<float>`, spans, etc.).
-- [ ] **M3: pcc manifest-required enforcement**
-  - [ ] Remove default header-scan metadata loading from compile/build-info paths.
-  - [ ] Require `--actor-meta` for compile/build-info and provide actionable remediation diagnostics.
-  - [ ] Keep `--emit manifest` as the metadata generation entrypoint.
-- [ ] **M4: Build integration + CI**
-  - [ ] Update CMake/examples workflow (`header change -> manifest regen -> compile regen`).
-  - [ ] Update integration/repro tests for manifest-required contract coverage.
-  - [ ] Verify deterministic fingerprint behavior across repeated runs.
-- [ ] **M5: Cleanup + hardening**
-  - [ ] Retire obsolete text-scanner-first docs/tests in `pcc`.
-  - [ ] Add extractor failure-path regression tests (missing compile DB, unresolved include, type-map failure).
-  - [ ] Publish migration notes for downstream users.
+- [x] **M0: Contract lock (spec/ADR/docs)**
+  - [x] ADR-032: PP record manifest extraction approach
+  - [x] ADR-033: Manifest-required inputs (breaking change)
+  - [x] Update `pcc-spec-v0.4.0.md` (§5.2, §5.3, §8, §10.5, §10.6.8)
+  - [x] Update usage guide, README, v0.4.4 release note
+- [x] **M1: PP record extraction (replaces text scanner)**
+  - [x] `scan_actors_pp()`: build probe TU, invoke preprocessor, parse `PIPIT_REC_V1(...)` records
+  - [x] Probe TU redefines `ACTOR` macro → structured records, pipes to `clang++ -E -P -x c++ -std=c++20 -`
+  - [x] Byte-identical manifest output verified against golden fixture
+  - [x] `PreprocessorError` variant for compiler/preprocessing failures (exit code 3)
+- [x] **M3: Manifest-required enforcement (breaking)**
+  - [x] E0700 diagnostic for missing `--actor-meta` on compile stages (exit code 2)
+  - [x] `emit_usage_error()` centralized helper respecting `--diagnostic-format`
+  - [x] `--emit ast` and `--emit manifest` unaffected (no `--actor-meta` needed)
+  - [x] All 5 test files updated with `shared_manifest()` helpers (OnceLock)
+  - [x] E0700 tests: human format, JSON format, stage-aware messages
+- [x] **M4: Build integration + cleanup**
+  - [x] CMakeLists.txt: removed legacy `PIPIT_USE_MANIFEST=OFF` path
+  - [x] `build.sh`: removed `--no-manifest` option
+  - [x] 16 PP extraction unit tests (parse, split, unescape, invoke, failure paths)
+  - [x] 667 total tests passing
 
 ---
 
@@ -262,8 +259,8 @@
   - [ ] Remove or minimize remaining `ActorMeta` cloning in `type_infer` hot paths (monomorphization/result materialization path)
   - [ ] Reduce String/HashMap churn in monomorphization keys (prefer reused keys/interned forms)
 
-- [ ] **From v0.4.4 / Priority 3: Registry generation + manifest refresh costs**
-  - [ ] Cache extractor outputs keyed by compile DB + actor-header hash set
+- [ ] **From v0.4.4 / Priority 3: Manifest generation + refresh costs**
+  - [ ] Cache PP extraction outputs keyed by header content hashes
   - [ ] Skip manifest regeneration when actor-signature set is unchanged
   - [ ] Re-benchmark two-step workflow (`manifest -> build-info/cpp`) for `simple`, `multitask`, `modal`
 
@@ -469,6 +466,8 @@
 - **v0.4.1 ADRs**: ADR-028 (edge memory classification), ADR-029 (SPSC ring buffer specialization), ADR-030 (param sync simplification)
 - **v0.4.2 summary**: Diagnostics completion — enriched all 10 diagnostics in `type_infer.rs` (E0100-E0102) and `lower.rs` (E0200-E0206) with `cause_chain`, `related_spans`, and actionable hints. Refactored `infer_type_from_args()` for partial-result provenance.
 - **v0.4.3 deferred**: Compiler latency profiling & recovery planned but deferred to v0.5.x. Full plan in review-0004. Key findings: ThirContext untimed, LIR has 2 dead fields, whole-program output cache designed with skip-cache-if-warnings policy and include_paths in cache key.
+- **v0.4.4 summary**: PP record manifest extraction (ADR-032) replaces text scanner (~440 lines deleted). Breaking change: `--actor-meta` required for `--emit cpp|exe|build-info|graph|graph-dot|schedule|timing-chart` (ADR-033). E0700 diagnostic, centralized usage-error emitter, 16 PP extraction unit tests. 667 total tests passing.
+- **v0.4.4 ADRs**: ADR-032 (PP record manifest extraction), ADR-033 (manifest-required inputs)
 - **v0.5.x** open items are currently deferred; now also includes former v0.4.3 latency work
 - Performance characterization should inform optimization priorities (measure before optimizing)
 - Spec files renamed to versioned names (`pipit-lang-spec-v0.3.0.md`, `pcc-spec-v0.3.0.md`); `v0.2.0` specs are frozen from tag `v0.2.2`
