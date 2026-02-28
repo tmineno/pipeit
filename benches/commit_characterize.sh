@@ -477,7 +477,7 @@ if compgen -G "$REPORT_ROOT/*-bench.md" >/dev/null 2>&1; then
             previous_report="$candidate"
             break
         fi
-    done < <(ls -1t "$REPORT_ROOT"/*-bench.md)
+    done < <(printf '%s\n' "$REPORT_ROOT"/*-bench.md | sort -r)
 fi
 
 declare -A prev_values
@@ -621,6 +621,16 @@ fi
     echo "- Runtime log: \`${RUNTIME_LOG_REL}\`"
     echo "- Compile log: \`${COMPILE_LOG_REL}\`"
     echo "- Runtime JSON dir: \`${RUNTIME_OUT_DIR_REL}\`"
+    echo ""
+    echo "## Verification"
+    echo ""
+    echo "Reproduce compile measurements with stable settings:"
+    echo ""
+    echo '```bash'
+    echo './benches/compiler_bench_stable.sh \'
+    echo "  --filter 'kpi/(full_compile_latency|phase_latency)' \\"
+    echo '  --sample-size 40 --measurement-time 1.0'
+    echo '```'
     echo ""
     echo "## Machine Readable Metrics"
     echo ""

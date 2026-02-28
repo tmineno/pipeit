@@ -43,12 +43,14 @@ Each report always includes these sections in order:
 2. Commands used
 3. Status (`runtime/e2e`, `compile`)
 4. Full compile latency table (`simple`, `multitask`, `complex`, `modal`)
-5. Runtime deadline miss rate table (`1kHz`, `10kHz`, `48kHz`)
-6. Ring buffer contention table (`1/2/4/8 readers`)
-7. E2E throughput table (pipeline + socket rx)
-8. Stable KPI table with fixed metric keys
-9. Artifact paths
-10. Machine-readable metrics block
+5. Phase latency table (complex scenario: `build_thir_context`, `build_lir`, `emit_cpp`)
+6. Runtime deadline miss rate table (`1kHz`, `10kHz`, `48kHz`)
+7. Ring buffer contention table (`1/2/4/8 readers`)
+8. E2E throughput table (pipeline + socket rx)
+9. Stable KPI table with fixed metric keys
+10. Artifact paths
+11. Verification commands (stable benchmark reproduction)
+12. Machine-readable metrics block
 
 Path policy:
 
@@ -66,8 +68,9 @@ Numeric display policy:
 - Every stable metric row has:
   - `Value`
   - `Delta vs prev`
-- `Delta vs prev` is computed against the most recently modified previous
-  `*-bench.md` file in this directory (excluding the report being written).
+- `Delta vs prev` is computed against the most recent previous
+  `*-bench.md` file by filename timestamp (reverse lexicographic sort),
+  excluding the report being written.
 - Machine-readable block markers:
   - `<!-- PIPIT_METRICS_BEGIN -->`
   - `<!-- PIPIT_METRICS_END -->`
