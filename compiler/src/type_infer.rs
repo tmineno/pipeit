@@ -31,7 +31,7 @@ use crate::resolve::ResolvedProgram;
 /// Real: int8 → int16 → int32 → float → double
 /// Complex: cfloat → cdouble
 /// Cross-family (real ↔ complex): NEVER implicit.
-fn widening_rank(t: PipitType) -> Option<(u8, u8)> {
+pub fn widening_rank(t: PipitType) -> Option<(u8, u8)> {
     // (family, rank) — family 0 = real, family 1 = complex
     match t {
         PipitType::Int8 => Some((0, 0)),
