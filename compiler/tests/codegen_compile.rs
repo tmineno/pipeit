@@ -1936,3 +1936,131 @@ fn no_bind_programs_unaffected() {
         &project_root().join("examples"),
     );
 }
+
+// ── SHM bind compile tests ──────────────────────────────────────────────────
+
+#[test]
+fn bind_shm_out_compiles() {
+    let cxx = match find_cxx_compiler() {
+        Some(c) => c,
+        None => return,
+    };
+    let runtime_include = runtime_include_dir();
+    let cpp = generate_cpp_from_inline(
+        r#"bind iq = shm("test_ring", slots=1024, slot_bytes=4096)
+clock 48kHz audio {
+    constant(0) -> iq
+}"#,
+        "bind_shm_out",
+        &[&runtime_include],
+    );
+    assert!(
+        cpp.contains("ShmIoAdapter _shm_io_iq("),
+        "SHM OUT bind should contain ShmIoAdapter"
+    );
+    assert!(
+        cpp.contains("_shm_io_iq.send("),
+        "SHM OUT bind should contain .send() call"
+    );
+    compile_cpp(
+        &cxx,
+        &cpp,
+        "bind_shm_out",
+        &runtime_include,
+        &project_root().join("examples"),
+    );
+}
+
+#[test]
+fn bind_shm_in_compiles() {
+    let cxx = match find_cxx_compiler() {
+        Some(c) => c,
+        None => return,
+    };
+    let runtime_include = runtime_include_dir();
+    let cpp = generate_cpp_from_inline(
+        r#"bind iq = shm("test_ring", slots=1024, slot_bytes=4096)
+clock 48kHz audio {
+    @iq | binwrite("/dev/null")
+}"#,
+        "bind_shm_in",
+        &[&runtime_include],
+    );
+    assert!(
+        cpp.contains("ShmIoAdapter _shm_io_iq("),
+        "SHM IN bind should contain ShmIoAdapter"
+    );
+    assert!(
+        cpp.contains("_shm_io_iq.recv("),
+        "SHM IN bind should contain .recv() call"
+    );
+    compile_cpp(
+        &cxx,
+        &cpp,
+        "bind_shm_in",
+        &runtime_include,
+        &project_root().join("examples"),
+    );
+}
+
+#[test]
+fn bind_shm_mixed_with_udp_compiles() {
+    let cxx = match find_cxx_compiler() {
+        Some(c) => c,
+        None => return,
+    };
+    let runtime_include = runtime_include_dir();
+    let cpp = generate_cpp_from_inline(
+        r#"bind iq = shm("test_ring", slots=1024, slot_bytes=4096)
+bind net_out = udp("127.0.0.1:9100", chan=10)
+clock 48kHz audio {
+    constant(0) -> iq
+    constant(0) -> net_out
+}"#,
+        "bind_shm_mixed",
+        &[&runtime_include],
+    );
+    assert!(
+        cpp.contains("ShmIoAdapter _shm_io_iq("),
+        "SHM bind should use ShmIoAdapter"
+    );
+    assert!(
+        cpp.contains("BindIoAdapter _bind_io_net_out("),
+        "UDP bind should use BindIoAdapter"
+    );
+    compile_cpp(
+        &cxx,
+        &cpp,
+        "bind_shm_mixed",
+        &runtime_include,
+        &project_root().join("examples"),
+    );
+}
+
+#[test]
+fn bind_shm_preamble_includes_header() {
+    let cxx = match find_cxx_compiler() {
+        Some(c) => c,
+        None => return,
+    };
+    let runtime_include = runtime_include_dir();
+    let cpp = generate_cpp_from_inline(
+        r#"bind iq = shm("test_ring", slots=1024, slot_bytes=4096)
+clock 48kHz audio {
+    constant(0) -> iq
+}"#,
+        "bind_shm_header",
+        &[&runtime_include],
+    );
+    assert!(
+        cpp.contains("#include <pipit_shm.h>"),
+        "SHM bind should include pipit_shm.h"
+    );
+    compile_cpp(
+        &cxx,
+        &cpp,
+        "bind_shm_header",
+        &runtime_include,
+        &project_root().join("examples"),
+    );
+}

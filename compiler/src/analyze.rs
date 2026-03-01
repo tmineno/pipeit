@@ -104,6 +104,7 @@ pub fn analyze(thir: &ThirContext, graph: &ProgramGraph) -> AnalysisResult {
     ctx.check_cross_clock_rates();
     ctx.compute_buffer_sizes();
     ctx.infer_bind_contracts();
+    ctx.validate_bind_endpoints();
     ctx.check_memory_pool();
     ctx.check_param_types();
     ctx.check_ctrl_types();
@@ -1793,6 +1794,145 @@ impl<'a> AnalyzeCtx<'a> {
         }
     }
 
+    /// Validate SHM bind endpoint arguments (slots, slot_bytes, name).
+    ///
+    /// Preconditions: called after `infer_bind_contracts()` so binds are available.
+    /// Postconditions: emits E0720–E0726 for invalid SHM endpoints.
+    fn validate_bind_endpoints(&mut self) {
+        let binds: Vec<_> = self
+            .thir
+            .binds()
+            .iter()
+            .filter(|b| b.endpoint.transport.name == "shm")
+            .map(|b| (b.name.clone(), b.endpoint.clone()))
+            .collect();
+
+        for (name, ep) in &binds {
+            let span = ep.span;
+
+            // Check positional name arg
+            let has_positional = ep.args.iter().any(|a| matches!(a, BindArg::Positional(_)));
+            if !has_positional {
+                self.error(
+                    codes::E0724,
+                    span,
+                    format!("shm bind '{}': missing required name argument", name),
+                );
+            }
+
+            // Check named arg: slots
+            self.validate_shm_int_arg(name, &ep.args, "slots", span, codes::E0720, codes::E0722);
+
+            // Check named arg: slot_bytes
+            self.validate_shm_int_arg(
+                name,
+                &ep.args,
+                "slot_bytes",
+                span,
+                codes::E0721,
+                codes::E0723,
+            );
+
+            // Check slot_bytes alignment (must be multiple of 8)
+            if let Some(slot_bytes_val) = self.find_named_number(&ep.args, "slot_bytes") {
+                let v = slot_bytes_val as u64;
+                if v > 0 && v % 8 != 0 {
+                    self.error_with_hint(
+                        codes::E0726,
+                        span,
+                        format!(
+                            "shm bind '{}': slot_bytes={} is not a multiple of 8",
+                            name, v
+                        ),
+                        "slot_bytes must be 8-byte aligned for atomic field access".to_string(),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Validate a required named integer argument for an SHM endpoint.
+    fn validate_shm_int_arg(
+        &mut self,
+        bind_name: &str,
+        args: &[BindArg],
+        arg_name: &str,
+        span: Span,
+        missing_code: DiagCode,
+        zero_code: DiagCode,
+    ) {
+        let named = args.iter().find_map(|a| match a {
+            BindArg::Named(ident, scalar) if ident.name == arg_name => Some(scalar),
+            _ => None,
+        });
+        match named {
+            None => {
+                self.error(
+                    missing_code,
+                    span,
+                    format!(
+                        "shm bind '{}': missing required '{}' argument",
+                        bind_name, arg_name
+                    ),
+                );
+            }
+            Some(Scalar::Number(val, _, is_int)) => {
+                if !is_int {
+                    self.error_with_hint(
+                        codes::E0725,
+                        span,
+                        format!(
+                            "shm bind '{}': '{}' must be an integer literal",
+                            bind_name, arg_name
+                        ),
+                        format!("use an integer value like {}=1024", arg_name),
+                    );
+                } else if *val <= 0.0 {
+                    self.error(
+                        zero_code,
+                        span,
+                        format!(
+                            "shm bind '{}': '{}' must be > 0 (got {})",
+                            bind_name, arg_name, *val as i64
+                        ),
+                    );
+                }
+            }
+            Some(Scalar::Ident(_)) => {
+                self.error_with_hint(
+                    codes::E0725,
+                    span,
+                    format!(
+                        "shm bind '{}': '{}' must be an integer literal, not a const reference",
+                        bind_name, arg_name
+                    ),
+                    format!(
+                        "replace with a literal value like {}=1024; const refs for slots/slot_bytes are not supported",
+                        arg_name
+                    ),
+                );
+            }
+            _ => {
+                self.error(
+                    codes::E0725,
+                    span,
+                    format!(
+                        "shm bind '{}': '{}' must be an integer literal",
+                        bind_name, arg_name
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Find a named number argument value (helper for alignment check).
+    fn find_named_number(&self, args: &[BindArg], name: &str) -> Option<f64> {
+        args.iter().find_map(|a| match a {
+            BindArg::Named(ident, Scalar::Number(val, _, true)) if ident.name == name => Some(*val),
+            _ => None,
+        })
+    }
+
     /// Check whether the post-expansion graph contains a BufferWrite or
     /// BufferRead node matching the given buffer name.
     fn graph_has_buffer_node(&self, buffer_name: &str, is_write: bool) -> bool {
@@ -2588,6 +2728,13 @@ mod tests {
             .diagnostics
             .iter()
             .any(|d| d.level == DiagLevel::Error && d.message.contains(pattern))
+    }
+
+    fn has_error_code(result: &AnalysisResult, code: DiagCode) -> bool {
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.level == DiagLevel::Error && d.code == Some(code))
     }
 
     /// Parse, resolve, build graph, and analyze — also return the graph for
@@ -3911,6 +4058,144 @@ clock 48kHz audio {
         assert_ne!(
             id_a, id_b,
             "stable_id must change when graph topology changes"
+        );
+    }
+
+    // ── SHM endpoint validation tests ──────────────────────────────────────
+
+    #[test]
+    fn shm_endpoint_valid() {
+        let reg = test_registry();
+        let source = r#"bind iq = shm("rx.iq", slots=1024, slot_bytes=4096)
+clock 48kHz audio {
+    constant(0) -> iq
+}
+"#;
+        let result = analyze_source(source, &reg);
+        assert!(!has_error_code(&result, codes::E0720), "unexpected E0720");
+        assert!(!has_error_code(&result, codes::E0721), "unexpected E0721");
+        assert!(!has_error_code(&result, codes::E0724), "unexpected E0724");
+    }
+
+    #[test]
+    fn shm_endpoint_missing_slots() {
+        let reg = test_registry();
+        let source = r#"bind iq = shm("rx.iq", slot_bytes=4096)
+clock 48kHz audio {
+    constant(0) -> iq
+}
+"#;
+        let result = analyze_source(source, &reg);
+        assert!(
+            has_error_code(&result, codes::E0720),
+            "expected E0720 for missing slots"
+        );
+    }
+
+    #[test]
+    fn shm_endpoint_missing_slot_bytes() {
+        let reg = test_registry();
+        let source = r#"bind iq = shm("rx.iq", slots=1024)
+clock 48kHz audio {
+    constant(0) -> iq
+}
+"#;
+        let result = analyze_source(source, &reg);
+        assert!(
+            has_error_code(&result, codes::E0721),
+            "expected E0721 for missing slot_bytes"
+        );
+    }
+
+    #[test]
+    fn shm_endpoint_zero_slots() {
+        let reg = test_registry();
+        let source = r#"bind iq = shm("rx.iq", slots=0, slot_bytes=4096)
+clock 48kHz audio {
+    constant(0) -> iq
+}
+"#;
+        let result = analyze_source(source, &reg);
+        assert!(
+            has_error_code(&result, codes::E0722),
+            "expected E0722 for slots=0"
+        );
+    }
+
+    #[test]
+    fn shm_endpoint_zero_slot_bytes() {
+        let reg = test_registry();
+        let source = r#"bind iq = shm("rx.iq", slots=1024, slot_bytes=0)
+clock 48kHz audio {
+    constant(0) -> iq
+}
+"#;
+        let result = analyze_source(source, &reg);
+        assert!(
+            has_error_code(&result, codes::E0723),
+            "expected E0723 for slot_bytes=0"
+        );
+    }
+
+    #[test]
+    fn shm_endpoint_missing_name() {
+        let reg = test_registry();
+        let source = r#"bind iq = shm(slots=1024, slot_bytes=4096)
+clock 48kHz audio {
+    constant(0) -> iq
+}
+"#;
+        let result = analyze_source(source, &reg);
+        assert!(
+            has_error_code(&result, codes::E0724),
+            "expected E0724 for missing positional name"
+        );
+    }
+
+    #[test]
+    fn shm_endpoint_const_ref_slots() {
+        let reg = test_registry();
+        let source = r#"const SLOTS = 1024
+bind iq = shm("rx.iq", slots=SLOTS, slot_bytes=4096)
+clock 48kHz audio {
+    constant(0) -> iq
+}
+"#;
+        let result = analyze_source(source, &reg);
+        assert!(
+            has_error_code(&result, codes::E0725),
+            "expected E0725 for const ref in slots"
+        );
+    }
+
+    #[test]
+    fn shm_endpoint_unaligned_slot_bytes() {
+        let reg = test_registry();
+        let source = r#"bind iq = shm("rx.iq", slots=1024, slot_bytes=100)
+clock 48kHz audio {
+    constant(0) -> iq
+}
+"#;
+        let result = analyze_source(source, &reg);
+        assert!(
+            has_error_code(&result, codes::E0726),
+            "expected E0726 for slot_bytes=100 (not multiple of 8)"
+        );
+    }
+
+    #[test]
+    fn shm_endpoint_udp_not_validated() {
+        // Ensure SHM validation doesn't affect UDP binds
+        let reg = test_registry();
+        let source = r#"bind iq = udp("127.0.0.1:9100")
+clock 48kHz audio {
+    constant(0) -> iq
+}
+"#;
+        let result = analyze_source(source, &reg);
+        assert!(
+            !has_error_code(&result, codes::E0720),
+            "SHM validation should not apply to UDP binds"
         );
     }
 }

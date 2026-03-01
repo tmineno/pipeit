@@ -84,6 +84,8 @@ struct CodegenCtx<'a> {
     diagnostics: Vec<Diagnostic>,
     /// Bind names that passed transport+dtype guards and had adapters emitted.
     lowered_binds: HashSet<String>,
+    /// Bind names lowered as SHM (uses `_shm_io_` prefix instead of `_bind_io_`).
+    lowered_shm_binds: HashSet<String>,
 }
 
 impl<'a> CodegenCtx<'a> {
@@ -101,6 +103,7 @@ impl<'a> CodegenCtx<'a> {
             out: String::with_capacity(8192),
             diagnostics: Vec::new(),
             lowered_binds: HashSet::new(),
+            lowered_shm_binds: HashSet::new(),
         }
     }
 
@@ -146,6 +149,9 @@ impl<'a> CodegenCtx<'a> {
         self.out.push_str("#include <pipit_shell.h>\n");
         if !self.lir.binds.is_empty() {
             self.out.push_str("#include <pipit_bind_io.h>\n");
+        }
+        if self.lir.binds.iter().any(|b| b.transport == "shm") {
+            self.out.push_str("#include <pipit_shm.h>\n");
         }
         self.out.push_str("#include <cstdio>\n");
         self.out.push('\n');
@@ -369,6 +375,56 @@ impl<'a> CodegenCtx<'a> {
         0
     }
 
+    /// Extract a named integer argument from bind args.
+    fn extract_named_int(args: &[LirBindArg], name: &str) -> Option<i64> {
+        args.iter().find_map(|a| match a {
+            LirBindArg::Named(k, LirBindValue::Int(n)) if k == name => Some(*n),
+            _ => None,
+        })
+    }
+
+    /// Extract the SHM positional name argument, resolving const idents.
+    fn extract_shm_positional_name(bind: &LirBind, consts: &[crate::lir::LirConst]) -> String {
+        for arg in &bind.args {
+            if let LirBindArg::Positional(val) = arg {
+                return match val {
+                    LirBindValue::String(s) => s.clone(),
+                    LirBindValue::Ident(name) => {
+                        // Resolve const reference
+                        consts
+                            .iter()
+                            .find_map(|c| {
+                                if c.name == *name {
+                                    if let crate::lir::LirConstValue::Scalar { literal } = &c.value
+                                    {
+                                        // Strip surrounding quotes from C++ literal
+                                        let s = literal.trim_matches('"');
+                                        Some(s.to_string())
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_default()
+                    }
+                    _ => String::new(),
+                };
+            }
+        }
+        String::new()
+    }
+
+    /// Convert a 16-char hex stable_id to a u64 hash for the Superblock.
+    fn stable_id_to_hash(stable_id: &str) -> String {
+        // The stable_id is a 16-char hex string from SHA-256 truncation.
+        // Parse it back to u64 for the Superblock.stable_id_hash field.
+        u64::from_str_radix(&stable_id[..stable_id.len().min(16)], 16)
+            .unwrap_or(0)
+            .to_string()
+    }
+
     // ── Phase 5c: Bind I/O adapters ────────────────────────────────────
 
     fn emit_bind_io_adapters(&mut self) {
@@ -385,7 +441,22 @@ impl<'a> CodegenCtx<'a> {
             transport: String,
         }
 
+        struct ShmAdapterInfo {
+            name: String,
+            is_out: bool,
+            ppkt_dtype: &'static str,
+            rate_hz: f64,
+            slots: i64,
+            slot_bytes: i64,
+            shm_name: String, // resolved shm object name
+            stable_id_hash: String,
+            rank: u8,
+            dims: Vec<u32>,
+            tokens_per_frame: u32,
+        }
+
         let mut adapters: Vec<BindAdapterInfo> = Vec::new();
+        let mut shm_adapters: Vec<ShmAdapterInfo> = Vec::new();
         let mut diags: Vec<Diagnostic> = Vec::new();
 
         // First pass: collect adapter info and diagnostics without &mut self.
@@ -396,8 +467,9 @@ impl<'a> CodegenCtx<'a> {
             };
 
             // Transport guard
+            let is_shm = bind.transport == "shm";
             match bind.transport.as_str() {
-                "udp" | "unix_dgram" => {}
+                "udp" | "unix_dgram" | "shm" => {}
                 other => {
                     diags.push(
                         Diagnostic::new(
@@ -414,7 +486,7 @@ impl<'a> CodegenCtx<'a> {
                 }
             }
 
-            // Dtype guard
+            // Dtype guard (shared by datagram and SHM)
             let ppkt_dtype = match &contract.dtype {
                 Some(dt) => match Self::pipit_type_to_ppkt_dtype(dt) {
                     Some(d) => d,
@@ -492,24 +564,59 @@ impl<'a> CodegenCtx<'a> {
             }
 
             let is_out = contract.direction == BindDirection::Out;
-            let chan_id = Self::bind_chan_id(bind);
             let rate_hz = contract.rate_hz.unwrap_or(-1.0);
 
-            adapters.push(BindAdapterInfo {
-                name: bind.name.clone(),
-                is_out,
-                ppkt_dtype,
-                chan_id,
-                rate_hz,
-                transport: bind.transport.clone(),
-            });
+            if is_shm {
+                // Extract SHM-specific args
+                let shm_name = Self::extract_shm_positional_name(bind, &self.lir.consts);
+                let slots = Self::extract_named_int(&bind.args, "slots").unwrap_or(0);
+                let slot_bytes = Self::extract_named_int(&bind.args, "slot_bytes").unwrap_or(0);
+
+                // Compute stable_id_hash from the hex stable_id
+                let stable_id_hash = Self::stable_id_to_hash(&bind.stable_id);
+
+                let shape = &contract.shape;
+                let rank = shape.len() as u8;
+
+                // tokens_per_frame: product of shape dims, or 1 if no shape
+                let tokens_per_frame = if shape.is_empty() {
+                    1u32
+                } else {
+                    shape.iter().product::<u32>()
+                };
+
+                shm_adapters.push(ShmAdapterInfo {
+                    name: bind.name.clone(),
+                    is_out,
+                    ppkt_dtype,
+                    rate_hz,
+                    slots,
+                    slot_bytes,
+                    shm_name,
+                    stable_id_hash,
+                    rank,
+                    dims: shape.clone(),
+                    tokens_per_frame,
+                });
+            } else {
+                let chan_id = Self::bind_chan_id(bind);
+                adapters.push(BindAdapterInfo {
+                    name: bind.name.clone(),
+                    is_out,
+                    ppkt_dtype,
+                    chan_id,
+                    rate_hz,
+                    transport: bind.transport.clone(),
+                });
+            }
         }
 
         // Flush collected diagnostics
         self.diagnostics.extend(diags);
 
+        // Emit datagram adapters
         if !adapters.is_empty() {
-            self.out.push_str("// ── Bind I/O adapters ──\n");
+            self.out.push_str("// ── Bind I/O adapters (datagram) ──\n");
             for adapter in &adapters {
                 let _ = writeln!(
                     self.out,
@@ -528,6 +635,51 @@ impl<'a> CodegenCtx<'a> {
             self.out.push('\n');
         }
 
+        // Emit SHM adapters
+        if !shm_adapters.is_empty() {
+            self.out.push_str("// ── Bind I/O adapters (SHM) ──\n");
+            for adapter in &shm_adapters {
+                // Emit dims array if non-empty
+                if !adapter.dims.is_empty() {
+                    let dims_str: Vec<String> =
+                        adapter.dims.iter().map(|d| d.to_string()).collect();
+                    let _ = writeln!(
+                        self.out,
+                        "static const uint32_t _shm_dims_{}[] = {{{}}};",
+                        adapter.name,
+                        dims_str.join(", ")
+                    );
+                }
+
+                let dims_arg = if adapter.dims.is_empty() {
+                    "nullptr".to_string()
+                } else {
+                    format!("_shm_dims_{}", adapter.name)
+                };
+
+                let _ = writeln!(
+                    self.out,
+                    "static pipit::shm::ShmIoAdapter _shm_io_{}(\"{}\", {}, {}, {:.1}, {}, {}, \"{}\", {}ULL, {}, {}, {}, &_bind_state_{});",
+                    adapter.name,
+                    escape_cpp_string(&adapter.name),
+                    adapter.is_out,
+                    adapter.ppkt_dtype,
+                    adapter.rate_hz,
+                    adapter.slots,
+                    adapter.slot_bytes,
+                    escape_cpp_string(&adapter.shm_name),
+                    adapter.stable_id_hash,
+                    adapter.rank,
+                    dims_arg,
+                    adapter.tokens_per_frame,
+                    adapter.name,
+                );
+                self.lowered_binds.insert(adapter.name.clone());
+                self.lowered_shm_binds.insert(adapter.name.clone());
+            }
+            self.out.push('\n');
+        }
+
         // Emit _apply_pending_rebinds() with reconnect calls for lowered binds.
         // Lock ordering: release state_->mtx before calling reconnect() (which acquires io_mtx_).
         self.emit_apply_pending_rebinds();
@@ -538,33 +690,69 @@ impl<'a> CodegenCtx<'a> {
             .push_str("static void _apply_pending_rebinds() {\n");
         for bind in &self.lir.binds {
             let lowered = self.lowered_binds.contains(&bind.name);
-            let _ = writeln!(
-                self.out,
-                "    if (_bind_state_{0}.rebind_pending.load(std::memory_order_acquire)) {{\n\
-                 \x20       std::string _new_ep_{0};\n\
-                 \x20       bool _did_rebind_{0} = false;\n\
-                 \x20       {{\n\
-                 \x20           std::lock_guard<std::mutex> _lk(_bind_state_{0}.mtx);\n\
-                 \x20           if (_bind_state_{0}.rebind_pending.load(std::memory_order_relaxed)) {{\n\
-                 \x20               _bind_state_{0}.current_endpoint = std::move(_bind_state_{0}.pending_endpoint);\n\
-                 \x20               _bind_state_{0}.pending_endpoint.clear();\n\
-                 \x20               _bind_state_{0}.rebind_pending.store(false, std::memory_order_release);\n\
-                 \x20               _new_ep_{0} = _bind_state_{0}.current_endpoint;\n\
-                 \x20               _did_rebind_{0} = true;\n\
-                 \x20           }}\n\
-                 \x20       }}",
-                bind.name
-            );
-            if lowered {
+            let is_shm = self.lowered_shm_binds.contains(&bind.name);
+
+            if is_shm {
+                // SHM: three-phase rebind (validate-before-commit, lock-safe, race-safe)
+                // Lock order preserved: state_->mtx released before try_reconnect() acquires io_mtx_.
                 let _ = writeln!(
                     self.out,
-                    "        if (_did_rebind_{0}) {{\n\
-                     \x20           _bind_io_{0}.reconnect(_new_ep_{0});\n\
+                    "    if (_bind_state_{0}.rebind_pending.load(std::memory_order_acquire)) {{\n\
+                     \x20       std::string _snap_ep_{0};\n\
+                     \x20       bool _have_pending_{0} = false;\n\
+                     \x20       {{\n\
+                     \x20           std::lock_guard<std::mutex> _lk(_bind_state_{0}.mtx);\n\
+                     \x20           if (_bind_state_{0}.rebind_pending.load(std::memory_order_relaxed)) {{\n\
+                     \x20               _snap_ep_{0} = _bind_state_{0}.pending_endpoint;\n\
+                     \x20               _have_pending_{0} = true;\n\
+                     \x20           }}\n\
+                     \x20       }}\n\
+                     \x20       if (_have_pending_{0}) {{\n\
+                     \x20           bool _accepted_{0} = _shm_io_{0}.try_reconnect(_snap_ep_{0});\n\
+                     \x20           {{\n\
+                     \x20               std::lock_guard<std::mutex> _lk(_bind_state_{0}.mtx);\n\
+                     \x20               if (_bind_state_{0}.pending_endpoint == _snap_ep_{0}) {{\n\
+                     \x20                   if (_accepted_{0}) {{\n\
+                     \x20                       _bind_state_{0}.current_endpoint = std::move(_snap_ep_{0});\n\
+                     \x20                   }}\n\
+                     \x20                   _bind_state_{0}.pending_endpoint.clear();\n\
+                     \x20                   _bind_state_{0}.rebind_pending.store(false, std::memory_order_release);\n\
+                     \x20               }}\n\
+                     \x20           }}\n\
+                     \x20       }}\n\
+                     \x20   }}",
+                    bind.name
+                );
+            } else {
+                // Datagram: commit-then-reconnect (reconnect always succeeds or enters no-op)
+                let _ = writeln!(
+                    self.out,
+                    "    if (_bind_state_{0}.rebind_pending.load(std::memory_order_acquire)) {{\n\
+                     \x20       std::string _new_ep_{0};\n\
+                     \x20       bool _did_rebind_{0} = false;\n\
+                     \x20       {{\n\
+                     \x20           std::lock_guard<std::mutex> _lk(_bind_state_{0}.mtx);\n\
+                     \x20           if (_bind_state_{0}.rebind_pending.load(std::memory_order_relaxed)) {{\n\
+                     \x20               _bind_state_{0}.current_endpoint = std::move(_bind_state_{0}.pending_endpoint);\n\
+                     \x20               _bind_state_{0}.pending_endpoint.clear();\n\
+                     \x20               _bind_state_{0}.rebind_pending.store(false, std::memory_order_release);\n\
+                     \x20               _new_ep_{0} = _bind_state_{0}.current_endpoint;\n\
+                     \x20               _did_rebind_{0} = true;\n\
+                     \x20           }}\n\
                      \x20       }}",
                     bind.name
                 );
+                if lowered {
+                    let _ = writeln!(
+                        self.out,
+                        "        if (_did_rebind_{0}) {{\n\
+                         \x20           _bind_io_{0}.reconnect(_new_ep_{0});\n\
+                         \x20       }}",
+                        bind.name
+                    );
+                }
+                let _ = writeln!(self.out, "    }}");
             }
-            let _ = writeln!(self.out, "    }}");
         }
         self.out.push_str("}\n\n");
     }
@@ -1291,10 +1479,15 @@ impl<'a> CodegenCtx<'a> {
                     })
                     .is_some();
                 if use_recv {
+                    let prefix = if self.lowered_shm_binds.contains(&io.buffer_name) {
+                        "_shm_io_"
+                    } else {
+                        "_bind_io_"
+                    };
                     let _ = writeln!(
                         self.out,
-                        "{}_bind_io_{}.recv({}, {});",
-                        ind, io.buffer_name, io.edge_var, io.total_tokens
+                        "{}{}{}.recv({}, {});",
+                        ind, prefix, io.buffer_name, io.edge_var, io.total_tokens
                     );
                 } else {
                     self.emit_lir_buffer_read(task_name, io, ind);
@@ -1317,10 +1510,15 @@ impl<'a> CodegenCtx<'a> {
                     })
                     .is_some();
                 if use_send {
+                    let prefix = if self.lowered_shm_binds.contains(&io.buffer_name) {
+                        "_shm_io_"
+                    } else {
+                        "_bind_io_"
+                    };
                     let _ = writeln!(
                         self.out,
-                        "{}_bind_io_{}.send({}, {});",
-                        ind, io.buffer_name, io.edge_var, io.total_tokens
+                        "{}{}{}.send({}, {});",
+                        ind, prefix, io.buffer_name, io.edge_var, io.total_tokens
                     );
                 }
                 if !io.skip {
@@ -3225,8 +3423,9 @@ clock 48kHz audio {
     #[test]
     fn bind_unsupported_transport_diagnostic() {
         let reg = test_registry();
+        // Use a truly unknown transport (not shm, which is now supported)
         let result = codegen_source(
-            r#"bind iq = shm("test_shm")
+            r#"bind iq = mqtt("test_endpoint")
 clock 48kHz audio {
     constant(0) -> iq
 }"#,
@@ -3241,7 +3440,7 @@ clock 48kHz audio {
             errors
                 .iter()
                 .any(|d| d.code.as_ref().map(|c| c.0) == Some("E0710")),
-            "shm transport should produce E0710 diagnostic, got: {:?}",
+            "unknown transport should produce E0710 diagnostic, got: {:?}",
             errors
         );
         assert!(
@@ -3250,6 +3449,44 @@ clock 48kHz audio {
                 .cpp_source
                 .contains("BindIoAdapter _bind_io_iq("),
             "unsupported transport should not emit adapter instance"
+        );
+    }
+
+    #[test]
+    fn bind_shm_transport_accepted() {
+        let reg = test_registry();
+        let result = codegen_source(
+            r#"bind iq = shm("test_ring", slots=1024, slot_bytes=4096)
+clock 48kHz audio {
+    constant(0) -> iq
+}"#,
+            &reg,
+        );
+        // No E0710 for shm transport
+        let has_e0710 = result
+            .diagnostics
+            .iter()
+            .any(|d| d.code.as_ref().map(|c| c.0) == Some("E0710"));
+        assert!(
+            !has_e0710,
+            "shm transport should NOT produce E0710 diagnostic"
+        );
+        // ShmIoAdapter should be emitted
+        assert!(
+            result
+                .generated
+                .cpp_source
+                .contains("ShmIoAdapter _shm_io_iq("),
+            "shm transport should emit ShmIoAdapter instance, got:\n{}",
+            result.generated.cpp_source
+        );
+        // pipit_shm.h should be included
+        assert!(
+            result
+                .generated
+                .cpp_source
+                .contains("#include <pipit_shm.h>"),
+            "shm bind should include pipit_shm.h"
         );
     }
 
