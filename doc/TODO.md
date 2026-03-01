@@ -28,6 +28,95 @@
 
 ---
 
+## v0.4.8.1 - Spawn Template Codegen Optimization
+
+**Goal**: Reduce generated C++ code size for spawn-expanded tasks from O(N × body) to O(body + N). Replace N identical task function bodies with one parameterized function, ring buffer arrays, and loop-based gather/scatter.
+
+**Motivation**: For large channel counts (e.g., 1024ch beamforming), the current approach clones the entire task function body N times. This causes compile-time and binary-size bloat proportional to channel count. The optimization emits a single parameterized function that accepts a channel index, with thin template wrappers for TaskDesc compatibility.
+
+### M1: Spawn Family Metadata
+
+- [ ] Add `SpawnFamily` struct to `spawn.rs`: family name, expanded task names, begin/end range, index var, referenced shared arrays
+- [ ] Emit `Vec<SpawnFamily>` from `expand_spawns()` via `SpawnResult`
+- [ ] Propagate through pipeline: `ResolvedProgram` → `LirProgram` (new field `spawn_families`)
+- [ ] Unit tests: family metadata collection, const-ref bounds, multi-family programs
+
+### M2: Ring Buffer & Stats Array Declarations
+
+- [ ] `codegen.rs` `emit_shared_buffers()`: group element buffers by shared array family → emit `_ringbuf_NAME[CH]` array declaration instead of N individual `_ringbuf_NAME__i`
+- [ ] Validate all family elements share same `cpp_type`, `capacity_tokens`, `reader_count`
+- [ ] `codegen.rs` `emit_stats_storage()`: group spawn family stats → emit `_stats_NAME__spawn[CH]` array
+- [ ] `codegen.rs` `emit_buffer_stats_descs()`: use array subscript for family buffers
+
+### M3: Parameterized Spawn Function
+
+- [ ] `codegen.rs` `emit_task_function()`: detect spawn family tasks → emit one `static void _spawn_NAME(int _ch)` using first instance's LIR body as template
+- [ ] Ring buffer refs in spawn body: `_ringbuf_NAME__0` → `_ringbuf_NAME[_ch]`
+- [ ] Stats refs: `_stats_NAME__spawn_0` → `_stats_NAME__spawn[_ch]`
+- [ ] Edge buffer declarations: `thread_local` instead of bare `static` (each OS thread gets own copy; safe for future thread-pool scheduler)
+- [ ] Emit `template<int _CH> void task_NAME__spawn() { _spawn_NAME(_CH); }` wrappers (decays to `void(*)()` for TaskDesc)
+- [ ] Task table entries: `{"name[i]", task_NAME__spawn<i>, &_stats_NAME__spawn[i]}`
+- [ ] Non-spawn tasks unchanged (backward compatible)
+
+### M4: Loop-Based Gather/Scatter
+
+- [ ] `codegen.rs` `emit_lir_gather_read()`: detect homogeneous family (all elements share tokens, reader_idx, reader_count) → emit `for` loop over `_ringbuf_NAME[_gi]` instead of N unrolled blocks
+- [ ] `codegen.rs` `emit_lir_scatter_write()`: same loop optimization
+- [ ] Fallback: keep unrolled codegen for heterogeneous families (should not occur with current semantics but defensive)
+
+### M5: Tests & Close
+
+- [ ] Add high-channel-count integration test (e.g., CH=16) verifying array + loop codegen pattern
+- [ ] Verify existing 770+ tests pass unchanged
+- [ ] Measure generated C++ line count: before vs after for `multichannel.pdl` at CH=4 and CH=16
+- [ ] `cargo test && cargo clippy && cargo fmt --check`
+
+### Design Notes
+
+**Generated C++ before** (CH=4):
+
+```cpp
+static pipit::RingBuffer<float, 1024, 1> _ringbuf_raw__0;
+static pipit::RingBuffer<float, 1024, 1> _ringbuf_raw__1;
+static pipit::RingBuffer<float, 1024, 1> _ringbuf_raw__2;
+static pipit::RingBuffer<float, 1024, 1> _ringbuf_raw__3;
+static pipit::TaskStats _stats_capture__spawn_0;
+// ... ×4
+
+void task_capture__spawn_0() { /* 50 lines using _ringbuf_raw__0 */ }
+void task_capture__spawn_1() { /* identical 50 lines using _ringbuf_raw__1 */ }
+void task_capture__spawn_2() { /* identical 50 lines using _ringbuf_raw__2 */ }
+void task_capture__spawn_3() { /* identical 50 lines using _ringbuf_raw__3 */ }
+```
+
+**Generated C++ after** (CH=4):
+
+```cpp
+static pipit::RingBuffer<float, 1024, 1> _ringbuf_raw[4];
+static pipit::TaskStats _stats_capture__spawn[4];
+
+static void _spawn_capture(int _ch) { /* 50 lines using _ringbuf_raw[_ch] */ }
+template<int _CH> void task_capture__spawn() { _spawn_capture(_CH); }
+
+// gather: loop instead of unrolled
+for (int _gi = 0; _gi < 4; _gi++) {
+    while (true) {
+        if (_ringbuf_raw[_gi].read(0, _e + _gi * F, F)) break;
+        // ... wait logic
+    }
+}
+```
+
+**Code growth**: O(body_size + N × 1 line) vs O(N × body_size).
+
+**TaskDesc compatibility**: `template<int _CH> void task_NAME__spawn()` instantiates to `void(*)()` — no runtime API change needed.
+
+**Edge buffer safety**: `thread_local` ensures each OS thread gets its own `static` edge buffers even when sharing a function body. No conflict with future thread-pool schedulers.
+
+**Files to modify**: `spawn.rs`, `pipeline.rs`, `lir.rs`, `codegen.rs`, `codegen_compile.rs` (tests).
+
+---
+
 ## v0.4.9 - Compiler Latency Stretch & Parallelization
 
 **Goal**: build_lir stretch optimizations and multi-threaded compilation.
