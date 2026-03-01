@@ -77,6 +77,9 @@ target_include_directories(pipscope PRIVATE
     ${PIPIT_INCLUDE_DIR}
 )
 target_link_libraries(pipscope PRIVATE implot OpenGL::GL)
+if(UNIX)
+    target_link_libraries(pipscope PRIVATE rt)
+endif()
 
 # ── E2E tests (headless, no GUI dependencies) ────────────────────────────────
 
@@ -87,5 +90,16 @@ target_include_directories(test_receiver PRIVATE
 )
 target_link_libraries(test_receiver PRIVATE pthread)
 
+add_executable(test_shm_receiver tests/test_shm_receiver.cpp)
+target_include_directories(test_shm_receiver PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${PIPIT_INCLUDE_DIR}
+)
+target_link_libraries(test_shm_receiver PRIVATE pthread)
+if(UNIX)
+    target_link_libraries(test_shm_receiver PRIVATE rt)
+endif()
+
 enable_testing()
 add_test(NAME PpktReceiver COMMAND test_receiver)
+add_test(NAME ShmReceiver COMMAND test_shm_receiver)

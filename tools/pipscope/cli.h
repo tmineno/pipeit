@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <vector>
 
 namespace pipscope {
 
@@ -14,6 +16,7 @@ struct CliArgs {
     bool error = false;
     bool vsync = false;
     int snapshot_hz = 0;
+    std::vector<std::string> shm_names; // --shm endpoints (repeatable)
 };
 
 inline void print_usage(const char *argv0) {
@@ -24,6 +27,7 @@ inline void print_usage(const char *argv0) {
     fprintf(stderr, "  -a, --address <addr>    Listen on <addr> (e.g. localhost:9100)\n");
     fprintf(stderr, "      --vsync             Enable vsync (default: off)\n");
     fprintf(stderr, "      --snapshot-hz <N>   Limit snapshot rate to N Hz (0 = unlimited)\n");
+    fprintf(stderr, "      --shm <name>        Monitor SHM ring (repeatable)\n");
     fprintf(stderr, "  -h, --help              Show this help message\n");
     fprintf(stderr, "\nIf no address is given, starts with GUI address input.\n");
 }
@@ -65,6 +69,11 @@ inline CliArgs parse_args(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--snapshot-hz") == 0 && i + 1 < argc) {
             args.snapshot_hz = atoi(argv[i + 1]);
+            i++;
+            continue;
+        }
+        if (strcmp(argv[i], "--shm") == 0 && i + 1 < argc) {
+            args.shm_names.emplace_back(argv[i + 1]);
             i++;
             continue;
         }

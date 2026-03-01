@@ -148,6 +148,7 @@ add_pdl_example(feedback)
 add_pdl_example(multirate)
 add_pdl_example(socket_stream)
 add_pdl_example(bind)
+add_pdl_example(shm_scope)
 add_pdl_example(multichannel)
 
 # ── SHM examples (require -lrt on Linux for shm_open) ────────────────

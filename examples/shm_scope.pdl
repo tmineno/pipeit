@@ -1,0 +1,41 @@
+# shm_scope.pdl — SHM waveform streaming for pipscope
+# =================================================
+# Generates waveforms and publishes them to shared memory.
+# Use pipscope with --shm to visualize in real time.
+#
+# Usage:
+#   # Terminal 1 — build and run the pipeline
+#   pcc examples/shm_scope.pdl \
+#     --actor-meta runtime/libpipit/actor_meta.json \
+#     -I runtime/libpipit/include \
+#     --cflags=-std=c++20 -o shm_scope
+#   ./shm_scope --duration 30s
+#
+#   # Terminal 2 — view with pipscope
+#   tools/pipscope/build/pipscope --shm scope_ch0 --shm scope_ch1
+
+# Two SHM channels for multi-waveform display in pipscope.
+#   - slots=64:         64-slot ring buffer
+#   - slot_bytes=1024:  1024 bytes per slot (256 float samples)
+bind ch0 = shm("scope_ch0", slots=64, slot_bytes=1024)
+bind ch1 = shm("scope_ch1", slots=64, slot_bytes=1024)
+bind ch2 = shm("scope_ch2", slots=64, slot_bytes=1024)
+
+param freq0 = 1000
+param freq1 = 2500
+param freq2 = 2000000
+param amp   = 0.8
+
+# Channel 0: sine wave
+clock 48kHz gen0 {
+    sine<float>($freq0, $amp)[256] -> ch0
+}
+
+# Channel 1: square wave at a different frequency
+clock 48kHz gen1 {
+    square<float>($freq1, $amp)[256] -> ch1
+}
+
+clock 100MHz gen2 {
+    sine<float>($freq2, $amp)[256] -> ch2
+}
