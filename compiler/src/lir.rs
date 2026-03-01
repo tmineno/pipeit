@@ -208,6 +208,8 @@ pub enum LirFiringKind {
     Probe(LirProbeFiring),
     BufferRead(LirBufferIo),
     BufferWrite(LirBufferIo),
+    GatherRead(LirGatherIo),
+    ScatterWrite(LirScatterIo),
 }
 
 pub struct LirActorFiring {
@@ -281,6 +283,55 @@ pub struct LirBufferIo {
     pub peer_node_id: NodeId,
     /// Number of readers on this ring buffer (for SPSC detection, ADR-029).
     pub reader_count: usize,
+}
+
+/// Gather read: reads 1 token from each of N element ring buffers into a contiguous
+/// output edge variable.  Emitted as N sequential spin-wait read loops.
+pub struct LirGatherIo {
+    pub family_name: String,
+    pub element_count: u32,
+    pub task_name: String,
+    /// Output edge variable for the intra-task edge leaving the gather node.
+    pub output_edge_var: String,
+    /// Total output tokens = element_count * tokens_per_element.
+    pub total_output_tokens: u32,
+    pub elements: Vec<LirGatherElement>,
+}
+
+pub struct LirGatherElement {
+    pub buffer_name: String,
+    pub reader_idx: usize,
+    pub tokens: u32,
+    pub reader_count: usize,
+    /// Offset (in tokens) into the output edge variable.
+    pub offset: u32,
+    pub src_node_id: NodeId,
+    pub peer_node_id: NodeId,
+}
+
+/// Scatter write: takes N tokens from a contiguous input edge variable and writes
+/// 1 token to each of N element ring buffers.  Emitted as N sequential spin-wait
+/// write loops.
+pub struct LirScatterIo {
+    pub family_name: String,
+    pub element_count: u32,
+    pub task_name: String,
+    /// Input edge variable for the intra-task edge entering the scatter node.
+    pub input_edge_var: String,
+    /// Total input tokens = element_count * tokens_per_element.
+    pub total_input_tokens: u32,
+    pub elements: Vec<LirScatterElement>,
+}
+
+pub struct LirScatterElement {
+    pub buffer_name: String,
+    pub tokens: u32,
+    pub skip: bool,
+    pub reader_count: usize,
+    /// Offset (in tokens) into the input edge variable.
+    pub offset: u32,
+    pub src_node_id: NodeId,
+    pub peer_node_id: NodeId,
 }
 
 // ── Probes ─────────────────────────────────────────────────────────────────
@@ -855,6 +906,20 @@ fn fmt_lir_firing(
                 io.edge_var,
                 io.total_tokens,
                 if io.skip { " skip" } else { "" }
+            )
+        }
+        LirFiringKind::GatherRead(io) => {
+            writeln!(
+                f,
+                "{}{}gather_read({}[*]) -> {} tokens={}",
+                indent, rep, io.family_name, io.output_edge_var, io.total_output_tokens
+            )
+        }
+        LirFiringKind::ScatterWrite(io) => {
+            writeln!(
+                f,
+                "{}{}scatter_write({}[*]) <- {} tokens={}",
+                indent, rep, io.family_name, io.input_edge_var, io.total_input_tokens
             )
         }
     }
@@ -1629,13 +1694,31 @@ impl<'a> LirBuilder<'a> {
                 family_name,
                 element_count,
             } => {
-                todo!("M5: gather LIR for {}[*] ({})", family_name, element_count)
+                let io = self.build_gather_read(
+                    task_name,
+                    sched,
+                    node,
+                    family_name,
+                    *element_count,
+                    edge_bufs,
+                    adj,
+                );
+                LirFiringKind::GatherRead(io)
             }
             NodeKind::ScatterWrite {
                 family_name,
                 element_count,
             } => {
-                todo!("M5: scatter LIR for {}[*] ({})", family_name, element_count)
+                let io = self.build_scatter_write(
+                    task_name,
+                    sched,
+                    node,
+                    family_name,
+                    *element_count,
+                    edge_bufs,
+                    adj,
+                );
+                LirFiringKind::ScatterWrite(io)
             }
         }
     }
@@ -2180,6 +2263,133 @@ impl<'a> LirBuilder<'a> {
             src_node_id,
             peer_node_id,
             reader_count,
+        }
+    }
+
+    // ── Gather / Scatter ──────────────────────────────────────────────
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_gather_read(
+        &self,
+        task_name: &str,
+        sched: &SubgraphSchedule,
+        node: &crate::graph::Node,
+        family_name: &str,
+        element_count: u32,
+        edge_bufs: &HashMap<(NodeId, NodeId), String>,
+        adj: &EdgeAdjacency<'_>,
+    ) -> LirGatherIo {
+        // Output edge: single intra-task edge leaving the gather node
+        let outgoing = adj.outgoing(node.id);
+        let (output_edge_var, total_output_tokens) = if let Some(out_edge) = outgoing.first() {
+            let var = edge_bufs
+                .get(&(out_edge.source, out_edge.target))
+                .cloned()
+                .unwrap_or_default();
+            let tokens = sched
+                .edge_buffers
+                .get(&(out_edge.source, out_edge.target))
+                .copied()
+                .unwrap_or(element_count);
+            (var, tokens)
+        } else {
+            (String::new(), element_count)
+        };
+
+        let tokens_per_element = total_output_tokens / element_count.max(1);
+        let peer_node_id = outgoing.first().map(|e| e.target).unwrap_or(node.id);
+
+        let elements = (0..element_count)
+            .map(|i| {
+                let buf_name = format!("{}__{}", family_name, i);
+                let reader_tasks = self.buffer_reader_tasks(&buf_name);
+                let reader_count = reader_tasks.len().max(1);
+                let reader_idx = reader_tasks
+                    .iter()
+                    .position(|t| t == task_name)
+                    .unwrap_or(0);
+                LirGatherElement {
+                    buffer_name: buf_name,
+                    reader_idx,
+                    tokens: tokens_per_element,
+                    reader_count,
+                    offset: i * tokens_per_element,
+                    src_node_id: node.id,
+                    peer_node_id,
+                }
+            })
+            .collect();
+
+        LirGatherIo {
+            family_name: family_name.to_string(),
+            element_count,
+            task_name: task_name.to_string(),
+            output_edge_var,
+            total_output_tokens,
+            elements,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_scatter_write(
+        &self,
+        task_name: &str,
+        sched: &SubgraphSchedule,
+        node: &crate::graph::Node,
+        family_name: &str,
+        element_count: u32,
+        edge_bufs: &HashMap<(NodeId, NodeId), String>,
+        adj: &EdgeAdjacency<'_>,
+    ) -> LirScatterIo {
+        // Input edge: single intra-task edge entering the scatter node
+        let incoming = adj.incoming(node.id);
+        let (input_edge_var, total_input_tokens) = if let Some(in_edge) = incoming.first() {
+            let var = edge_bufs
+                .get(&(in_edge.source, in_edge.target))
+                .cloned()
+                .unwrap_or_default();
+            let tokens = sched
+                .edge_buffers
+                .get(&(in_edge.source, in_edge.target))
+                .copied()
+                .unwrap_or(element_count);
+            (var, tokens)
+        } else {
+            (String::new(), element_count)
+        };
+
+        let tokens_per_element = total_input_tokens / element_count.max(1);
+
+        let elements = (0..element_count)
+            .map(|i| {
+                let buf_name = format!("{}__{}", family_name, i);
+                let skip = self
+                    .thir
+                    .resolved
+                    .buffers
+                    .get(&buf_name)
+                    .map(|info| info.readers.is_empty())
+                    .unwrap_or(false);
+                let reader_count = self.buffer_reader_tasks(&buf_name).len().max(1);
+                LirScatterElement {
+                    buffer_name: buf_name,
+                    tokens: tokens_per_element,
+                    skip,
+                    reader_count,
+                    offset: i * tokens_per_element,
+                    src_node_id: node.id,
+                    peer_node_id: node.id,
+                }
+            })
+            .collect();
+
+        LirScatterIo {
+            family_name: family_name.to_string(),
+            element_count,
+            task_name: task_name.to_string(),
+            input_edge_var,
+            total_input_tokens,
+            elements,
         }
     }
 

@@ -493,6 +493,7 @@ pub fn build_hir(
         id_alloc,
         expanded_call_ids: HashMap::new(),
         expanded_call_spans: HashMap::new(),
+        used_call_ids: HashSet::new(),
     };
     builder.build()
 }
@@ -503,6 +504,8 @@ struct HirBuilder<'a> {
     id_alloc: &'a mut IdAllocator,
     expanded_call_ids: HashMap<Span, CallId>,
     expanded_call_spans: HashMap<CallId, Span>,
+    /// Track used CallIds to prevent aliasing when spawned tasks share spans.
+    used_call_ids: HashSet<CallId>,
 }
 
 impl<'a> HirBuilder<'a> {
@@ -818,13 +821,26 @@ impl<'a> HirBuilder<'a> {
             let id = self.id_alloc.alloc_call();
             self.expanded_call_ids.insert(call.span, id);
             self.expanded_call_spans.insert(id, call.span);
+            self.used_call_ids.insert(id);
             id
         } else if let Some(&id) = self.resolved.call_ids.get(&call.span) {
-            id
+            if self.used_call_ids.contains(&id) {
+                // Spawn-expanded tasks share source spans — allocate fresh CallId
+                // to avoid aliasing (H2 violation).
+                let fresh = self.id_alloc.alloc_call();
+                self.expanded_call_ids.insert(call.span, fresh);
+                self.expanded_call_spans.insert(fresh, call.span);
+                self.used_call_ids.insert(fresh);
+                fresh
+            } else {
+                self.used_call_ids.insert(id);
+                id
+            }
         } else {
             let id = self.id_alloc.alloc_call();
             self.expanded_call_ids.insert(call.span, id);
             self.expanded_call_spans.insert(id, call.span);
+            self.used_call_ids.insert(id);
             id
         };
 

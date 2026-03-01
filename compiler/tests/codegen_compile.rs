@@ -2147,3 +2147,132 @@ fn wait_loop_shape() {
         cpp
     );
 }
+
+// ── M5: Shared buffer arrays, spawn, gather/scatter ─────────────────────
+
+#[test]
+fn shared_element_simple() {
+    // Two writer tasks write to individual shared buffer elements,
+    // two reader tasks read from individual elements.
+    let cpp = generate_inline_cpp(
+        concat!(
+            "shared ch[2]\n",
+            "clock 1kHz w0 { constant(1.0) -> ch[0] }\n",
+            "clock 1kHz w1 { constant(2.0) -> ch[1] }\n",
+            "clock 1kHz r0 { @ch[0] | stdout() }\n",
+            "clock 1kHz r1 { @ch[1] | stdout() }\n",
+        ),
+        "shared_element_simple",
+    );
+    assert!(
+        cpp.contains("_ringbuf_ch__0"),
+        "element buffer ch__0 should appear, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("_ringbuf_ch__1"),
+        "element buffer ch__1 should appear, got:\n{}",
+        cpp
+    );
+}
+
+#[test]
+fn spawn_basic() {
+    // Spawn clause replicates a writer task across 3 elements.
+    let cpp = generate_inline_cpp(
+        concat!(
+            "const CH = 3\n",
+            "shared sig[CH]\n",
+            "clock 1kHz writer[ch=0..CH] { constant(0.0) -> sig[ch] }\n",
+            "clock 1kHz reader { @sig[0] | stdout() }\n",
+        ),
+        "spawn_basic",
+    );
+    // All 3 spawned tasks should exist
+    assert!(
+        cpp.contains("task_writer__spawn_0"),
+        "spawned task writer__spawn_0 should appear, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("task_writer__spawn_1"),
+        "spawned task writer__spawn_1 should appear, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("task_writer__spawn_2"),
+        "spawned task writer__spawn_2 should appear, got:\n{}",
+        cpp
+    );
+    // sig__0 has a reader, so its ring buffer should be present
+    assert!(
+        cpp.contains("_ringbuf_sig__0"),
+        "spawned element buffer sig__0 should appear, got:\n{}",
+        cpp
+    );
+}
+
+#[test]
+fn gather_read() {
+    // Gather: @sig[*] reads from all elements into contiguous buffer.
+    let cpp = generate_inline_cpp(
+        concat!(
+            "shared sig[3]\n",
+            "clock 1kHz w0 { constant(1.0) -> sig[0] }\n",
+            "clock 1kHz w1 { constant(2.0) -> sig[1] }\n",
+            "clock 1kHz w2 { constant(3.0) -> sig[2] }\n",
+            "clock 1kHz reader { @sig[*] | stdout() }\n",
+        ),
+        "gather_read",
+    );
+    // gather should read from all three element ring buffers
+    assert!(
+        cpp.contains("_ringbuf_sig__0"),
+        "gather should read from sig__0, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("_ringbuf_sig__1"),
+        "gather should read from sig__1, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("_ringbuf_sig__2"),
+        "gather should read from sig__2, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("gather @sig[*]"),
+        "gather comment should appear, got:\n{}",
+        cpp
+    );
+}
+
+#[test]
+fn scatter_write() {
+    // Scatter: ->sig[*] writes to all elements from contiguous buffer.
+    let cpp = generate_inline_cpp(
+        concat!(
+            "shared sig[2]\n",
+            "clock 1kHz writer { constant(0.0) -> sig[*] }\n",
+            "clock 1kHz r0 { @sig[0] | stdout<float>() }\n",
+            "clock 1kHz r1 { @sig[1] | stdout<float>() }\n",
+        ),
+        "scatter_write",
+    );
+    assert!(
+        cpp.contains("_ringbuf_sig__0"),
+        "scatter should write to sig__0, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("_ringbuf_sig__1"),
+        "scatter should write to sig__1, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("scatter ->sig[*]"),
+        "scatter comment should appear, got:\n{}",
+        cpp
+    );
+}

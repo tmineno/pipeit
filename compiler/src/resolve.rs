@@ -586,13 +586,18 @@ impl<'a> ResolveCtx<'a> {
                     self.resolve_actor_call(call, scope, taps);
                 }
                 PipeSource::BufferRead(ref buffer_ref) => {
+                    let is_star = matches!(buffer_ref.index, BufferIndex::Star(_));
                     let resolved_buf = self.resolve_buffer_ref(buffer_ref, &task_name, false);
                     if let Some(buf_name) = resolved_buf {
-                        self.pending_buffer_reads.push((
-                            buf_name,
-                            task_name.clone(),
-                            buffer_ref.name.span,
-                        ));
+                        // Star refs already register per-element reads inside resolve_buffer_ref;
+                        // don't also register the family name (which has no BufferInfo entry).
+                        if !is_star {
+                            self.pending_buffer_reads.push((
+                                buf_name,
+                                task_name.clone(),
+                                buffer_ref.name.span,
+                            ));
+                        }
                     }
                 }
                 PipeSource::TapRef(ident) => {
@@ -651,30 +656,35 @@ impl<'a> ResolveCtx<'a> {
 
             // Sink
             if let Some(sink) = &line.sink {
+                let is_star_sink = matches!(sink.buffer.index, BufferIndex::Star(_));
                 let resolved_buf = self.resolve_buffer_ref(&sink.buffer, &task_name, true);
                 if let Some(buf_name) = resolved_buf {
-                    let buf_span = sink.buffer.name.span;
-                    if let Some(existing) = self.resolved.buffers.get(&buf_name) {
-                        if existing.writer_task != task_name {
-                            self.error(
-                                codes::E0010,
-                                buf_span,
-                                format!(
-                                    "multiple writers to shared buffer '{}': first written by task '{}' (offset {})",
-                                    buf_name, existing.writer_task, existing.writer_span.start
-                                ),
+                    // Star refs already register per-element writes inside resolve_buffer_ref;
+                    // don't also register the family name (which should not be a buffer entry).
+                    if !is_star_sink {
+                        let buf_span = sink.buffer.name.span;
+                        if let Some(existing) = self.resolved.buffers.get(&buf_name) {
+                            if existing.writer_task != task_name {
+                                self.error(
+                                    codes::E0010,
+                                    buf_span,
+                                    format!(
+                                        "multiple writers to shared buffer '{}': first written by task '{}' (offset {})",
+                                        buf_name, existing.writer_task, existing.writer_span.start
+                                    ),
+                                );
+                            }
+                            // Same task writing same buffer from multiple lines is OK
+                        } else {
+                            self.resolved.buffers.insert(
+                                buf_name,
+                                BufferInfo {
+                                    writer_task: task_name.clone(),
+                                    writer_span: buf_span,
+                                    readers: Vec::new(),
+                                },
                             );
                         }
-                        // Same task writing same buffer from multiple lines is OK
-                    } else {
-                        self.resolved.buffers.insert(
-                            buf_name,
-                            BufferInfo {
-                                writer_task: task_name.clone(),
-                                writer_span: buf_span,
-                                readers: Vec::new(),
-                            },
-                        );
                     }
                 }
             }
