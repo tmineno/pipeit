@@ -497,6 +497,9 @@ source + registry inputs
   ├─ 2. Actor Loading
   │     └─ Build actor registry
   │
+  ├─ 2.5 Spawn Expansion (§5.4.5)
+  │     └─ Expand clock[idx=begin..end] into N independent tasks
+  │
   ├─ 3. Name Resolution
   │     └─ Bind actors/params/consts/buffers/taps
   │
@@ -526,6 +529,7 @@ source + registry inputs
 |-------|-------------|---------------|
 | 1. Lex & Parse | Tokenize and build AST | `--emit ast` |
 | 2. Actor Loading | Load metadata registry | |
+| 2.5 Spawn Expansion | Expand spawn clauses into N tasks | |
 | 3. Name Resolution | Resolve symbols and references | |
 | 4. HIR Construction | Normalize semantic graph | |
 | 5. Type Inference & Monomorphization | Solve types and instantiate actors | |
@@ -668,7 +672,7 @@ error[E0601]: lowering verification failed (L3 rate/shape preservation)
 
 ### 10.6 Assigned diagnostic codes
 
-#### 10.6.1 Resolve (E0001-E0025, W0001-W0002)
+#### 10.6.1 Resolve (E0001-E0035, W0001-W0002)
 
 | Code | Description |
 |------|-------------|
@@ -697,6 +701,16 @@ error[E0601]: lowering verification failed (L3 rate/shape preservation)
 | E0023 | Shared buffer has no writer |
 | E0024 | Duplicate bind definition |
 | E0025 | Bind target not referenced (reserved) |
+| E0026 | Spawn range invalid (begin >= end) |
+| E0027 | Spawn bound not a compile-time integer |
+| E0028 | Shared array size not a positive integer |
+| E0029 | Unknown const in spawn range |
+| E0030 | Unknown const in shared size |
+| E0031 | Shared array index out of bounds |
+| E0032 | Buffer subscript on non-array buffer |
+| E0033 | Star-writer conflicts with element-writer |
+| E0034 | Duplicate shared array name |
+| E0035 | Buffer index const is not a non-negative integer |
 | W0001 | Define shadows actor with same name |
 | W0002 | Deprecated switch default clause |
 

@@ -654,7 +654,7 @@ clock 48kHz capture[ch=0..CH] {
 - `clock ... capture[ch=0..CH]` は `capture[0]` 〜 `capture[CH-1]` の `CH` 個へ静的展開される
 - 展開後の各タスクは通常の `clock` タスクと同一セマンティクスで実行され、相互に並列である
 - `idx` はコンパイル時インデックス変数であり、spawn 本体内で actor 引数と buffer 添字に使用できる
-- `begin` / `end` は正のコンパイル時整数でなければならない。`begin < end` を満たさない場合はコンパイルエラー
+- `begin` / `end` は非負のコンパイル時整数でなければならない（`begin = 0` は有効）。`begin < end` を満たさない場合はコンパイルエラー
 - spawn 展開は name resolve / 型推論 / SDF 解析の前に実行される
 
 ### 5.5 パイプ演算子
