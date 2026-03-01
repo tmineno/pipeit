@@ -32,11 +32,11 @@ define preprocess() {
 }
 
 clock 20kHz producer {
-    constant(0.0)[10] | preprocess() | decimate(10) -> shared
+    constant(0.0)[10] | preprocess() | decimate(10) -> xbuf
 }
 
 clock 2kHz consumer {
-    @shared | decimate(10) | stdout()
+    @xbuf | decimate(10) | stdout()
 }
 "#;
 
