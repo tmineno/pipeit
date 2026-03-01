@@ -33,8 +33,10 @@ set(RUNTIME_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/libpipit/include)
 # Keep this list in sync when adding new actor headers.
 set(RUNTIME_ACTOR_HEADERS
     ${RUNTIME_INCLUDE}/pipit.h
+    ${RUNTIME_INCLUDE}/pipit_bind_io.h
     ${RUNTIME_INCLUDE}/pipit_net.h
     ${RUNTIME_INCLUDE}/pipit_shell.h
+    ${RUNTIME_INCLUDE}/pipit_shm.h
     ${RUNTIME_INCLUDE}/std_actors.h
     ${RUNTIME_INCLUDE}/std_math.h
     ${RUNTIME_INCLUDE}/std_sink.h
@@ -44,6 +46,7 @@ set(RUNTIME_ACTOR_HEADERS
 set(EXAMPLE_ACTOR_HEADERS
     ${EXAMPLES_DIR}/example_actors.h
     ${EXAMPLES_DIR}/poly_actors.h
+    ${EXAMPLES_DIR}/shm/shm_actors.h
 )
 
 set(ALL_ACTOR_HEADERS ${RUNTIME_ACTOR_HEADERS} ${EXAMPLE_ACTOR_HEADERS})
@@ -57,6 +60,7 @@ file(GLOB _runtime_glob
 file(GLOB _example_glob
     ${EXAMPLES_DIR}/*_actors.h
     ${EXAMPLES_DIR}/poly_*.h
+    ${EXAMPLES_DIR}/shm/*_actors.h
 )
 set(_all_glob ${_runtime_glob} ${_example_glob})
 foreach(_h IN LISTS _all_glob)
@@ -72,7 +76,7 @@ set(ACTOR_MANIFEST ${CMAKE_CURRENT_BINARY_DIR}/actors.meta.json)
 add_custom_command(
     OUTPUT  ${ACTOR_MANIFEST}
     COMMAND ${PCC} --emit manifest
-            -I ${RUNTIME_INCLUDE} -I ${EXAMPLES_DIR}
+            -I ${RUNTIME_INCLUDE} -I ${EXAMPLES_DIR} -I ${EXAMPLES_DIR}/shm
             -o ${ACTOR_MANIFEST}
     DEPENDS ${ALL_ACTOR_HEADERS} ${PCC}
     COMMENT "pcc: generating actors.meta.json from actor headers"
@@ -97,12 +101,42 @@ function(add_pdl_example PDL_NAME)
 
     # Compile generated C++ to binary
     add_executable(${PDL_NAME} ${CPP_FILE})
+    add_dependencies(${PDL_NAME} actor_manifest)
     target_include_directories(${PDL_NAME} PRIVATE
         ${RUNTIME_INCLUDE}
         ${RUNTIME_INCLUDE}/third_party
         ${EXAMPLES_DIR}
     )
     target_link_libraries(${PDL_NAME} PRIVATE pthread)
+endfunction()
+
+# ── PDL → C++ → binary (subdirectory variant) ────────────────────────
+# For examples in subdirectories like shm/writer.pdl.
+# Links additional libraries (e.g. rt for POSIX shm).
+function(add_pdl_subdir_example SUBDIR PDL_NAME)
+    set(PDL_FILE  ${EXAMPLES_DIR}/${SUBDIR}/${PDL_NAME}.pdl)
+    set(CPP_FILE  ${CMAKE_CURRENT_BINARY_DIR}/${SUBDIR}_${PDL_NAME}.cpp)
+    set(TARGET_NAME ${SUBDIR}_${PDL_NAME})
+
+    add_custom_command(
+        OUTPUT  ${CPP_FILE}
+        COMMAND ${PCC} ${PDL_FILE}
+                --actor-meta ${ACTOR_MANIFEST}
+                -I ${EXAMPLES_DIR} -I ${EXAMPLES_DIR}/${SUBDIR} -I ${RUNTIME_INCLUDE}
+                --emit cpp -o ${CPP_FILE}
+        DEPENDS ${PDL_FILE} ${ACTOR_MANIFEST} ${PCC}
+        COMMENT "pcc: ${SUBDIR}/${PDL_NAME}.pdl -> ${TARGET_NAME}.cpp"
+    )
+
+    add_executable(${TARGET_NAME} ${CPP_FILE})
+    add_dependencies(${TARGET_NAME} actor_manifest)
+    target_include_directories(${TARGET_NAME} PRIVATE
+        ${RUNTIME_INCLUDE}
+        ${RUNTIME_INCLUDE}/third_party
+        ${EXAMPLES_DIR}
+        ${EXAMPLES_DIR}/${SUBDIR}
+    )
+    target_link_libraries(${TARGET_NAME} PRIVATE pthread ${ARGN})
 endfunction()
 
 # ── Examples ──────────────────────────────────────────────────────────
@@ -114,3 +148,7 @@ add_pdl_example(feedback)
 add_pdl_example(multirate)
 add_pdl_example(socket_stream)
 add_pdl_example(bind)
+
+# ── SHM examples (require -lrt on Linux for shm_open) ────────────────
+add_pdl_subdir_example(shm writer rt)
+add_pdl_subdir_example(shm reader rt)
