@@ -239,33 +239,34 @@ fn bench_graph_phase(c: &mut Criterion, source: &str, registry: &registry::Regis
 }
 
 fn bench_analyze_phase(c: &mut Criterion, source: &str, registry: &registry::Registry) {
-    bench_phase(
-        c,
-        "analyze",
-        || {
-            let ast = parse_ast(source);
-            let mut rr = resolve::resolve(&ast, registry);
-            let hir = hir::build_hir(&ast, &rr.resolved, &mut rr.id_alloc);
-            let gr = graph::build_graph(&hir, &rr.resolved, registry);
-            let tr = type_infer::type_infer(&hir, &rr.resolved, registry);
-            let lr = lower::lower_and_verify(&hir, &rr.resolved, &tr.typed, registry);
-            (rr, hir, gr, tr, lr)
-        },
-        |(rr, hir, gr, tr, lr)| {
-            assert_no_errors("resolve", &rr.diagnostics);
-            assert_no_errors("graph", &gr.diagnostics);
-            let thir = thir::build_thir_context(
-                &hir,
-                &rr.resolved,
-                &tr.typed,
-                &lr.lowered,
-                registry,
-                &gr.graph,
-            );
+    // Build all upstream artifacts once; ThirContext borrows from them so we
+    // cannot use iter_batched (self-referential).  analyze is a pure function
+    // of immutable inputs, so reusing the same inputs is valid.
+    let ast = parse_ast(source);
+    let mut rr = resolve::resolve(&ast, registry);
+    let hir = hir::build_hir(&ast, &rr.resolved, &mut rr.id_alloc);
+    let gr = graph::build_graph(&hir, &rr.resolved, registry);
+    assert_no_errors("resolve", &rr.diagnostics);
+    assert_no_errors("graph", &gr.diagnostics);
+    let tr = type_infer::type_infer(&hir, &rr.resolved, registry);
+    let lr = lower::lower_and_verify(&hir, &rr.resolved, &tr.typed, registry);
+    let thir = thir::build_thir_context(
+        &hir,
+        &rr.resolved,
+        &tr.typed,
+        &lr.lowered,
+        registry,
+        &gr.graph,
+    );
+
+    let mut group = c.benchmark_group("kpi/phase_latency/analyze");
+    group.bench_function("complex", |b| {
+        b.iter(|| {
             let r = analyze::analyze(black_box(&thir), black_box(&gr.graph));
             black_box(&r.analysis);
-        },
-    );
+        });
+    });
+    group.finish();
 }
 
 fn bench_schedule_phase(c: &mut Criterion, source: &str, registry: &registry::Registry) {
