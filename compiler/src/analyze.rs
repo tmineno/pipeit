@@ -58,11 +58,11 @@ pub struct AnalyzedProgram {
     /// For actors with unresolved SHAPE dims, this stores the shapes inferred
     /// from connected edges. NodeId → inferred ShapeConstraint.
     pub inferred_shapes: HashMap<NodeId, ShapeConstraint>,
-    /// Span-derived dimension parameters: (NodeId, param_name) → value.
+    /// Span-derived dimension parameters: NodeId → (param_name → value).
     /// For actors where a symbolic dimension param was inferred from a span
     /// argument length (e.g., `fir(coeff)` with `coeff=[...5 elems...]` → N=5).
     /// Authoritative: takes precedence over SDF edge-derived fallbacks in codegen.
-    pub span_derived_dims: HashMap<(NodeId, String), u32>,
+    pub span_derived_dims: HashMap<NodeId, HashMap<String, u32>>,
     /// Concrete input/output port rates per node, resolved once in analysis.
     /// `None` means the corresponding side could not be resolved statically.
     pub node_port_rates: HashMap<NodeId, NodePortRates>,
@@ -99,6 +99,7 @@ pub fn analyze(thir: &ThirContext, graph: &ProgramGraph) -> AnalysisResult {
     ctx.infer_shapes_from_edges();
     ctx.check_shape_constraints();
     ctx.check_dimension_param_order();
+    ctx.precompute_node_port_rates();
     ctx.solve_balance_equations();
     ctx.check_feedback_delays();
     ctx.check_cross_clock_rates();
@@ -121,12 +122,14 @@ struct AnalyzeCtx<'a> {
     inter_buffers: HashMap<String, u64>,
     total_memory: u64,
     inferred_shapes: HashMap<NodeId, ShapeConstraint>,
-    span_derived_dims: HashMap<(NodeId, String), u32>,
+    span_derived_dims: HashMap<NodeId, HashMap<String, u32>>,
     subgraph_indices: HashMap<usize, SubgraphIndex>,
     subgraph_refs: HashMap<usize, &'a Subgraph>,
     global_node_index: HashMap<NodeId, (usize, usize)>,
     rv_by_task: HashMap<String, HashMap<NodeId, u32>>,
     bind_contracts: HashMap<String, BindContract>,
+    node_port_rates: HashMap<NodeId, NodePortRates>,
+    all_subgraphs: Vec<(&'a str, &'a str, &'a Subgraph)>,
 }
 
 struct BalanceGraph {
@@ -193,6 +196,22 @@ impl<'a> AnalyzeCtx<'a> {
         let subgraph_indices = build_subgraph_indices(graph);
         let subgraph_refs = build_subgraph_refs(graph);
         let global_node_index = build_global_node_index(graph, &subgraph_indices);
+
+        let mut all_subgraphs = Vec::new();
+        for (task_name, task_graph) in &graph.tasks {
+            match task_graph {
+                TaskGraph::Pipeline(sub) => {
+                    all_subgraphs.push((task_name.as_str(), "pipeline", sub));
+                }
+                TaskGraph::Modal { control, modes } => {
+                    all_subgraphs.push((task_name.as_str(), "control", control));
+                    for (mode_name, sub) in modes {
+                        all_subgraphs.push((task_name.as_str(), mode_name.as_str(), sub));
+                    }
+                }
+            }
+        }
+
         AnalyzeCtx {
             thir,
             graph,
@@ -207,6 +226,8 @@ impl<'a> AnalyzeCtx<'a> {
             global_node_index,
             rv_by_task: HashMap::new(),
             bind_contracts: HashMap::new(),
+            node_port_rates: HashMap::new(),
+            all_subgraphs,
         }
     }
 
@@ -232,7 +253,6 @@ impl<'a> AnalyzeCtx<'a> {
     }
 
     fn build_result(self) -> AnalysisResult {
-        let node_port_rates = self.compute_node_port_rates();
         AnalysisResult {
             analysis: AnalyzedProgram {
                 repetition_vectors: self.repetition_vectors,
@@ -240,29 +260,45 @@ impl<'a> AnalyzeCtx<'a> {
                 total_memory: self.total_memory,
                 inferred_shapes: self.inferred_shapes,
                 span_derived_dims: self.span_derived_dims,
-                node_port_rates,
+                node_port_rates: self.node_port_rates,
                 bind_contracts: self.bind_contracts,
             },
             diagnostics: self.diagnostics,
         }
     }
 
-    fn compute_node_port_rates(&self) -> HashMap<NodeId, NodePortRates> {
-        let mut rates = HashMap::new();
-        for task_graph in self.graph.tasks.values() {
-            for sub in subgraphs_of(task_graph) {
-                for node in &sub.nodes {
-                    rates.insert(
-                        node.id,
-                        NodePortRates {
-                            in_rate: self.consumption_rate(node),
-                            out_rate: self.production_rate(node),
-                        },
-                    );
-                }
+    /// Precompute port rates for all nodes once, after shape inference.
+    /// Reused by balance equation solving and exported in the final result.
+    fn precompute_node_port_rates(&mut self) {
+        let subs = std::mem::take(&mut self.all_subgraphs);
+        for &(_, _, sub) in &subs {
+            for node in &sub.nodes {
+                self.node_port_rates.insert(
+                    node.id,
+                    NodePortRates {
+                        in_rate: self.consumption_rate(node),
+                        out_rate: self.production_rate(node),
+                    },
+                );
             }
         }
-        rates
+        self.all_subgraphs = subs;
+    }
+
+    /// Look up cached production rate. Falls back to live computation.
+    fn cached_production_rate(&self, node: &Node) -> Option<u32> {
+        self.node_port_rates
+            .get(&node.id)
+            .and_then(|r| r.out_rate)
+            .or_else(|| self.production_rate(node))
+    }
+
+    /// Look up cached consumption rate. Falls back to live computation.
+    fn cached_consumption_rate(&self, node: &Node) -> Option<u32> {
+        self.node_port_rates
+            .get(&node.id)
+            .and_then(|r| r.in_rate)
+            .or_else(|| self.consumption_rate(node))
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────
@@ -334,12 +370,11 @@ impl<'a> AnalyzeCtx<'a> {
     /// the nearest upstream Actor.
     fn trace_type_backward(&self, node_id: NodeId, sub: &Subgraph) -> Option<PipitType> {
         let mut current = node_id;
-        let mut visited = Vec::new();
+        let mut visited = HashSet::new();
         loop {
-            if visited.contains(&current) {
+            if !visited.insert(current) {
                 return None; // cycle guard
             }
-            visited.push(current);
             let node = self.node_in_subgraph(sub, current)?;
             if let NodeKind::Actor { name, .. } = &node.kind {
                 return self.actor_meta(name).and_then(|m| m.out_type.as_concrete());
@@ -473,11 +508,11 @@ impl<'a> AnalyzeCtx<'a> {
     // positionally (dim-for-dim).
 
     fn infer_shapes_from_edges(&mut self) {
-        for task_graph in self.graph.tasks.values() {
-            for sub in subgraphs_of(task_graph) {
-                self.infer_shapes_in_subgraph(sub);
-            }
+        let subs = std::mem::take(&mut self.all_subgraphs);
+        for &(_, _, sub) in &subs {
+            self.infer_shapes_in_subgraph(sub);
         }
+        self.all_subgraphs = subs;
     }
 
     fn infer_shapes_in_subgraph(&mut self, sub: &Subgraph) {
@@ -656,7 +691,12 @@ impl<'a> AnalyzeCtx<'a> {
                         .and_then(|sc| sc.dims.get(dim_idx))
                         .and_then(|sd| self.resolve_shape_dim(sd))
                 })
-                .or_else(|| self.span_derived_dims.get(&(node_id, sym.clone())).copied())
+                .or_else(|| {
+                    self.span_derived_dims
+                        .get(&node_id)
+                        .and_then(|m| m.get(sym.as_str()))
+                        .copied()
+                })
                 .or_else(|| {
                     existing_inferred_sc
                         .and_then(|sc| sc.dims.get(dim_idx))
@@ -858,12 +898,11 @@ impl<'a> AnalyzeCtx<'a> {
     /// Trace backward from a passthrough node to find resolved output shape dims.
     fn trace_shape_backward(&self, node_id: NodeId, sub: &Subgraph) -> Option<Vec<u32>> {
         let mut current = node_id;
-        let mut visited = Vec::new();
+        let mut visited = HashSet::new();
         loop {
-            if visited.contains(&current) {
+            if !visited.insert(current) {
                 return None;
             }
-            visited.push(current);
             let node = self.node_in_subgraph(sub, current)?;
             if let NodeKind::Actor { .. } = &node.kind {
                 return self.resolve_output_shape_dims(node, sub);
@@ -879,12 +918,11 @@ impl<'a> AnalyzeCtx<'a> {
     /// Trace forward from a passthrough node to find resolved input shape dims.
     fn trace_shape_forward(&self, node_id: NodeId, sub: &Subgraph) -> Option<Vec<u32>> {
         let mut current = node_id;
-        let mut visited = Vec::new();
+        let mut visited = HashSet::new();
         loop {
-            if visited.contains(&current) {
+            if !visited.insert(current) {
                 return None;
             }
-            visited.push(current);
             let node = self.node_in_subgraph(sub, current)?;
             if let NodeKind::Actor { .. } = &node.kind {
                 return self.resolve_input_shape_dims(node, sub);
@@ -954,33 +992,31 @@ impl<'a> AnalyzeCtx<'a> {
 
     fn record_span_derived_dims(&mut self) {
         let mut entries = Vec::new();
-        for task_graph in self.graph.tasks.values() {
-            for sub in subgraphs_of(task_graph) {
-                for node in &sub.nodes {
-                    if let NodeKind::Actor { name, args, .. } = &node.kind {
-                        if let Some(meta) = self.actor_meta(name) {
-                            // Deduplicate: collect unique symbolic dim names
-                            let mut seen = HashSet::new();
-                            for dim in meta.in_shape.dims.iter().chain(meta.out_shape.dims.iter()) {
-                                if let TokenCount::Symbolic(sym) = dim {
-                                    if !seen.insert(sym.clone()) {
-                                        continue;
-                                    }
-                                    // Skip if already resolvable from explicit args
-                                    let from_arg = meta
-                                        .params
-                                        .iter()
-                                        .position(|p| p.name == *sym)
-                                        .and_then(|idx| args.get(idx))
-                                        .and_then(|arg| self.resolve_arg_to_u32(arg));
-                                    if from_arg.is_some() {
-                                        continue;
-                                    }
-                                    if let Some(val) =
-                                        self.infer_dim_param_from_span_args(sym, meta, args)
-                                    {
-                                        entries.push((node.id, sym.clone(), val));
-                                    }
+        for &(_, _, sub) in &self.all_subgraphs {
+            for node in &sub.nodes {
+                if let NodeKind::Actor { name, args, .. } = &node.kind {
+                    if let Some(meta) = self.actor_meta(name) {
+                        // Deduplicate: collect unique symbolic dim names
+                        let mut seen = HashSet::new();
+                        for dim in meta.in_shape.dims.iter().chain(meta.out_shape.dims.iter()) {
+                            if let TokenCount::Symbolic(sym) = dim {
+                                if !seen.insert(sym.clone()) {
+                                    continue;
+                                }
+                                // Skip if already resolvable from explicit args
+                                let from_arg = meta
+                                    .params
+                                    .iter()
+                                    .position(|p| p.name == *sym)
+                                    .and_then(|idx| args.get(idx))
+                                    .and_then(|arg| self.resolve_arg_to_u32(arg));
+                                if from_arg.is_some() {
+                                    continue;
+                                }
+                                if let Some(val) =
+                                    self.infer_dim_param_from_span_args(sym, meta, args)
+                                {
+                                    entries.push((node.id, sym.clone(), val));
                                 }
                             }
                         }
@@ -989,70 +1025,34 @@ impl<'a> AnalyzeCtx<'a> {
             }
         }
         for (node_id, sym, val) in entries {
-            self.span_derived_dims.insert((node_id, sym), val);
+            self.span_derived_dims
+                .entry(node_id)
+                .or_default()
+                .insert(sym, val);
         }
     }
 
     // ── Phase 0b: Shape constraint validation (§13.6) ───────────────────
 
     fn check_shape_constraints(&mut self) {
-        for task_graph in self.graph.tasks.values() {
-            for sub in subgraphs_of(task_graph) {
-                self.check_shape_constraints_in_subgraph(sub);
-            }
+        let subs = std::mem::take(&mut self.all_subgraphs);
+        for &(_, _, sub) in &subs {
+            self.check_shape_constraints_in_subgraph(sub);
         }
+        self.all_subgraphs = subs;
     }
 
     fn check_shape_constraints_in_subgraph(&mut self, sub: &Subgraph) {
         for node in &sub.nodes {
-            self.check_unresolved_frame_dims(node);
-            self.check_dim_source_conflicts(node);
+            self.check_node_dim_constraints(node);
         }
         self.check_edge_shape_conflicts(sub);
     }
 
-    fn unique_symbolic_dims<'m>(&self, meta: &'m ActorMeta) -> Vec<&'m str> {
-        let mut seen = HashSet::new();
-        let mut syms = Vec::new();
-        for dim in meta.in_shape.dims.iter().chain(meta.out_shape.dims.iter()) {
-            let TokenCount::Symbolic(sym) = dim else {
-                continue;
-            };
-            let key = sym.as_str();
-            if seen.insert(key) {
-                syms.push(key);
-            }
-        }
-        syms
-    }
-
-    fn param_index_by_name<'m>(&self, meta: &'m ActorMeta) -> HashMap<&'m str, usize> {
-        meta.params
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.name.as_str(), i))
-            .collect()
-    }
-
-    fn shape_constraint_index_by_symbol<'m>(&self, meta: &'m ActorMeta) -> HashMap<&'m str, usize> {
-        let mut indices = HashMap::new();
-        for (i, dim) in meta.in_shape.dims.iter().enumerate() {
-            if let TokenCount::Symbolic(sym) = dim {
-                indices.entry(sym.as_str()).or_insert(i);
-            }
-        }
-        for (i, dim) in meta.out_shape.dims.iter().enumerate() {
-            if let TokenCount::Symbolic(sym) = dim {
-                indices.entry(sym.as_str()).or_insert(i);
-            }
-        }
-        indices
-    }
-
-    /// Check for conflicts between dimension resolution sources:
-    /// - explicit arg vs span-derived
-    /// - shape constraint vs span-derived
-    fn check_dim_source_conflicts(&mut self, node: &Node) {
+    /// Merged per-node dimension constraint check:
+    /// 1. Unresolved frame dims (E0300)
+    /// 2. Dim source conflicts: arg vs span-derived, shape constraint vs span-derived (E0302)
+    fn check_node_dim_constraints(&mut self, node: &Node) {
         let NodeKind::Actor {
             name,
             args,
@@ -1066,29 +1066,65 @@ impl<'a> AnalyzeCtx<'a> {
             return;
         };
 
-        let symbolic_dims = self.unique_symbolic_dims(meta);
-        let param_indices = self.param_index_by_name(meta);
-        let sc_indices = self.shape_constraint_index_by_symbol(meta);
-        let mut pending = Vec::new();
-        for sym in symbolic_dims {
-            let sym_name = sym;
+        // ── 1. Collect unique symbolic dims with sc_index in one pass ──
+        // sc_index: position of first occurrence in in_shape or out_shape
+        // (out_shape enumeration restarts at 0, matching shape_constraint positional semantics)
+        let mut seen = HashSet::new();
+        let mut symbolic_dims: Vec<(&str, usize)> = Vec::new();
+        for (i, dim) in meta.in_shape.dims.iter().enumerate() {
+            if let TokenCount::Symbolic(sym) = dim {
+                if seen.insert(sym.as_str()) {
+                    symbolic_dims.push((sym.as_str(), i));
+                }
+            }
+        }
+        for (i, dim) in meta.out_shape.dims.iter().enumerate() {
+            if let TokenCount::Symbolic(sym) = dim {
+                if seen.insert(sym.as_str()) {
+                    symbolic_dims.push((sym.as_str(), i));
+                }
+            }
+        }
 
+        // Collect all errors before emitting (avoids borrow conflict with meta)
+        // Format: (code, span, message, hint)
+        let mut pending: Vec<(DiagCode, Span, String, String)> = Vec::new();
+
+        // ── 2. Unresolved frame dim check (E0300) ──
+        if shape_constraint.is_none() && args.is_empty() {
+            if let Some(&(first_sym, _)) = symbolic_dims.first() {
+                if self.production_rate(node).is_none() && self.consumption_rate(node).is_none() {
+                    pending.push((
+                        codes::E0300,
+                        node.span,
+                        format!(
+                            "unresolved frame dimension '{}' at actor '{}'",
+                            first_sym, name
+                        ),
+                        format!("add explicit shape constraint, e.g. {}()[<size>]", name),
+                    ));
+                }
+            }
+        }
+
+        // ── 3. Dim source conflict checks (E0302) ──
+        for &(sym_name, sc_idx) in &symbolic_dims {
             // Compute span-inferred value directly (not from span_derived_dims map,
             // since that map skips entries when explicit arg is present).
-            let span_val = self.thir.span_arg_length_for_dim(sym_name, meta, args);
-            let span_val = match span_val {
+            let span_val = match self.thir.span_arg_length_for_dim(sym_name, meta, args) {
                 Some(v) => v,
                 None => continue,
             };
 
             // Check: explicit arg vs span-derived
-            let from_arg = param_indices
-                .get(sym_name)
-                .and_then(|idx| args.get(*idx))
+            let param_idx = meta.params.iter().position(|p| p.name == sym_name);
+            let from_arg = param_idx
+                .and_then(|idx| args.get(idx))
                 .and_then(|arg| self.thir.resolve_arg_to_u32(arg));
             if let Some(arg_val) = from_arg {
                 if arg_val != span_val {
                     pending.push((
+                        codes::E0302,
                         node.span,
                         format!(
                             "conflicting dimension '{}' at actor '{}': \
@@ -1104,69 +1140,30 @@ impl<'a> AnalyzeCtx<'a> {
 
             // Check: shape constraint vs span-derived
             if let Some(sc) = shape_constraint {
-                if let Some(idx) = sc_indices.get(sym_name) {
-                    if let Some(sc_val) = sc
-                        .dims
-                        .get(*idx)
-                        .and_then(|sd| self.thir.resolve_shape_dim(sd))
-                    {
-                        if sc_val != span_val {
-                            pending.push((
-                                sc.span,
-                                format!(
-                                    "conflicting dimension '{}' at actor '{}': \
-                                     shape constraint specifies {}, but span-derived value is {}",
-                                    sym_name, name, sc_val, span_val
-                                ),
-                                "align the shape constraint with the span argument length"
-                                    .to_string(),
-                            ));
-                        }
+                if let Some(sc_val) = sc
+                    .dims
+                    .get(sc_idx)
+                    .and_then(|sd| self.thir.resolve_shape_dim(sd))
+                {
+                    if sc_val != span_val {
+                        pending.push((
+                            codes::E0302,
+                            sc.span,
+                            format!(
+                                "conflicting dimension '{}' at actor '{}': \
+                                 shape constraint specifies {}, but span-derived value is {}",
+                                sym_name, name, sc_val, span_val
+                            ),
+                            "align the shape constraint with the span argument length".to_string(),
+                        ));
                     }
                 }
             }
         }
 
-        for (span, message, hint) in pending {
-            self.error_with_hint(codes::E0302, span, message, hint);
+        for (code, span, message, hint) in pending {
+            self.error_with_hint(code, span, message, hint);
         }
-    }
-
-    fn check_unresolved_frame_dims(&mut self, node: &Node) {
-        let NodeKind::Actor {
-            name,
-            args,
-            shape_constraint,
-            ..
-        } = &node.kind
-        else {
-            return;
-        };
-
-        if shape_constraint.is_some() || !args.is_empty() {
-            return;
-        }
-
-        let Some(meta) = self.actor_meta(name) else {
-            return;
-        };
-        let Some(sym_name) = first_symbolic_dim_name(meta).map(str::to_string) else {
-            return;
-        };
-
-        if self.production_rate(node).is_some() || self.consumption_rate(node).is_some() {
-            return;
-        }
-
-        self.error_with_hint(
-            codes::E0300,
-            node.span,
-            format!(
-                "unresolved frame dimension '{}' at actor '{}'",
-                sym_name, name
-            ),
-            format!("add explicit shape constraint, e.g. {}()[<size>]", name),
-        );
     }
 
     fn check_edge_shape_conflicts(&mut self, sub: &Subgraph) {
@@ -1181,8 +1178,8 @@ impl<'a> AnalyzeCtx<'a> {
         let mut conflicts = Vec::new();
         for node in &sub.nodes {
             if let NodeKind::Actor { name, .. } = &node.kind {
-                if let Some(inferred_sc) = self.inferred_shapes.get(&node.id).cloned() {
-                    if let Some(meta) = self.actor_meta(name).cloned() {
+                if let Some(inferred_sc) = self.inferred_shapes.get(&node.id) {
+                    if let Some(meta) = self.actor_meta(name) {
                         // Check in_shape dims
                         for (i, dim) in meta.in_shape.dims.iter().enumerate() {
                             self.check_span_vs_inferred_dim(
@@ -1190,7 +1187,7 @@ impl<'a> AnalyzeCtx<'a> {
                                 name,
                                 dim,
                                 i,
-                                &inferred_sc,
+                                inferred_sc,
                                 &mut conflicts,
                             );
                         }
@@ -1201,7 +1198,7 @@ impl<'a> AnalyzeCtx<'a> {
                                 name,
                                 dim,
                                 i,
-                                &inferred_sc,
+                                inferred_sc,
                                 &mut conflicts,
                             );
                         }
@@ -1224,7 +1221,11 @@ impl<'a> AnalyzeCtx<'a> {
         conflicts: &mut Vec<(Span, String)>,
     ) {
         if let TokenCount::Symbolic(sym) = dim {
-            if let Some(&span_val) = self.span_derived_dims.get(&(node.id, sym.clone())) {
+            if let Some(&span_val) = self
+                .span_derived_dims
+                .get(&node.id)
+                .and_then(|m| m.get(sym.as_str()))
+            {
                 if let Some(inferred_val) = inferred_sc
                     .dims
                     .get(dim_idx)
@@ -1286,50 +1287,50 @@ impl<'a> AnalyzeCtx<'a> {
 
     fn check_dimension_param_order(&mut self) {
         let mut checked: HashSet<String> = HashSet::new();
-        for task_graph in self.graph.tasks.values() {
-            for sub in subgraphs_of(task_graph) {
-                for node in &sub.nodes {
-                    let actor_name = match &node.kind {
-                        NodeKind::Actor { name, .. } => name,
-                        _ => continue,
-                    };
-                    if !checked.insert(actor_name.clone()) {
-                        continue;
-                    }
-                    let Some(meta) = self.actor_meta(actor_name) else {
-                        continue;
-                    };
-                    let dim_param_indices = self.inferred_dimension_param_indices(meta);
-                    if dim_param_indices.is_empty() {
-                        continue;
-                    }
-                    let suffix_start = meta.params.len() - dim_param_indices.len();
-                    let dims_at_suffix = dim_param_indices
-                        .iter()
-                        .enumerate()
-                        .all(|(offset, idx)| *idx == suffix_start + offset);
-                    if dims_at_suffix {
-                        continue;
-                    }
-
-                    let dim_names = dim_param_indices
-                        .iter()
-                        .map(|idx| meta.params[*idx].name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    self.warning_with_hint(
-                        codes::W0300,
-                        node.span,
-                        format!(
-                            "actor '{}' declares inferred dimension PARAM(s) [{}] before non-dimension parameters",
-                            actor_name, dim_names
-                        ),
-                        "move inferred dimension PARAM(int, ...) to the end of ACTOR(...) parameters"
-                            .to_string(),
-                    );
+        let subs = std::mem::take(&mut self.all_subgraphs);
+        for &(_, _, sub) in &subs {
+            for node in &sub.nodes {
+                let actor_name = match &node.kind {
+                    NodeKind::Actor { name, .. } => name,
+                    _ => continue,
+                };
+                if !checked.insert(actor_name.clone()) {
+                    continue;
                 }
+                let Some(meta) = self.actor_meta(actor_name) else {
+                    continue;
+                };
+                let dim_param_indices = self.inferred_dimension_param_indices(meta);
+                if dim_param_indices.is_empty() {
+                    continue;
+                }
+                let suffix_start = meta.params.len() - dim_param_indices.len();
+                let dims_at_suffix = dim_param_indices
+                    .iter()
+                    .enumerate()
+                    .all(|(offset, idx)| *idx == suffix_start + offset);
+                if dims_at_suffix {
+                    continue;
+                }
+
+                let dim_names = dim_param_indices
+                    .iter()
+                    .map(|idx| meta.params[*idx].name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.warning_with_hint(
+                    codes::W0300,
+                    node.span,
+                    format!(
+                        "actor '{}' declares inferred dimension PARAM(s) [{}] before non-dimension parameters",
+                        actor_name, dim_names
+                    ),
+                    "move inferred dimension PARAM(int, ...) to the end of ACTOR(...) parameters"
+                        .to_string(),
+                );
             }
         }
+        self.all_subgraphs = subs;
     }
 
     fn inferred_dimension_param_indices(&self, meta: &ActorMeta) -> Vec<usize> {
@@ -1357,20 +1358,14 @@ impl<'a> AnalyzeCtx<'a> {
     // ── Phase 1: Type checking ──────────────────────────────────────────
 
     fn check_types(&mut self) {
-        for (task_name, task_graph) in &self.graph.tasks {
-            match task_graph {
-                TaskGraph::Pipeline(sub) => self.check_types_in_subgraph(task_name, sub),
-                TaskGraph::Modal { control, modes } => {
-                    self.check_types_in_subgraph(task_name, control);
-                    for (_, sub) in modes {
-                        self.check_types_in_subgraph(task_name, sub);
-                    }
-                }
-            }
+        let subs = std::mem::take(&mut self.all_subgraphs);
+        for &(_, _, sub) in &subs {
+            self.check_types_in_subgraph(sub);
         }
+        self.all_subgraphs = subs;
     }
 
-    fn check_types_in_subgraph(&mut self, _task_name: &str, sub: &Subgraph) {
+    fn check_types_in_subgraph(&mut self, sub: &Subgraph) {
         for edge in &sub.edges {
             let src_node = match self.node_in_subgraph(sub, edge.source) {
                 Some(n) => n,
@@ -1423,19 +1418,11 @@ impl<'a> AnalyzeCtx<'a> {
     // ── Phase 2: SDF balance equation solving ───────────────────────────
 
     fn solve_balance_equations(&mut self) {
-        for (task_name, task_graph) in &self.graph.tasks {
-            match task_graph {
-                TaskGraph::Pipeline(sub) => {
-                    self.solve_subgraph_balance(task_name, "pipeline", sub);
-                }
-                TaskGraph::Modal { control, modes } => {
-                    self.solve_subgraph_balance(task_name, "control", control);
-                    for (mode_name, sub) in modes {
-                        self.solve_subgraph_balance(task_name, mode_name, sub);
-                    }
-                }
-            }
+        let subs = std::mem::take(&mut self.all_subgraphs);
+        for &(task_name, label, sub) in &subs {
+            self.solve_subgraph_balance(task_name, label, sub);
         }
+        self.all_subgraphs = subs;
     }
 
     fn solve_subgraph_balance(&mut self, task_name: &str, label: &str, sub: &Subgraph) {
@@ -1477,8 +1464,8 @@ impl<'a> AnalyzeCtx<'a> {
                 continue;
             };
 
-            let p = self.production_rate(src).unwrap_or(1);
-            let total_c = self.consumption_rate(tgt).unwrap_or(1);
+            let p = self.cached_production_rate(src).unwrap_or(1);
+            let total_c = self.cached_consumption_rate(tgt).unwrap_or(1);
             let num_in = incoming_count.get(&edge.target).copied().unwrap_or(1);
             let c = if num_in > 1 {
                 total_c / num_in
@@ -1669,11 +1656,9 @@ impl<'a> AnalyzeCtx<'a> {
                 .and_then(|sub| sub.nodes.get(node_pos));
         }
 
-        for task_graph in self.graph.tasks.values() {
-            for sub in subgraphs_of(task_graph) {
-                if let Some(node) = find_node(sub, node_id) {
-                    return Some(node);
-                }
+        for &(_, _, sub) in &self.all_subgraphs {
+            if let Some(node) = find_node(sub, node_id) {
+                return Some(node);
             }
         }
         None
@@ -2317,11 +2302,11 @@ impl<'a> AnalyzeCtx<'a> {
     // ── Phase 7: Param type vs RUNTIME_PARAM match ──────────────────────
 
     fn check_param_types(&mut self) {
-        for task_graph in self.graph.tasks.values() {
-            for sub in subgraphs_of(task_graph) {
-                self.check_param_types_in_subgraph(sub);
-            }
+        let subs = std::mem::take(&mut self.all_subgraphs);
+        for &(_, _, sub) in &subs {
+            self.check_param_types_in_subgraph(sub);
         }
+        self.all_subgraphs = subs;
     }
 
     fn check_param_types_in_subgraph(&mut self, sub: &Subgraph) {
@@ -2471,17 +2456,6 @@ fn find_buffer_write_in_task(task_graph: &TaskGraph, buffer_name: &str) -> Optio
         }
     }
     None
-}
-
-fn first_symbolic_dim_name(meta: &ActorMeta) -> Option<&str> {
-    meta.in_shape
-        .dims
-        .iter()
-        .chain(meta.out_shape.dims.iter())
-        .find_map(|d| match d {
-            TokenCount::Symbolic(name) => Some(name.as_str()),
-            _ => None,
-        })
 }
 
 /// Display name for a node (for error messages).
@@ -3615,7 +3589,8 @@ ACTOR(float_src, IN(void, 0), OUT(float, 1), PARAM(float, value)) {
         let n_val = result
             .analysis
             .span_derived_dims
-            .get(&(fir_id, "N".to_string()));
+            .get(&fir_id)
+            .and_then(|m| m.get("N"));
         assert_eq!(
             n_val,
             Some(&5),
@@ -3644,7 +3619,9 @@ ACTOR(float_src, IN(void, 0), OUT(float, 1), PARAM(float, value)) {
             !result
                 .analysis
                 .span_derived_dims
-                .contains_key(&(fir_id, "N".to_string())),
+                .get(&fir_id)
+                .map(|m| m.contains_key("N"))
+                .unwrap_or(false),
             "N should not be in span_derived_dims when provided explicitly"
         );
     }
@@ -3689,7 +3666,8 @@ ACTOR(float_src, IN(void, 0), OUT(float, 1), PARAM(float, value)) {
             result
                 .analysis
                 .span_derived_dims
-                .get(&(fir_id, "N".to_string())),
+                .get(&fir_id)
+                .and_then(|m| m.get("N")),
             Some(&5),
             "fir(coeff) N should be 5, not overridden by edge inference"
         );
@@ -3744,7 +3722,8 @@ ACTOR(float_src, IN(void, 0), OUT(float, 1), PARAM(float, value)) {
             result
                 .analysis
                 .span_derived_dims
-                .get(&(mix_id, "H".to_string())),
+                .get(&mix_id)
+                .and_then(|m| m.get("H")),
             Some(&5),
             "H should be span-derived from coeff length"
         );

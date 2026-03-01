@@ -22,7 +22,7 @@ use crate::graph::*;
 use crate::lir::{
     fmt_bind_value, LirActorArg, LirActorFiring, LirBind, LirBindArg, LirBindValue, LirBufferIo,
     LirConstValue, LirCtrlSource, LirFiring, LirFiringGroup, LirFiringKind, LirFusedChain,
-    LirHoistedActor, LirModalBody, LirProbeFiring, LirProgram, LirSubgraph, LirTaskBody,
+    LirHoistedActor, LirModalBody, LirProbeFiring, LirProgram, LirSubgraph, LirTask, LirTaskBody,
     LirTimerSpin,
 };
 use crate::registry::PipitType;
@@ -86,6 +86,8 @@ struct CodegenCtx<'a> {
     lowered_binds: HashSet<String>,
     /// Bind names lowered as SHM (uses `_shm_io_` prefix instead of `_bind_io_`).
     lowered_shm_binds: HashSet<String>,
+    /// Precomputed task name → LIR task index for O(1) lookup.
+    task_index: HashMap<&'a str, usize>,
 }
 
 impl<'a> CodegenCtx<'a> {
@@ -95,16 +97,38 @@ impl<'a> CodegenCtx<'a> {
         options: &'a CodegenOptions,
         lir: &'a LirProgram,
     ) -> Self {
+        let task_index: HashMap<&str, usize> = lir
+            .tasks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.name.as_str(), i))
+            .collect();
+        // Estimate output size: ~200 bytes per task + 2K base
+        let estimated_size = 2048 + lir.tasks.len() * 200;
         CodegenCtx {
             graph,
             schedule,
             options,
             lir,
-            out: String::with_capacity(8192),
+            out: String::with_capacity(estimated_size),
             diagnostics: Vec::new(),
             lowered_binds: HashSet::new(),
             lowered_shm_binds: HashSet::new(),
+            task_index,
         }
+    }
+
+    /// O(1) LIR task lookup by name, replacing repeated linear scans.
+    fn lir_task(&self, task_name: &str) -> Option<&'a LirTask> {
+        self.task_index.get(task_name).map(|&i| &self.lir.tasks[i])
+    }
+
+    /// Return `indent` + 4 spaces, reusing a pre-allocated buffer.
+    fn indent_plus4(&self, indent: &str) -> String {
+        let mut s = String::with_capacity(indent.len() + 4);
+        s.push_str(indent);
+        s.push_str("    ");
+        s
     }
 
     fn build_result(self) -> CodegenResult {
@@ -849,8 +873,7 @@ impl<'a> CodegenCtx<'a> {
         indent: &str,
     ) -> HashMap<NodeId, String> {
         // LIR path: emit tick-level hoisted declarations from pre-resolved LIR data
-        let lir = self.lir;
-        if let Some(lir_task) = lir.tasks.iter().find(|t| t.name == task_name) {
+        if let Some(lir_task) = self.lir_task(task_name) {
             let hoisted_list = collect_lir_tick_hoistable_actors(&lir_task.body);
             let mut hoisted = HashMap::new();
             for (var_name, cpp_name, params) in &hoisted_list {
@@ -944,7 +967,7 @@ impl<'a> CodegenCtx<'a> {
     /// For pipeline tasks, this is the first actor's `out_rate × repetition_count`.
     /// Falls back to 1 for modal tasks or when rates are unavailable.
     fn iteration_stride(&self, task_name: &str) -> u32 {
-        let lir_task = match self.lir.tasks.iter().find(|t| t.name == task_name) {
+        let lir_task = match self.lir_task(task_name) {
             Some(t) => t,
             None => return 1,
         };
@@ -1056,8 +1079,7 @@ impl<'a> CodegenCtx<'a> {
                 );
 
                 // Modal dispatch via LIR
-                let lir = self.lir;
-                if let Some(lir_task) = lir.tasks.iter().find(|t| t.name == task_name) {
+                if let Some(lir_task) = self.lir_task(task_name) {
                     if let LirTaskBody::Modal(modal) = &lir_task.body {
                         self.emit_lir_ctrl_source_read(task_name, &modal.ctrl_source, indent);
                         let _ = writeln!(
@@ -1065,7 +1087,7 @@ impl<'a> CodegenCtx<'a> {
                             "{}if (_active_mode != -1 && _ctrl != _active_mode) {{",
                             indent
                         );
-                        self.emit_lir_mode_feedback_resets(modal, &format!("{}    ", indent));
+                        self.emit_lir_mode_feedback_resets(modal, &self.indent_plus4(indent));
                         let _ = writeln!(self.out, "{}}}", indent);
                         let _ = writeln!(self.out, "{}_active_mode = _ctrl;", indent);
 
@@ -1075,7 +1097,7 @@ impl<'a> CodegenCtx<'a> {
                             self.emit_lir_subgraph(
                                 task_name,
                                 mode_sg,
-                                &format!("{}    ", indent),
+                                &self.indent_plus4(indent),
                                 tick_hoisted_actors,
                             );
                             let _ = writeln!(self.out, "{}    break;", indent);
@@ -1101,8 +1123,7 @@ impl<'a> CodegenCtx<'a> {
         tick_hoisted_actors: &HashMap<NodeId, String>,
     ) {
         // LIR path: find the corresponding LIR subgraph and emit from it
-        let lir = self.lir;
-        if let Some(lir_task) = lir.tasks.iter().find(|t| t.name == task_name) {
+        if let Some(lir_task) = self.lir_task(task_name) {
             let lir_sg = match &lir_task.body {
                 LirTaskBody::Pipeline(sg) if label == "pipeline" => Some(sg),
                 LirTaskBody::Modal(modal) => {
@@ -1173,8 +1194,7 @@ impl<'a> CodegenCtx<'a> {
         _task_graph: &TaskGraph,
         _task_schedule: &TaskSchedule,
     ) {
-        let lir = self.lir;
-        if let Some(lir_task) = lir.tasks.iter().find(|t| t.name == task_name) {
+        if let Some(lir_task) = self.lir_task(task_name) {
             for fb in &lir_task.feedback_buffers {
                 let _ = writeln!(
                     self.out,
@@ -1188,8 +1208,7 @@ impl<'a> CodegenCtx<'a> {
     // ── Runtime param reads ─────────────────────────────────────────────
 
     fn emit_param_reads(&mut self, task_name: &str, _task_graph: &TaskGraph, indent: &str) {
-        let lir = self.lir;
-        if let Some(lir_task) = lir.tasks.iter().find(|t| t.name == task_name) {
+        if let Some(lir_task) = self.lir_task(task_name) {
             for param in &lir_task.used_params {
                 let _ = writeln!(
                     self.out,
@@ -1441,7 +1460,7 @@ impl<'a> CodegenCtx<'a> {
                 "{}for (int _r = 0; _r < {}; ++_r) {{",
                 indent, firing.repetition
             );
-            (format!("{}    ", indent), true)
+            (self.indent_plus4(indent), true)
         } else {
             (indent.to_string(), false)
         };
@@ -1565,7 +1584,7 @@ impl<'a> CodegenCtx<'a> {
             "{}for (int _r = 0; _r < {}; ++_r) {{",
             indent, chain.repetition
         );
-        let body_indent = format!("{}    ", indent);
+        let body_indent = self.indent_plus4(indent);
         let ind = body_indent.as_str();
 
         // Emit each firing in the chain
@@ -1580,7 +1599,12 @@ impl<'a> CodegenCtx<'a> {
                             chain
                                 .hoisted_actors
                                 .iter()
-                                .find(|h| h.var_name == format!("_actor_{}", actor.node_id.0))
+                                .find(|h| {
+                                    h.var_name
+                                        .strip_prefix("_actor_")
+                                        .and_then(|s| s.parse::<u32>().ok())
+                                        == Some(actor.node_id.0)
+                                })
                                 .map(|h| h.var_name.as_str())
                         })
                         .or_else(|| actor.hoisted.as_ref().map(|h| h.var_name.as_str()));
@@ -1675,26 +1699,23 @@ impl<'a> CodegenCtx<'a> {
             return input.buffer_var.clone();
         }
 
-        // Multi-input: concatenate slices into local buffer
-        let mut segments: Vec<(String, u32)> = Vec::with_capacity(actor.inputs.len());
-        for input in &actor.inputs {
-            let tokens_per_firing = if rep > 1 {
-                input.tokens / rep
-            } else {
-                input.tokens
-            };
-            let src_expr = if rep > 1 {
-                format!("&{}[_r * {}]", input.buffer_var, tokens_per_firing)
-            } else {
-                input.buffer_var.clone()
-            };
-            segments.push((src_expr, tokens_per_firing));
-        }
-        if segments.is_empty() {
+        // Multi-input: concatenate slices into local buffer.
+        // Compute total tokens first, then emit directly without intermediate Vec.
+        let total_tokens: u32 = actor
+            .inputs
+            .iter()
+            .map(|input| {
+                if rep > 1 {
+                    input.tokens / rep
+                } else {
+                    input.tokens
+                }
+            })
+            .sum();
+        if total_tokens == 0 {
             return "nullptr".to_string();
         }
 
-        let total_tokens: u32 = segments.iter().map(|(_, n)| *n).sum();
         let effective_in = actor.in_rate.unwrap_or(total_tokens);
         let local_in = format!("_in_{}", actor.node_id.0);
         if total_tokens == effective_in {
@@ -1712,16 +1733,27 @@ impl<'a> CodegenCtx<'a> {
         }
 
         let mut offset = 0u32;
-        for (src_expr, tokens) in segments {
+        for input in &actor.inputs {
             if offset >= effective_in {
                 break;
             }
-            let copy_tokens = tokens.min(effective_in - offset);
+            let tokens_per_firing = if rep > 1 {
+                input.tokens / rep
+            } else {
+                input.tokens
+            };
+            let copy_tokens = tokens_per_firing.min(effective_in - offset);
+            // Write src_expr directly to avoid per-input String allocation
+            let src_expr: std::borrow::Cow<'_, str> = if rep > 1 {
+                format!("&{}[_r * {}]", input.buffer_var, tokens_per_firing).into()
+            } else {
+                (&input.buffer_var).into()
+            };
             self.emit_compact_input_copy(
                 indent,
                 &local_in,
                 offset,
-                src_expr.as_str(),
+                &src_expr,
                 copy_tokens,
                 actor.in_type,
             );

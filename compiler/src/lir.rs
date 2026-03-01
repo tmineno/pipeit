@@ -886,12 +886,26 @@ pub fn build_lir(
     schedule: &ScheduledProgram,
 ) -> LirProgram {
     let subgraph_indices = build_subgraph_indices(graph);
+
+    // Precompute sorted reader task lists once per buffer.
+    let mut buffer_readers: HashMap<String, Vec<String>> = HashMap::new();
+    for (name, info) in &thir.resolved.buffers {
+        let mut readers = HashSet::new();
+        for (task_name, _) in &info.readers {
+            readers.insert(task_name.clone());
+        }
+        let mut sorted: Vec<String> = readers.into_iter().collect();
+        sorted.sort();
+        buffer_readers.insert(name.clone(), sorted);
+    }
+
     let builder = LirBuilder {
         thir,
         graph,
         analysis,
         schedule,
         subgraph_indices,
+        buffer_readers,
     };
     builder.build()
 }
@@ -902,6 +916,9 @@ struct LirBuilder<'a> {
     analysis: &'a AnalyzedProgram,
     schedule: &'a ScheduledProgram,
     subgraph_indices: HashMap<usize, SubgraphIndex>,
+    /// Precomputed buffer_name → sorted reader task names.
+    /// Built once at construction; eliminates repeated HashSet+sort in buffer I/O builders.
+    buffer_readers: HashMap<String, Vec<String>>,
 }
 
 impl<'a> LirBuilder<'a> {
@@ -1019,7 +1036,7 @@ impl<'a> LirBuilder<'a> {
                     cpp_type,
                     capacity_tokens,
                     reader_count,
-                    reader_tasks,
+                    reader_tasks: reader_tasks.to_vec(),
                     skip_writes,
                     memory_kind: MemoryKind::Shared,
                 }
@@ -1365,13 +1382,13 @@ impl<'a> LirBuilder<'a> {
         sched: &SubgraphSchedule,
     ) -> LirSubgraph {
         let back_edges = identify_back_edges(sub, &self.graph.cycles);
-        let aliases = build_passthrough_aliases(sub);
-        let edge_buffers = self.build_edge_buffers(sub, sched, &back_edges, &aliases);
+        let adj = EdgeAdjacency::build(sub);
+        let aliases = build_passthrough_aliases_with_adj(sub, &adj);
+        let (edge_buffers, edge_buf_names) =
+            self.build_edge_buffers_and_names(sub, sched, &back_edges, &aliases);
 
-        // Build name map for edge buffer variable names
-        let edge_buf_names = self.build_edge_buf_name_map(sub, sched, &back_edges, &aliases);
-
-        let firings = self.build_firing_groups(task_name, sub, sched, &edge_buf_names, &back_edges);
+        let firings =
+            self.build_firing_groups(task_name, sub, sched, &edge_buf_names, &back_edges, &adj);
 
         LirSubgraph {
             edge_buffers,
@@ -1379,19 +1396,23 @@ impl<'a> LirBuilder<'a> {
         }
     }
 
-    fn build_edge_buffers(
+    /// Build edge buffer declarations AND the (src,tgt)→var_name map in a single
+    /// sorted pass over `sched.edge_buffers`, eliminating the duplicate sort+iterate
+    /// that the old separate `build_edge_buffers` / `build_edge_buf_name_map` pair did.
+    fn build_edge_buffers_and_names(
         &self,
         sub: &Subgraph,
         sched: &SubgraphSchedule,
         back_edges: &HashSet<(NodeId, NodeId)>,
         aliases: &HashMap<(NodeId, NodeId), (NodeId, NodeId)>,
-    ) -> Vec<LirEdgeBuffer> {
+    ) -> (Vec<LirEdgeBuffer>, HashMap<(NodeId, NodeId), String>) {
         let mut sorted_edges: Vec<_> = sched.edge_buffers.iter().collect();
         sorted_edges.sort_by_key(|&(&(src, tgt), _)| (src.0, tgt.0));
 
-        // Pass 1: build non-aliased buffer entries
         let mut results = Vec::new();
         let mut names: HashMap<(NodeId, NodeId), String> = HashMap::new();
+
+        // Pass 1: back edges and normal edges
         for (&(src, tgt), &tokens) in &sorted_edges {
             if back_edges.contains(&(src, tgt)) {
                 let var_name = format!("_fb_{}_{}", src.0, tgt.0);
@@ -1423,13 +1444,15 @@ impl<'a> LirBuilder<'a> {
             });
         }
 
-        // Pass 2: aliased edges
+        // Pass 2: aliased edges (uses names built in pass 1)
         for (&(src, tgt), &(alias_src, alias_tgt)) in aliases {
-            let alias_name = names.get(&(alias_src, alias_tgt)).cloned();
-            if let Some(alias_name) = alias_name {
+            if let Some(alias_name) = names.get(&(alias_src, alias_tgt)) {
                 let var_name = format!("_e{}_{}", src.0, tgt.0);
                 let tokens = sched.edge_buffers.get(&(src, tgt)).copied().unwrap_or(1);
-                names.insert((src, tgt), var_name.clone());
+                let alias_name = alias_name.clone();
+                // Name map: aliased edge maps to the alias target's var name,
+                // so firing builders reference the correct underlying buffer.
+                names.insert((src, tgt), alias_name.clone());
                 results.push(LirEdgeBuffer {
                     var_name,
                     cpp_type: "",
@@ -1441,43 +1464,7 @@ impl<'a> LirBuilder<'a> {
             }
         }
 
-        results
-    }
-
-    /// Build a map from edge (src,tgt) → variable name for use by firing builders.
-    fn build_edge_buf_name_map(
-        &self,
-        sub: &Subgraph,
-        sched: &SubgraphSchedule,
-        back_edges: &HashSet<(NodeId, NodeId)>,
-        aliases: &HashMap<(NodeId, NodeId), (NodeId, NodeId)>,
-    ) -> HashMap<(NodeId, NodeId), String> {
-        let mut names: HashMap<(NodeId, NodeId), String> = HashMap::new();
-
-        // Back edges
-        for &(src, tgt) in back_edges {
-            names.insert((src, tgt), format!("_fb_{}_{}", src.0, tgt.0));
-        }
-
-        // Normal edges (sorted for determinism)
-        let mut sorted_edges: Vec<_> = sched.edge_buffers.iter().collect();
-        sorted_edges.sort_by_key(|&(&(src, tgt), _)| (src.0, tgt.0));
-        for (&(src, tgt), _) in &sorted_edges {
-            if names.contains_key(&(src, tgt)) || aliases.contains_key(&(src, tgt)) {
-                continue;
-            }
-            names.insert((src, tgt), format!("_e{}_{}", src.0, tgt.0));
-        }
-
-        // Aliases
-        for (&(src, tgt), &(alias_src, alias_tgt)) in aliases {
-            if let Some(alias_name) = names.get(&(alias_src, alias_tgt)) {
-                names.insert((src, tgt), alias_name.clone());
-            }
-        }
-
-        let _ = sub; // used for context
-        names
+        (results, names)
     }
 
     // ── Firing groups ──────────────────────────────────────────────────
@@ -1489,16 +1476,29 @@ impl<'a> LirBuilder<'a> {
         sched: &SubgraphSchedule,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
         back_edges: &HashSet<(NodeId, NodeId)>,
+        adj: &EdgeAdjacency<'_>,
     ) -> Vec<LirFiringGroup> {
         let fused = self.plan_fusion_candidates(sub, sched, back_edges);
+        // Precompute node_id → repetition_count for O(1) lookup
+        let firing_reps: HashMap<NodeId, u32> = sched
+            .firings
+            .iter()
+            .map(|f| (f.node_id, f.repetition_count))
+            .collect();
         let mut groups = Vec::new();
         let mut idx = 0;
 
         while idx < sched.firings.len() {
             if let Some(candidate) = fused.get(&idx) {
-                if let Some(chain) =
-                    self.build_fused_chain(task_name, sub, sched, candidate, edge_bufs)
-                {
+                if let Some(chain) = self.build_fused_chain(
+                    task_name,
+                    sub,
+                    sched,
+                    candidate,
+                    edge_bufs,
+                    adj,
+                    &firing_reps,
+                ) {
                     groups.push(LirFiringGroup::Fused(chain));
                     idx = candidate.end_idx + 1;
                     continue;
@@ -1508,8 +1508,16 @@ impl<'a> LirBuilder<'a> {
             let entry = &sched.firings[idx];
             let gq = self.gqctx();
             if let Some(node) = gq.node_in_subgraph(sub, entry.node_id) {
-                let firing =
-                    self.build_single_firing(task_name, sub, sched, node, entry, edge_bufs);
+                let firing = self.build_single_firing(
+                    task_name,
+                    sub,
+                    sched,
+                    node,
+                    entry,
+                    edge_bufs,
+                    adj,
+                    &firing_reps,
+                );
                 groups.push(LirFiringGroup::Single(firing));
             }
             idx += 1;
@@ -1518,6 +1526,7 @@ impl<'a> LirBuilder<'a> {
         groups
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_single_firing(
         &self,
         task_name: &str,
@@ -1526,6 +1535,8 @@ impl<'a> LirBuilder<'a> {
         node: &crate::graph::Node,
         entry: &FiringEntry,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
+        adj: &EdgeAdjacency<'_>,
+        firing_reps: &HashMap<NodeId, u32>,
     ) -> LirFiring {
         let rep = entry.repetition_count;
         // Fork/Probe are zero-copy passthrough nodes; buffer I/O already performs
@@ -1536,7 +1547,17 @@ impl<'a> LirBuilder<'a> {
             NodeKind::BufferRead { .. } | NodeKind::BufferWrite { .. }
         );
         let needs_loop = rep > 1 && !is_passthrough && !is_buffer_io;
-        let kind = self.build_firing_kind(task_name, sub, sched, node, edge_bufs, rep, true);
+        let kind = self.build_firing_kind(
+            task_name,
+            sub,
+            sched,
+            node,
+            edge_bufs,
+            rep,
+            true,
+            adj,
+            firing_reps,
+        );
         LirFiring {
             kind,
             repetition: rep,
@@ -1554,6 +1575,8 @@ impl<'a> LirBuilder<'a> {
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
         rep: u32,
         allow_hoist: bool,
+        adj: &EdgeAdjacency<'_>,
+        firing_reps: &HashMap<NodeId, u32>,
     ) -> LirFiringKind {
         match &node.kind {
             NodeKind::Actor {
@@ -1575,6 +1598,8 @@ impl<'a> LirBuilder<'a> {
                     edge_bufs,
                     rep,
                     allow_hoist,
+                    adj,
+                    firing_reps,
                 );
                 LirFiringKind::Actor(actor)
             }
@@ -1582,17 +1607,17 @@ impl<'a> LirBuilder<'a> {
                 tap_name: tap_name.clone(),
             }),
             NodeKind::Probe { probe_name } => {
-                let probe = self.build_probe_firing(sub, sched, node, probe_name, edge_bufs);
+                let probe = self.build_probe_firing(sub, sched, node, probe_name, edge_bufs, adj);
                 LirFiringKind::Probe(probe)
             }
             NodeKind::BufferRead { buffer_name } => {
                 let io =
-                    self.build_buffer_read(task_name, sub, sched, node, buffer_name, edge_bufs);
+                    self.build_buffer_read(task_name, sched, node, buffer_name, edge_bufs, adj);
                 LirFiringKind::BufferRead(io)
             }
             NodeKind::BufferWrite { buffer_name } => {
                 let io =
-                    self.build_buffer_write(task_name, sub, sched, node, buffer_name, edge_bufs);
+                    self.build_buffer_write(task_name, sched, node, buffer_name, edge_bufs, adj);
                 LirFiringKind::BufferWrite(io)
             }
         }
@@ -1604,7 +1629,7 @@ impl<'a> LirBuilder<'a> {
     fn build_actor_firing(
         &self,
         task_name: &str,
-        sub: &Subgraph,
+        _sub: &Subgraph,
         sched: &SubgraphSchedule,
         node_id: NodeId,
         actor_name: &str,
@@ -1614,12 +1639,22 @@ impl<'a> LirBuilder<'a> {
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
         rep: u32,
         allow_hoist: bool,
+        adj: &EdgeAdjacency<'_>,
+        firing_reps: &HashMap<NodeId, u32>,
     ) -> LirActorFiring {
         let meta = self.thir.concrete_actor(actor_name, call_id);
         let cpp_name = self.actor_cpp_name(actor_name, call_id);
 
         let schedule_dim_overrides = if let Some(meta) = meta {
-            self.build_schedule_dim_overrides(meta, args, shape_constraint, sched, node_id, sub)
+            self.build_schedule_dim_overrides(
+                meta,
+                args,
+                shape_constraint,
+                sched,
+                node_id,
+                adj,
+                firing_reps,
+            )
         } else {
             HashMap::new()
         };
@@ -1662,8 +1697,8 @@ impl<'a> LirBuilder<'a> {
             false
         };
 
-        let inputs = self.build_edge_refs(sub, sched, node_id, edge_bufs, true);
-        let outputs = self.build_edge_refs(sub, sched, node_id, edge_bufs, false);
+        let inputs = self.build_edge_refs(sched, node_id, edge_bufs, true, adj);
+        let outputs = self.build_edge_refs(sched, node_id, edge_bufs, false, adj);
 
         // Tick-level hoistable: no ParamRef or TapRef args (can live above K-loop)
         let tick_hoistable = is_actor_hoistable(args, false);
@@ -1698,20 +1733,20 @@ impl<'a> LirBuilder<'a> {
 
     fn build_edge_refs(
         &self,
-        sub: &Subgraph,
         sched: &SubgraphSchedule,
         node_id: NodeId,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
         incoming: bool,
+        adj: &EdgeAdjacency<'_>,
     ) -> Vec<LirEdgeRef> {
-        let edges: Vec<&Edge> = if incoming {
-            sub.edges.iter().filter(|e| e.target == node_id).collect()
+        let edges = if incoming {
+            adj.incoming(node_id)
         } else {
-            sub.edges.iter().filter(|e| e.source == node_id).collect()
+            adj.outgoing(node_id)
         };
 
         edges
-            .into_iter()
+            .iter()
             .filter_map(|e| {
                 let key = (e.source, e.target);
                 let buffer_var = edge_bufs.get(&key)?.clone();
@@ -1806,7 +1841,8 @@ impl<'a> LirBuilder<'a> {
             .or_else(|| {
                 self.analysis
                     .span_derived_dims
-                    .get(&(node_id, param_name.to_string()))
+                    .get(&node_id)
+                    .and_then(|m| m.get(param_name))
                     .copied()
             })
             .or_else(|| schedule_dim_overrides.get(param_name).copied())
@@ -1926,6 +1962,7 @@ impl<'a> LirBuilder<'a> {
 
     // ── Schedule dim overrides ─────────────────────────────────────────
 
+    #[allow(clippy::too_many_arguments)]
     fn build_schedule_dim_overrides(
         &self,
         meta: &ActorMeta,
@@ -1933,20 +1970,15 @@ impl<'a> LirBuilder<'a> {
         shape_constraint: Option<&ShapeConstraint>,
         sched: &SubgraphSchedule,
         node_id: NodeId,
-        sub: &Subgraph,
+        adj: &EdgeAdjacency<'_>,
+        firing_reps: &HashMap<NodeId, u32>,
     ) -> HashMap<String, u32> {
         let mut overrides = HashMap::new();
-        let rep = firing_repetition(sched, node_id);
-        let incoming_override = consistent_dim_override_from_edges(
-            sched,
-            rep,
-            sub.edges.iter().filter(|e| e.target == node_id),
-        );
-        let outgoing_override = consistent_dim_override_from_edges(
-            sched,
-            rep,
-            sub.edges.iter().filter(|e| e.source == node_id),
-        );
+        let rep = firing_reps.get(&node_id).copied().unwrap_or(1);
+        let incoming_override =
+            consistent_dim_override_from_edges(sched, rep, adj.incoming(node_id).iter().copied());
+        let outgoing_override =
+            consistent_dim_override_from_edges(sched, rep, adj.outgoing(node_id).iter().copied());
         let symbolic_sides = symbolic_shape_sides(meta);
         let provided_params = provided_param_names(meta, args);
 
@@ -1991,7 +2023,9 @@ impl<'a> LirBuilder<'a> {
             || self
                 .analysis
                 .span_derived_dims
-                .contains_key(&(node_id, sym.to_string()))
+                .get(&node_id)
+                .map(|m| m.contains_key(sym))
+                .unwrap_or(false)
             || provided_params.contains(sym)
     }
 
@@ -2004,8 +2038,9 @@ impl<'a> LirBuilder<'a> {
         node: &crate::graph::Node,
         probe_name: &str,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
+        adj: &EdgeAdjacency<'_>,
     ) -> LirProbeFiring {
-        let incoming: Vec<&Edge> = sub.edges.iter().filter(|e| e.target == node.id).collect();
+        let incoming = adj.incoming(node.id);
         if let Some(in_edge) = incoming.first() {
             if let Some(src_buf) = edge_bufs.get(&(in_edge.source, in_edge.target)) {
                 let wire_type = self.infer_edge_wire_type(sub, in_edge.source);
@@ -2039,13 +2074,13 @@ impl<'a> LirBuilder<'a> {
     fn build_buffer_read(
         &self,
         task_name: &str,
-        sub: &Subgraph,
         sched: &SubgraphSchedule,
         node: &crate::graph::Node,
         buffer_name: &str,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
+        adj: &EdgeAdjacency<'_>,
     ) -> LirBufferIo {
-        let outgoing: Vec<&Edge> = sub.edges.iter().filter(|e| e.source == node.id).collect();
+        let outgoing = adj.outgoing(node.id);
         let (edge_var, total_tokens) = if let Some(out_edge) = outgoing.first() {
             let var = edge_bufs
                 .get(&(out_edge.source, out_edge.target))
@@ -2084,13 +2119,13 @@ impl<'a> LirBuilder<'a> {
     fn build_buffer_write(
         &self,
         task_name: &str,
-        sub: &Subgraph,
         sched: &SubgraphSchedule,
         node: &crate::graph::Node,
         buffer_name: &str,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
+        adj: &EdgeAdjacency<'_>,
     ) -> LirBufferIo {
-        let incoming: Vec<&Edge> = sub.edges.iter().filter(|e| e.target == node.id).collect();
+        let incoming = adj.incoming(node.id);
         let (edge_var, total_tokens) = if let Some(in_edge) = incoming.first() {
             let var = edge_bufs
                 .get(&(in_edge.source, in_edge.target))
@@ -2188,6 +2223,7 @@ impl<'a> LirBuilder<'a> {
         fused
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_fused_chain(
         &self,
         task_name: &str,
@@ -2195,6 +2231,8 @@ impl<'a> LirBuilder<'a> {
         sched: &SubgraphSchedule,
         candidate: &FusionCandidate,
         edge_bufs: &HashMap<(NodeId, NodeId), String>,
+        adj: &EdgeAdjacency<'_>,
+        firing_reps: &HashMap<NodeId, u32>,
     ) -> Option<LirFusedChain> {
         if candidate.start_idx >= sched.firings.len()
             || candidate.end_idx >= sched.firings.len()
@@ -2235,7 +2273,8 @@ impl<'a> LirBuilder<'a> {
                             shape_constraint.as_ref(),
                             sched,
                             node_id,
-                            sub,
+                            adj,
+                            firing_reps,
                         );
                         self.resolve_actor_args(
                             meta,
@@ -2260,14 +2299,18 @@ impl<'a> LirBuilder<'a> {
         let mut body = Vec::new();
         for &node_id in &candidate.node_ids {
             let node = gq.node_in_subgraph(sub, node_id)?;
-            let entry_rep = sched
-                .firings
-                .iter()
-                .find(|f| f.node_id == node_id)
-                .map(|f| f.repetition_count)
-                .unwrap_or(1);
-            let kind =
-                self.build_firing_kind(task_name, sub, sched, node, edge_bufs, entry_rep, false);
+            let entry_rep = firing_reps.get(&node_id).copied().unwrap_or(1);
+            let kind = self.build_firing_kind(
+                task_name,
+                sub,
+                sched,
+                node,
+                edge_bufs,
+                entry_rep,
+                false,
+                adj,
+                firing_reps,
+            );
             body.push(LirFiring {
                 kind,
                 repetition: entry_rep,
@@ -2363,16 +2406,9 @@ impl<'a> LirBuilder<'a> {
         (bytes / elem_size as u64).max(1) as u32
     }
 
-    fn buffer_reader_tasks(&self, buffer_name: &str) -> Vec<String> {
-        let mut readers = HashSet::new();
-        if let Some(info) = self.thir.resolved.buffers.get(buffer_name) {
-            for (task_name, _) in &info.readers {
-                readers.insert(task_name.clone());
-            }
-        }
-        let mut sorted: Vec<String> = readers.into_iter().collect();
-        sorted.sort();
-        sorted
+    fn buffer_reader_tasks(&self, buffer_name: &str) -> &[String] {
+        static EMPTY: Vec<String> = Vec::new();
+        self.buffer_readers.get(buffer_name).unwrap_or(&EMPTY)
     }
 
     /// Convert an Arg to a C++ literal string (for RuntimeParam / delay init).
@@ -2472,17 +2508,53 @@ fn fmt_spec_for_cpp_type(cpp_type: &str) -> &'static str {
     }
 }
 
-fn build_passthrough_aliases(sub: &Subgraph) -> HashMap<(NodeId, NodeId), (NodeId, NodeId)> {
+/// Pre-built incoming/outgoing edge adjacency for a subgraph.
+/// Built once per subgraph and reused by all firing builders, eliminating
+/// repeated `sub.edges.iter().filter()` scans.
+struct EdgeAdjacency<'a> {
+    incoming: HashMap<NodeId, Vec<&'a Edge>>,
+    outgoing: HashMap<NodeId, Vec<&'a Edge>>,
+}
+
+impl<'a> EdgeAdjacency<'a> {
+    fn build(sub: &'a Subgraph) -> Self {
+        let mut incoming: HashMap<NodeId, Vec<&'a Edge>> = HashMap::new();
+        let mut outgoing: HashMap<NodeId, Vec<&'a Edge>> = HashMap::new();
+        for edge in &sub.edges {
+            incoming.entry(edge.target).or_default().push(edge);
+            outgoing.entry(edge.source).or_default().push(edge);
+        }
+        EdgeAdjacency { incoming, outgoing }
+    }
+
+    fn incoming(&self, node_id: NodeId) -> &[&'a Edge] {
+        self.incoming
+            .get(&node_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn outgoing(&self, node_id: NodeId) -> &[&'a Edge] {
+        self.outgoing
+            .get(&node_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+}
+
+fn build_passthrough_aliases_with_adj(
+    sub: &Subgraph,
+    adj: &EdgeAdjacency<'_>,
+) -> HashMap<(NodeId, NodeId), (NodeId, NodeId)> {
     let mut aliases = HashMap::new();
     for node in &sub.nodes {
         let is_passthrough = matches!(node.kind, NodeKind::Fork { .. } | NodeKind::Probe { .. });
         if !is_passthrough {
             continue;
         }
-        let incoming: Vec<&Edge> = sub.edges.iter().filter(|e| e.target == node.id).collect();
-        if let Some(in_edge) = incoming.first() {
+        if let Some(in_edge) = adj.incoming(node.id).first() {
             let src_key = (in_edge.source, in_edge.target);
-            for out_edge in sub.edges.iter().filter(|e| e.source == node.id) {
+            for out_edge in adj.outgoing(node.id) {
                 aliases.insert((out_edge.source, out_edge.target), src_key);
             }
         }
@@ -2510,15 +2582,6 @@ fn is_actor_hoistable(args: &[Arg], allow_param_ref: bool) -> bool {
         Arg::ParamRef(_) => allow_param_ref,
         Arg::TapRef(_) => false,
     })
-}
-
-fn firing_repetition(sched: &SubgraphSchedule, node_id: NodeId) -> u32 {
-    sched
-        .firings
-        .iter()
-        .find(|f| f.node_id == node_id)
-        .map(|f| f.repetition_count)
-        .unwrap_or(1)
 }
 
 fn consistent_dim_override_from_edges<'e, I>(
