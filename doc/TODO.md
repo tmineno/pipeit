@@ -22,7 +22,7 @@
 | v0.4.3 | — | Bind-based external integration: `bind` grammar/IR/inference, stable IDs, `--emit interface`, `BindIoAdapter` codegen, runtime rebind |
 | v0.4.4 | — | PP record manifest extraction (ADR-032), `--actor-meta` required (ADR-033, breaking), E0700 diagnostic, 667 tests |
 | v0.4.5 | — | PSHM bind transport (`pipit_shm.h`, codegen lowering, SHM benchmark, cross-process example); phase latency optimization (all 4 gates PASS), analyze/build_lir/emit_cpp hot-path rewrites, benchmark infrastructure (build cache, parallel compile, quick mode), 667 tests |
-| v0.4.6 | — | Bind infrastructure polish: interface manifest opt-in (`--emit interface`, `--interface-out`) |
+| v0.4.6 | — | Bind infrastructure polish (`--emit interface`, `--interface-out`); compiler hotspot cleanup: precomputed canonical paths, pre-sorted adjacency, O(1) task lookup, hoisted-actor map, line-offset table; quantitative profiling protocol (`profile_ab.sh`, N=10 gate verification) |
 | v0.4.7 | — | RingBuffer wait-loop: hybrid polling (spin→yield→sleep), time-based timeout (`set wait_timeout`), `WaitResult` enum (ADR-036), C++20 upgrade, 728 tests |
 | v0.4.8 | — | Multi-channel spawn & shared buffer arrays: `shared` arrays, `spawn` clause, element/star refs (`name[idx]`/`name[*]`), gather/scatter codegen, E0026-E0035, 770 tests |
 
@@ -150,6 +150,8 @@ for (int _gi = 0; _gi < 4; _gi++) {
 - [ ] Formal KPI A/B benchmark against v0.3.4 baseline; record disposition in ADR-031
 - [ ] Remove `LirInterTaskBuffer.skip_writes` and `.reader_tasks` (dead fields)
 - [ ] Whole-program output cache (`cache.rs`): SHA-256 key, `$XDG_CACHE_HOME/pipit/v1/`, `--no-cache`
+- [ ] `analyze`: reduce repeated all-subgraph traversal where checks can share one pass safely (deferred from v0.4.6: `mem::take` is zero-cost move, inter-pass dependencies prevent safe merging)
+- [ ] `subgraph_index`: revisit small-graph indexing threshold (`INDEX_MIN_GRAPH_SIZE`) with measurement-backed default (deferred from v0.4.6: needs empirical data)
 
 ### Deferred Backlog from v0.3.x–v0.4.x
 

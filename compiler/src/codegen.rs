@@ -839,8 +839,7 @@ impl<'a> CodegenCtx<'a> {
     /// Emit edge buffer declarations at task scope (before the while loop).
     /// Collects all non-feedback, non-alias edge buffers from all subgraphs.
     fn emit_edge_buffer_declarations(&mut self, task_name: &str) {
-        let lir = self.lir;
-        let Some(lir_task) = lir.tasks.iter().find(|t| t.name == task_name) else {
+        let Some(lir_task) = self.lir_task(task_name) else {
             return;
         };
         let subgraphs: Vec<&LirSubgraph> = match &lir_task.body {
@@ -1565,6 +1564,18 @@ impl<'a> CodegenCtx<'a> {
         indent: &str,
         tick_hoisted: &HashMap<NodeId, String>,
     ) {
+        // Pre-index chain-hoisted actors by NodeId for O(1) lookup.
+        let chain_hoisted_by_id: HashMap<NodeId, &str> = chain
+            .hoisted_actors
+            .iter()
+            .filter_map(|h| {
+                h.var_name
+                    .strip_prefix("_actor_")
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .map(|id| (NodeId(id), h.var_name.as_str()))
+            })
+            .collect();
+
         // Emit rep-level hoisted actor declarations (skip tick-hoisted ones)
         for hoisted in &chain.hoisted_actors {
             if let Some(id_str) = hoisted.var_name.strip_prefix("_actor_") {
@@ -1601,18 +1612,7 @@ impl<'a> CodegenCtx<'a> {
                     let hoisted_var = tick_hoisted
                         .get(&actor.node_id)
                         .map(|s| s.as_str())
-                        .or_else(|| {
-                            chain
-                                .hoisted_actors
-                                .iter()
-                                .find(|h| {
-                                    h.var_name
-                                        .strip_prefix("_actor_")
-                                        .and_then(|s| s.parse::<u32>().ok())
-                                        == Some(actor.node_id.0)
-                                })
-                                .map(|h| h.var_name.as_str())
-                        })
+                        .or_else(|| chain_hoisted_by_id.get(&actor.node_id).copied())
                         .or_else(|| actor.hoisted.as_ref().map(|h| h.var_name.as_str()));
                     self.emit_lir_actor_call(task_name, actor, ind, chain.repetition, hoisted_var);
                 }
