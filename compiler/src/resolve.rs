@@ -335,7 +335,7 @@ impl<'a> ResolveCtx<'a> {
                         );
                     }
                 }
-                StatementKind::Set(_) => {}
+                StatementKind::Set(_) | StatementKind::Shared(_) => {}
             }
         }
 
@@ -457,7 +457,7 @@ impl<'a> ResolveCtx<'a> {
                                 .lines
                                 .iter()
                                 .filter_map(|line| line.sink.as_ref())
-                                .map(|sink| sink.buffer.name.clone())
+                                .map(|sink| sink.buffer.name.name.clone())
                                 .collect();
 
                             // Mode blocks
@@ -511,11 +511,11 @@ impl<'a> ResolveCtx<'a> {
                 PipeSource::ActorCall(call) => {
                     self.resolve_actor_call(call, scope, taps);
                 }
-                PipeSource::BufferRead(ident) => {
+                PipeSource::BufferRead(ref buffer_ref) => {
                     self.pending_buffer_reads.push((
-                        ident.name.clone(),
+                        buffer_ref.name.name.clone(),
                         task_name.clone(),
-                        ident.span,
+                        buffer_ref.name.span,
                     ));
                 }
                 PipeSource::TapRef(ident) => {
@@ -574,12 +574,13 @@ impl<'a> ResolveCtx<'a> {
 
             // Sink
             if let Some(sink) = &line.sink {
-                let buf_name = &sink.buffer.name;
+                let buf_name = &sink.buffer.name.name;
+                let buf_span = sink.buffer.name.span;
                 if let Some(existing) = self.resolved.buffers.get(buf_name) {
                     if existing.writer_task != task_name {
                         self.error(
                             codes::E0010,
-                            sink.buffer.span,
+                            buf_span,
                             format!(
                                 "multiple writers to shared buffer '{}': first written by task '{}' (offset {})",
                                 buf_name, existing.writer_task, existing.writer_span.start
@@ -592,7 +593,7 @@ impl<'a> ResolveCtx<'a> {
                         buf_name.clone(),
                         BufferInfo {
                             writer_task: task_name.clone(),
-                            writer_span: sink.buffer.span,
+                            writer_span: buf_span,
                             readers: Vec::new(),
                         },
                     );

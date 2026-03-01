@@ -531,9 +531,10 @@ impl<'a> HirBuilder<'a> {
                         span: stmt.span,
                     });
                 }
-                StatementKind::Define(_) | StatementKind::Bind(_) => {
+                StatementKind::Define(_) | StatementKind::Bind(_) | StatementKind::Shared(_) => {
                     // Defines: consumed during expansion, not emitted to HIR.
                     // Binds: collected separately below from resolved.binds.
+                    // Shared: consumed during resolve, not emitted to HIR.
                 }
             }
         }
@@ -675,7 +676,7 @@ impl<'a> HirBuilder<'a> {
         }
 
         let sink = expr.sink.as_ref().map(|s| HirSink {
-            buffer_name: s.buffer.name.clone(),
+            buffer_name: s.buffer.name.name.clone(),
             span: s.span,
         });
 
@@ -712,9 +713,9 @@ impl<'a> HirBuilder<'a> {
                 }
                 ExpandedCall::InlinedDefine(pipes) => ExpandedSource::InlinedDefine(pipes),
             },
-            PipeSource::BufferRead(ident) => {
-                ExpandedSource::Single(HirPipeSource::BufferRead(ident.name.clone(), ident.span))
-            }
+            PipeSource::BufferRead(ref buffer_ref) => ExpandedSource::Single(
+                HirPipeSource::BufferRead(buffer_ref.name.name.clone(), buffer_ref.name.span),
+            ),
             PipeSource::TapRef(ident) => {
                 ExpandedSource::Single(HirPipeSource::TapRef(ident.name.clone(), ident.span))
             }
