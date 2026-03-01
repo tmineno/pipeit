@@ -566,11 +566,64 @@ fn bench_kpi_parse_scaling(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_kpi_registry_scan_pp(c: &mut Criterion) {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    // Detect C++ compiler (same logic as pcc main.rs)
+    let cc = ["c++", "g++", "clang++"]
+        .iter()
+        .find(|cmd| {
+            Command::new(cmd)
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        })
+        .map(|s| s.to_string());
+
+    let Some(cc) = cc else {
+        eprintln!("SKIP: no C++ compiler found for registry_scan_pp benchmark");
+        return;
+    };
+
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let project_root = manifest_dir.parent().unwrap();
+    let include_dir = project_root
+        .join("runtime")
+        .join("libpipit")
+        .join("include");
+
+    let include_headers: Vec<PathBuf> = vec![
+        include_dir.join("std_actors.h"),
+        include_dir.join("std_math.h"),
+        include_dir.join("std_sink.h"),
+        include_dir.join("std_source.h"),
+    ];
+    let actor_path_headers: Vec<PathBuf> =
+        vec![project_root.join("examples").join("example_actors.h")];
+    let extra_include_dirs: Vec<PathBuf> = vec![include_dir.clone()];
+
+    let mut group = c.benchmark_group("kpi/registry_scan_pp");
+    group.bench_function("std_actors", |b| {
+        b.iter(|| {
+            let _ = registry::scan_actors_pp(
+                black_box(&cc),
+                black_box(&include_headers),
+                black_box(&actor_path_headers),
+                black_box(&extra_include_dirs),
+            );
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_kpi_parse_latency,
     bench_kpi_full_compile_latency,
     bench_kpi_phase_latency,
     bench_kpi_parse_scaling,
+    bench_kpi_registry_scan_pp,
 );
 criterion_main!(benches);
