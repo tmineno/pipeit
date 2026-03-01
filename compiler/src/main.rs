@@ -464,7 +464,7 @@ fn main() {
 
             // Build compiler command
             let mut cmd = std::process::Command::new(&cli.cc);
-            cmd.arg("-std=c++17");
+            cmd.arg("-std=c++20");
 
             if let Some(flags) = &cli.cflags {
                 for flag in flags.split_whitespace() {

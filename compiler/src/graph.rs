@@ -53,10 +53,20 @@ pub enum NodeKind {
     Fork { tap_name: String },
     /// A probe observation point (`?name`).
     Probe { probe_name: String },
-    /// A shared buffer read (`@name`).
+    /// A shared buffer read (`@name` or `@name[i]`).
     BufferRead { buffer_name: String },
-    /// A shared buffer write (`-> name`).
+    /// A shared buffer write (`-> name` or `-> name[i]`).
     BufferWrite { buffer_name: String },
+    /// Gather read: `@name[*]` — reads all elements of a shared array family.
+    GatherRead {
+        family_name: String,
+        element_count: u32,
+    },
+    /// Scatter write: `-> name[*]` — writes all elements of a shared array family.
+    ScatterWrite {
+        family_name: String,
+        element_count: u32,
+    },
 }
 
 /// A node in the dataflow graph.
@@ -347,6 +357,25 @@ impl<'a> GraphBuilder<'a> {
                 ctx.buffer_reads.entry(name.clone()).or_insert(id);
                 Some(id)
             }
+            HirPipeSource::GatherRead {
+                family_name,
+                family_size,
+                span,
+            } => {
+                let id = ctx.add_node(
+                    NodeKind::GatherRead {
+                        family_name: family_name.clone(),
+                        element_count: *family_size,
+                    },
+                    *span,
+                );
+                // Register reads for all element buffers
+                for i in 0..*family_size {
+                    let elem_name = format!("{}__{}", family_name, i);
+                    ctx.buffer_reads.entry(elem_name).or_insert(id);
+                }
+                Some(id)
+            }
             HirPipeSource::TapRef(name, _span) => {
                 // Look up the fork node for this tap
                 ctx.taps.get(name).copied()
@@ -393,17 +422,38 @@ impl<'a> GraphBuilder<'a> {
 
         // Sink
         if let Some(sink) = &expr.sink {
-            let write_id = ctx.add_node(
-                NodeKind::BufferWrite {
-                    buffer_name: sink.buffer_name.clone(),
-                },
-                sink.span,
-            );
-            if let Some(prev) = prev_node {
-                ctx.add_edge(prev, write_id, sink.span);
+            if let Some(family_size) = sink.scatter {
+                // Scatter write: -> name[*]
+                let write_id = ctx.add_node(
+                    NodeKind::ScatterWrite {
+                        family_name: sink.buffer_name.clone(),
+                        element_count: family_size,
+                    },
+                    sink.span,
+                );
+                if let Some(prev) = prev_node {
+                    ctx.add_edge(prev, write_id, sink.span);
+                }
+                // Register writes for all element buffers
+                for i in 0..family_size {
+                    let elem_name = format!("{}__{}", sink.buffer_name, i);
+                    ctx.buffer_writes.insert(elem_name, write_id);
+                }
+                prev_node = Some(write_id);
+            } else {
+                // Plain or element buffer write
+                let write_id = ctx.add_node(
+                    NodeKind::BufferWrite {
+                        buffer_name: sink.buffer_name.clone(),
+                    },
+                    sink.span,
+                );
+                if let Some(prev) = prev_node {
+                    ctx.add_edge(prev, write_id, sink.span);
+                }
+                ctx.buffer_writes.insert(sink.buffer_name.clone(), write_id);
+                prev_node = Some(write_id);
             }
-            ctx.buffer_writes.insert(sink.buffer_name.clone(), write_id);
-            prev_node = Some(write_id);
         }
 
         prev_node

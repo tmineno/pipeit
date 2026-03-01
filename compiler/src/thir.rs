@@ -52,6 +52,7 @@ pub struct ThirContext<'a> {
     pub tick_rate_hz: f64,
     pub timer_spin: Option<f64>,
     pub overrun_policy: String,
+    pub wait_timeout_ms: u64,
     /// Span of the original program (fallback for diagnostics).
     pub program_span: Span,
 
@@ -115,6 +116,9 @@ pub fn build_thir_context<'a>(
     let overrun_policy = find_set_ident(&hir.set_directives, &set_index, "overrun")
         .unwrap_or("drop")
         .to_string();
+    let wait_timeout_ms = find_set_number(&hir.set_directives, &set_index, "wait_timeout")
+        .map(|n| (n as u64).clamp(1, 60000))
+        .unwrap_or(50);
 
     // Resolve param C++ types by scanning graph nodes
     let param_cpp_types = resolve_param_cpp_types(hir, lowered, registry, graph);
@@ -135,6 +139,7 @@ pub fn build_thir_context<'a>(
         tick_rate_hz,
         timer_spin,
         overrun_policy,
+        wait_timeout_ms,
         program_span: hir.program_span,
         param_cpp_types,
     }
@@ -416,6 +421,7 @@ impl<'a> ThirContext<'a> {
             None => writeln!(out, "    timer_spin: None").unwrap(),
         }
         writeln!(out, "    overrun_policy: {}", self.overrun_policy).unwrap();
+        writeln!(out, "    wait_timeout_ms: {}", self.wait_timeout_ms).unwrap();
 
         // 2. Param C++ types (sorted)
         writeln!(out, "  param_cpp_types:").unwrap();
@@ -690,6 +696,7 @@ mod tests {
             tasks: HashMap::new(),
             binds: HashMap::new(),
             buffers: HashMap::new(),
+            shared_arrays: HashMap::new(),
             call_resolutions: HashMap::new(),
             task_resolutions: HashMap::new(),
             probes: Vec::new(),
@@ -846,6 +853,7 @@ mod tests {
         assert_eq!(thir.tick_rate_hz, 1000.0);
         assert!(thir.timer_spin.is_none());
         assert_eq!(thir.overrun_policy, "drop");
+        assert_eq!(thir.wait_timeout_ms, 50);
     }
 
     #[test]

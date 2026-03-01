@@ -182,6 +182,7 @@ where
     .or(ident.clone().map(ShapeDim::ConstRef));
 
     let shape_constraint = shape_dim
+        .clone()
         .separated_by(just(Token::Comma))
         .at_least(1)
         .collect::<Vec<_>>()
@@ -232,11 +233,33 @@ where
             span: e.span(),
         });
 
+    // ── Buffer reference: ident ('[' (Star | Number | ident) ']')? ──
+
+    let buffer_index = just(Token::Star)
+        .map_with(|_, e| BufferIndex::Star(e.span()))
+        .or(select! {
+            Token::Number(n) if n >= 0.0 && n.fract() == 0.0 && n <= u32::MAX as f64 => n,
+        }
+        .map_with(|n, e| BufferIndex::Literal(n as u32, e.span())))
+        .or(ident.clone().map(BufferIndex::Ident));
+
+    let buffer_ref = ident
+        .clone()
+        .then(
+            buffer_index
+                .delimited_by(just(Token::LBracket), just(Token::RBracket))
+                .or_not(),
+        )
+        .map(|(name, index)| BufferRef {
+            name,
+            index: index.unwrap_or(BufferIndex::None),
+        });
+
     // ── Pipe expression ──
 
     let pipe_source = {
         let buffer_read = just(Token::At)
-            .ignore_then(ident.clone())
+            .ignore_then(buffer_ref.clone())
             .map(PipeSource::BufferRead);
         let tap_ref = just(Token::Colon)
             .ignore_then(ident.clone())
@@ -257,7 +280,7 @@ where
     };
 
     let sink = just(Token::Arrow)
-        .ignore_then(ident.clone())
+        .ignore_then(buffer_ref.clone())
         .map_with(|buffer, e| Sink {
             buffer,
             span: e.span(),
@@ -472,6 +495,45 @@ where
             })
         });
 
+    // ── Spawn clause: '[' ident '=' spawn_bound '..' spawn_bound ']' ──
+
+    let spawn_bound = select! {
+        Token::Number(n) if n >= 0.0 && n.fract() == 0.0 && n <= u32::MAX as f64 => n,
+    }
+    .map_with(|n, e| SpawnBound::Literal(n as u32, e.span()))
+    .or(ident.clone().map(SpawnBound::ConstRef));
+
+    let spawn_clause = ident
+        .clone()
+        .then_ignore(just(Token::Equals))
+        .then(spawn_bound.clone())
+        .then_ignore(just(Token::DotDot))
+        .then(spawn_bound)
+        .delimited_by(just(Token::LBracket), just(Token::RBracket))
+        .map_with(|((index_var, begin), end), e| SpawnClause {
+            index_var,
+            begin,
+            end,
+            span: e.span(),
+        });
+
+    // ── Shared statement: 'shared' ident '[' shape_dim ']' ──
+
+    let shared_stmt = just(Token::Shared)
+        .ignore_then(ident.clone())
+        .then(
+            shape_dim
+                .clone()
+                .delimited_by(just(Token::LBracket), just(Token::RBracket)),
+        )
+        .map_with(|(name, size), e| {
+            StatementKind::Shared(SharedDecl {
+                name,
+                size,
+                span: e.span(),
+            })
+        });
+
     // ── Task statement ──
 
     let freq = select! {
@@ -486,14 +548,16 @@ where
     let task_stmt = just(Token::Clock)
         .ignore_then(freq)
         .then(ident.clone())
+        .then(spawn_clause.or_not())
         .then(task_body.delimited_by(just(Token::LBrace), just(Token::RBrace)))
-        .map(|(((freq_val, freq_span), name), body)| {
-            StatementKind::Task(TaskStmt {
+        .map(|((((freq_val, freq_span), name), spawn), body)| {
+            StatementKind::Task(Box::new(TaskStmt {
                 freq: freq_val,
                 freq_span,
                 name,
+                spawn,
                 body,
-            })
+            }))
         });
 
     // ── Statement dispatch ──
@@ -504,6 +568,7 @@ where
         param_stmt,
         bind_stmt,
         define_stmt,
+        shared_stmt,
         task_stmt,
     ))
     .map_with(|kind, e| Statement {
@@ -704,7 +769,9 @@ mod tests {
         let TaskBody::Pipeline(p) = &t.body else {
             panic!("expected Pipeline")
         };
-        assert!(matches!(&p.lines[0].source, PipeSource::BufferRead(id) if id.name == "signal"));
+        assert!(
+            matches!(&p.lines[0].source, PipeSource::BufferRead(ref r) if r.name.name == "signal")
+        );
     }
 
     #[test]
@@ -753,7 +820,7 @@ mod tests {
         let TaskBody::Pipeline(p) = &t.body else {
             panic!("expected Pipeline")
         };
-        assert_eq!(p.lines[0].sink.as_ref().unwrap().buffer.name, "signal");
+        assert_eq!(p.lines[0].sink.as_ref().unwrap().buffer.name.name, "signal");
     }
 
     // ── actor_call args ──
@@ -1289,5 +1356,148 @@ mod tests {
             matches!(&b.endpoint.args[0], BindArg::Positional(Scalar::Ident(id)) if id.name == "addr")
         );
         assert!(matches!(&b.endpoint.args[1], BindArg::Named(ident, _) if ident.name == "chan"));
+    }
+
+    // ── shared_stmt (v0.4.8) ──
+
+    #[test]
+    fn shared_stmt_literal_size() {
+        let s = parse_one_stmt("shared sig[24]");
+        let StatementKind::Shared(d) = &s.kind else {
+            panic!("expected Shared")
+        };
+        assert_eq!(d.name.name, "sig");
+        assert!(matches!(&d.size, ShapeDim::Literal(24, _)));
+    }
+
+    #[test]
+    fn shared_stmt_const_ref_size() {
+        let s = parse_one_stmt("shared buf[CH]");
+        let StatementKind::Shared(d) = &s.kind else {
+            panic!("expected Shared")
+        };
+        assert_eq!(d.name.name, "buf");
+        assert!(matches!(&d.size, ShapeDim::ConstRef(id) if id.name == "CH"));
+    }
+
+    // ── spawn_clause (v0.4.8) ──
+
+    #[test]
+    fn task_with_spawn_clause() {
+        let s = parse_one_stmt("clock 48kHz cap[ch=0..24] {\n  adc(0)\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        assert_eq!(t.name.name, "cap");
+        let spawn = t.spawn.as_ref().expect("expected spawn clause");
+        assert_eq!(spawn.index_var.name, "ch");
+        assert!(matches!(&spawn.begin, SpawnBound::Literal(0, _)));
+        assert!(matches!(&spawn.end, SpawnBound::Literal(24, _)));
+    }
+
+    #[test]
+    fn task_with_spawn_const_ref_end() {
+        let s = parse_one_stmt("clock 48kHz cap[ch=0..CH] {\n  adc(0)\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        let spawn = t.spawn.as_ref().expect("expected spawn clause");
+        assert!(matches!(&spawn.begin, SpawnBound::Literal(0, _)));
+        assert!(matches!(&spawn.end, SpawnBound::ConstRef(id) if id.name == "CH"));
+    }
+
+    #[test]
+    fn task_without_spawn_clause() {
+        let s = parse_one_stmt("clock 48kHz audio {\n  adc(0)\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        assert!(t.spawn.is_none());
+    }
+
+    // ── buffer_ref (v0.4.8) ──
+
+    #[test]
+    fn buffer_ref_plain() {
+        let s = parse_one_stmt("clock 1kHz t {\n  @signal | stdout()\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        let TaskBody::Pipeline(p) = &t.body else {
+            panic!("expected Pipeline")
+        };
+        assert!(
+            matches!(&p.lines[0].source, PipeSource::BufferRead(r) if r.name.name == "signal" && matches!(r.index, BufferIndex::None))
+        );
+    }
+
+    #[test]
+    fn buffer_ref_literal_index() {
+        let s = parse_one_stmt("clock 1kHz t {\n  @in[0] | stdout()\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        let TaskBody::Pipeline(p) = &t.body else {
+            panic!("expected Pipeline")
+        };
+        assert!(
+            matches!(&p.lines[0].source, PipeSource::BufferRead(r) if r.name.name == "in" && matches!(r.index, BufferIndex::Literal(0, _)))
+        );
+    }
+
+    #[test]
+    fn buffer_ref_ident_index() {
+        let s = parse_one_stmt("clock 1kHz t {\n  @in[ch] | stdout()\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        let TaskBody::Pipeline(p) = &t.body else {
+            panic!("expected Pipeline")
+        };
+        assert!(
+            matches!(&p.lines[0].source, PipeSource::BufferRead(r) if r.name.name == "in" && matches!(&r.index, BufferIndex::Ident(id) if id.name == "ch"))
+        );
+    }
+
+    #[test]
+    fn buffer_ref_star() {
+        let s = parse_one_stmt("clock 1kHz t {\n  @in[*] | stdout()\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        let TaskBody::Pipeline(p) = &t.body else {
+            panic!("expected Pipeline")
+        };
+        assert!(
+            matches!(&p.lines[0].source, PipeSource::BufferRead(r) if r.name.name == "in" && matches!(r.index, BufferIndex::Star(_)))
+        );
+    }
+
+    #[test]
+    fn sink_ref_literal_index() {
+        let s = parse_one_stmt("clock 1kHz t {\n  adc(0) -> out[3]\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        let TaskBody::Pipeline(p) = &t.body else {
+            panic!("expected Pipeline")
+        };
+        let sink = p.lines[0].sink.as_ref().unwrap();
+        assert_eq!(sink.buffer.name.name, "out");
+        assert!(matches!(sink.buffer.index, BufferIndex::Literal(3, _)));
+    }
+
+    #[test]
+    fn sink_ref_star() {
+        let s = parse_one_stmt("clock 1kHz t {\n  adc(0) -> out[*]\n}");
+        let StatementKind::Task(t) = &s.kind else {
+            panic!("expected Task")
+        };
+        let TaskBody::Pipeline(p) = &t.body else {
+            panic!("expected Pipeline")
+        };
+        let sink = p.lines[0].sink.as_ref().unwrap();
+        assert_eq!(sink.buffer.name.name, "out");
+        assert!(matches!(sink.buffer.index, BufferIndex::Star(_)));
     }
 }

@@ -63,6 +63,8 @@ pub enum Token {
     Delay,
     #[token("bind")]
     Bind,
+    #[token("shared")]
+    Shared,
 
     // ── Symbols ──
     #[token("|")]
@@ -97,6 +99,10 @@ pub enum Token {
     Lt,
     #[token(">")]
     Gt,
+    #[token("..")]
+    DotDot,
+    #[token("*")]
+    Star,
 
     // ── Literals ──
     //
@@ -146,6 +152,7 @@ impl fmt::Display for Token {
             Token::Default => write!(f, "default"),
             Token::Delay => write!(f, "delay"),
             Token::Bind => write!(f, "bind"),
+            Token::Shared => write!(f, "shared"),
             Token::Pipe => write!(f, "|"),
             Token::Arrow => write!(f, "->"),
             Token::At => write!(f, "@"),
@@ -162,6 +169,8 @@ impl fmt::Display for Token {
             Token::Equals => write!(f, "="),
             Token::Lt => write!(f, "<"),
             Token::Gt => write!(f, ">"),
+            Token::DotDot => write!(f, ".."),
+            Token::Star => write!(f, "*"),
             Token::Freq(v) => write!(f, "{v}Hz"),
             Token::Size(v) => write!(f, "{v}B"),
             Token::Number(v) => write!(f, "{v}"),
@@ -286,7 +295,8 @@ mod tests {
 
     #[test]
     fn keywords() {
-        let tokens = lex_ok("set const param define clock mode control switch default delay bind");
+        let tokens =
+            lex_ok("set const param define clock mode control switch default delay bind shared");
         assert_eq!(
             tokens,
             vec![
@@ -301,6 +311,7 @@ mod tests {
                 Token::Default,
                 Token::Delay,
                 Token::Bind,
+                Token::Shared,
             ]
         );
     }
@@ -319,11 +330,49 @@ mod tests {
         assert_eq!(tokens, vec![Token::Bind, Token::Ident]);
     }
 
+    #[test]
+    fn shared_keyword_vs_ident() {
+        let tokens = lex_ok("shared sharing");
+        assert_eq!(tokens, vec![Token::Shared, Token::Ident]);
+    }
+
+    #[test]
+    fn dotdot_token() {
+        let tokens = lex_ok("0..24");
+        assert_eq!(
+            tokens,
+            vec![Token::Number(0.0), Token::DotDot, Token::Number(24.0)]
+        );
+    }
+
+    #[test]
+    fn star_token() {
+        let tokens = lex_ok("[*]");
+        assert_eq!(tokens, vec![Token::LBracket, Token::Star, Token::RBracket]);
+    }
+
+    #[test]
+    fn spawn_clause_tokens() {
+        let tokens = lex_ok("[ch=0..CH]");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::LBracket,
+                Token::Ident, // ch
+                Token::Equals,
+                Token::Number(0.0),
+                Token::DotDot,
+                Token::Ident, // CH
+                Token::RBracket,
+            ]
+        );
+    }
+
     // ── Symbols ──
 
     #[test]
     fn symbols() {
-        let tokens = lex_ok("| -> @ : ? $ ( ) { } [ ] , =");
+        let tokens = lex_ok("| -> @ : ? $ ( ) { } [ ] , = .. *");
         assert_eq!(
             tokens,
             vec![
@@ -341,6 +390,8 @@ mod tests {
                 Token::RBracket,
                 Token::Comma,
                 Token::Equals,
+                Token::DotDot,
+                Token::Star,
             ]
         );
     }

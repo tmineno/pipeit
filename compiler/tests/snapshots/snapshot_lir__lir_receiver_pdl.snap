@@ -5,7 +5,7 @@ expression: output
 LirProgram (2 consts, 0 params, 0 binds, 3 inter-task bufs, 2 tasks, 2 probes)
   const sync_coeff: float[4] = [1, -1, 1, -1]
   const data_coeff: float[5] = [0.1f, 0.2f, 0.4f, 0.2f, 0.1f]
-  directives: mem=134217728, overrun=drop, timer=Fixed(10000)
+  directives: mem=134217728, overrun=drop, timer=Fixed(10000), wait_timeout=50ms
   inter-task ctrl: int32_t[256] readers=1 [] skip_writes [shared]
   inter-task payload: float[512] readers=1 [logger] [shared]
   inter-task sync_result: float[256] readers=1 [] skip_writes [shared]

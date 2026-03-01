@@ -22,104 +22,98 @@
 | v0.4.3 | — | Bind-based external integration: `bind` grammar/IR/inference, stable IDs, `--emit interface`, `BindIoAdapter` codegen, runtime rebind |
 | v0.4.4 | — | PP record manifest extraction (ADR-032), `--actor-meta` required (ADR-033, breaking), E0700 diagnostic, 667 tests |
 | v0.4.5 | — | PSHM bind transport (`pipit_shm.h`, codegen lowering, SHM benchmark, cross-process example); phase latency optimization (all 4 gates PASS), analyze/build_lir/emit_cpp hot-path rewrites, benchmark infrastructure (build cache, parallel compile, quick mode), 667 tests |
+| v0.4.6 | — | Bind infrastructure polish: interface manifest opt-in (`--emit interface`, `--interface-out`) |
+| v0.4.7 | — | RingBuffer wait-loop: hybrid polling (spin→yield→sleep), time-based timeout (`set wait_timeout`), `WaitResult` enum (ADR-036), C++20 upgrade, 728 tests |
+| v0.4.8 | — | Multi-channel spawn & shared buffer arrays: `shared` arrays, `spawn` clause, element/star refs (`name[idx]`/`name[*]`), gather/scatter codegen, E0026-E0035, 770 tests |
 
 ---
 
-## v0.4.6 - Bind Infrastructure Polish
+## v0.4.8.1 - Spawn Template Codegen Optimization
 
-**Goal**: Remaining bind-layer refinements deferred from v0.4.5.
+**Goal**: Reduce generated C++ code size for spawn-expanded tasks from O(N × body) to O(body + N). Replace N identical task function bodies with one parameterized function, ring buffer arrays, and loop-based gather/scatter.
 
-- [ ] Change interface manifest to opt-in (`--emit interface`, `--interface-out`)
+**Motivation**: For large channel counts (e.g., 1024ch beamforming), the current approach clones the entire task function body N times. This causes compile-time and binary-size bloat proportional to channel count. The optimization emits a single parameterized function that accepts a channel index, with thin template wrappers for TaskDesc compatibility.
 
----
+### M1: Spawn Family Metadata
 
-## v0.4.7 - RingBuffer Wait-Loop & Timeout Policy
+- [ ] Add `SpawnFamily` struct to `spawn.rs`: family name, expanded task names, begin/end range, index var, referenced shared arrays
+- [ ] Emit `Vec<SpawnFamily>` from `expand_spawns()` via `SpawnResult`
+- [ ] Propagate through pipeline: `ResolvedProgram` → `LirProgram` (new field `spawn_families`)
+- [ ] Unit tests: family metadata collection, const-ref bounds, multi-family programs
 
-**Goal**: Replace busy-retry wait loops in inter-task ringbuf edges with blocking wait primitives and time-based timeouts. See review note: `agent-review/pipeit-refactor/2026-03-01-ringbuf-wait-loop-scheduler-review.md`.
+### M2: Ring Buffer & Stats Array Declarations
 
-### M1: Mechanical — Wait-Policy Plumbing (no behavior change)
+- [ ] `codegen.rs` `emit_shared_buffers()`: group element buffers by shared array family → emit `_ringbuf_NAME[CH]` array declaration instead of N individual `_ringbuf_NAME__i`
+- [ ] Validate all family elements share same `cpp_type`, `capacity_tokens`, `reader_count`
+- [ ] `codegen.rs` `emit_stats_storage()`: group spawn family stats → emit `_stats_NAME__spawn[CH]` array
+- [ ] `codegen.rs` `emit_buffer_stats_descs()`: use array subscript for family buffers
 
-- [ ] Add `WaitResult` enum (`ready | timeout | stopped`) in `pipit.h`
-- [ ] Add `wait_readable(reader_idx, tokens, stop, timeout)` and `wait_writable(tokens, stop, timeout)` stubs in `RingBuffer` (return `ready` immediately, no-op)
-- [ ] Add wait-policy config types in codegen/THIR (plumbing only, not wired)
-- [ ] ADR for wait-loop policy contract (Option C rationale, fallback strategy, timeout semantics)
+### M3: Parameterized Spawn Function
 
-### M2: Behavior Change — Atomic Wait/Notify + Fallback
+- [ ] `codegen.rs` `emit_task_function()`: detect spawn family tasks → emit one `static void _spawn_NAME(int _ch)` using first instance's LIR body as template
+- [ ] Ring buffer refs in spawn body: `_ringbuf_NAME__0` → `_ringbuf_NAME[_ch]`
+- [ ] Stats refs: `_stats_NAME__spawn_0` → `_stats_NAME__spawn[_ch]`
+- [ ] Edge buffer declarations: `thread_local` instead of bare `static` (each OS thread gets own copy; safe for future thread-pool scheduler)
+- [ ] Emit `template<int _CH> void task_NAME__spawn() { _spawn_NAME(_CH); }` wrappers (decays to `void(*)()` for TaskDesc)
+- [ ] Task table entries: `{"name[i]", task_NAME__spawn<i>, &_stats_NAME__spawn[i]}`
+- [ ] Non-spawn tasks unchanged (backward compatible)
 
-- [ ] Implement `atomic_wait`/`atomic_notify` path in `RingBuffer::wait_readable` / `wait_writable` (C++20)
-- [ ] Implement hybrid-polling fallback path (`spin → yield → sleep`) when `atomic_wait` unavailable
-- [ ] Switch codegen `emit_lir_buffer_read` / `emit_lir_buffer_write` to emit wait-enabled loop shape
-- [ ] Replace attempt-based timeout (1,000,000 retries) with time-based timeout (default 50 ms)
-- [ ] Add runtime tests: empty/full transitions, stop signaling, timeout, concurrent producer/consumer stress
+### M4: Loop-Based Gather/Scatter
 
-### M3: Optimization — Tuning & Benchmarks
+- [ ] `codegen.rs` `emit_lir_gather_read()`: detect homogeneous family (all elements share tokens, reader_idx, reader_count) → emit `for` loop over `_ringbuf_NAME[_gi]` instead of N unrolled blocks
+- [ ] `codegen.rs` `emit_lir_scatter_write()`: same loop optimization
+- [ ] Fallback: keep unrolled codegen for heterogeneous families (should not occur with current semantics but defensive)
 
-- [ ] Benchmark wait-enabled vs old retry-yield loops (ringbuf contention, timer jitter, deadline miss)
-- [ ] Tune hybrid spin/yield/sleep thresholds based on benchmark data
-- [ ] Record benchmark results in `doc/performance/`
+### M5: Tests & Close
 
-### M4: v0.4.7 Close
+- [ ] Add high-channel-count integration test (e.g., CH=16) verifying array + loop codegen pattern
+- [ ] Verify existing 770+ tests pass unchanged
+- [ ] Measure generated C++ line count: before vs after for `multichannel.pdl` at CH=4 and CH=16
+- [ ] `cargo test && cargo clippy && cargo fmt --check`
 
-- [ ] All compiler tests pass (`cargo test`)
-- [ ] All runtime tests pass (including new wait-loop tests)
-- [ ] Ringbuf contention benchmark shows improvement over v0.4.5 baseline
+### Design Notes
 
----
+**Generated C++ before** (CH=4):
 
-## v0.4.8 - Multi-Channel Spawn & Shared Buffer Array
+```cpp
+static pipit::RingBuffer<float, 1024, 1> _ringbuf_raw__0;
+static pipit::RingBuffer<float, 1024, 1> _ringbuf_raw__1;
+static pipit::RingBuffer<float, 1024, 1> _ringbuf_raw__2;
+static pipit::RingBuffer<float, 1024, 1> _ringbuf_raw__3;
+static pipit::TaskStats _stats_capture__spawn_0;
+// ... ×4
 
-**Goal**: Implement `shared` buffer arrays (family), spawn clause for static task replication, element/full-array references (`name[idx]` / `name[*]`), and gather/scatter semantics. See lang spec §5.3.1, §5.4.5, §5.7, §11.6, §13.2.3.
+void task_capture__spawn_0() { /* 50 lines using _ringbuf_raw__0 */ }
+void task_capture__spawn_1() { /* identical 50 lines using _ringbuf_raw__1 */ }
+void task_capture__spawn_2() { /* identical 50 lines using _ringbuf_raw__2 */ }
+void task_capture__spawn_3() { /* identical 50 lines using _ringbuf_raw__3 */ }
+```
 
-### M1: Parse & AST (mechanical — no behavior change)
+**Generated C++ after** (CH=4):
 
-- [ ] Lexer: add `shared` keyword, `*` (star) token, `..` (range dots) token
-- [ ] Parser: `shared_stmt` → `'shared' IDENT '[' shape_dim ']'`
-- [ ] Parser: `spawn_clause` → `'[' IDENT '=' range_expr ']'` on `task_stmt`
-- [ ] Parser: `buffer_ref` → `IDENT` / `IDENT '[' index_expr ']'` / `IDENT '[' '*' ']'` in `pipe_source` and `sink`
-- [ ] AST node types: `SharedDecl`, `SpawnClause`, `BufferRef(name, index)` with `BufferIndex::None | Literal(u32) | Ident(String) | Star`
-- [ ] Unit tests: parse round-trip for `shared`, spawn, element ref, star ref
+```cpp
+static pipit::RingBuffer<float, 1024, 1> _ringbuf_raw[4];
+static pipit::TaskStats _stats_capture__spawn[4];
 
-### M2: Spawn Expansion (new compiler pass — before name resolve)
+static void _spawn_capture(int _ch) { /* 50 lines using _ringbuf_raw[_ch] */ }
+template<int _CH> void task_capture__spawn() { _spawn_capture(_CH); }
 
-- [ ] Implement spawn expansion pass: expand `clock name[idx=begin..end]` into N independent `clock` tasks (`name[0]` … `name[N-1]`)
-- [ ] Substitute spawn index variable in actor arguments and buffer subscripts within each expanded task body
-- [ ] Validate spawn range: `begin < end`, both positive compile-time integers; emit diagnostic on violation
-- [ ] Insert pass into pipeline between parse and resolve (spec §8: "spawn 展開は name resolve / 型推論 / SDF 解析の前に実行")
-- [ ] Unit tests: expansion output, index substitution, range validation errors
+// gather: loop instead of unrolled
+for (int _gi = 0; _gi < 4; _gi++) {
+    while (true) {
+        if (_ringbuf_raw[_gi].read(0, _e + _gi * F, F)) break;
+        // ... wait logic
+    }
+}
+```
 
-### M3: Shared Buffer Array — Name Resolution & Validation
+**Code growth**: O(body_size + N × 1 line) vs O(N × body_size).
 
-- [ ] Register `shared` declarations in resolve scope; resolve `name[idx]` to individual buffer elements
-- [ ] Resolve `name[*]` to gather/scatter virtual port referencing all family elements
-- [ ] Compile-time index range check: `0 <= idx < N`, emit diagnostic for out-of-bounds
-- [ ] Extend single-writer constraint to family elements; reject `-> name[*]` + `-> name[idx]` conflicts
-- [ ] Unit tests: resolution, index range errors, writer conflict errors
+**TaskDesc compatibility**: `template<int _CH> void task_NAME__spawn()` instantiates to `void(*)()` — no runtime API change needed.
 
-### M4: SDF Graph & Analysis — Shape Lift & Family Constraints
+**Edge buffer safety**: `thread_local` ensures each OS thread gets its own `static` edge buffers even when sharing a function body. No conflict with future thread-pool schedulers.
 
-- [ ] SDF graph construction: `name[idx]` as independent shared-buffer edge; `name[*]` as gather/scatter virtual node
-- [ ] Shape lift (§13.2.3): `name[*]` → 2D shape `[CH, F]` (channel dim × frame dim)
-- [ ] Family contract validation: all elements of `name[*]` must share same dtype and frame size `F`
-- [ ] Rate constraints for `name[*]`: gather requires uniform `Cr_elem × fr`; scatter requires divisible total rate
-- [ ] Bind direction inference: extend to `-> name[*]` (out-bind) and `@name[*]` (in-bind)
-- [ ] Diagnostics: E-codes for spawn range error, index out-of-bounds, family contract mismatch (spec §7)
-- [ ] Unit tests: shape inference, contract errors, bind direction with families
-
-### M5: Schedule & Codegen
-
-- [ ] Schedule generation for spawned tasks (each expanded task scheduled independently)
-- [ ] LIR: buffer array element mapping — each `name[idx]` lowers to a distinct `LirInterTaskBuffer`
-- [ ] Codegen: `@name[idx]` / `-> name[idx]` emit same C++ as plain shared buffers (element-wise)
-- [ ] Codegen: `@name[*]` (gather) — emit sequential reads from `name[0]..name[N-1]` into contiguous frame
-- [ ] Codegen: `-> name[*]` (scatter) — emit slice-and-write from contiguous frame to each element
-- [ ] Integration tests: compile §11.6 example (`codegen_compile.rs`)
-- [ ] Runtime tests: multi-channel spawn end-to-end (`runtime_actors.rs`)
-
-### M6: v0.4.8 Close
-
-- [ ] All compiler tests pass (`cargo test`)
-- [ ] §11.6 example compiles and runs correctly
-- [ ] Spawn expansion + gather/scatter codegen verified on 24-channel example
+**Files to modify**: `spawn.rs`, `pipeline.rs`, `lir.rs`, `codegen.rs`, `codegen_compile.rs` (tests).
 
 ---
 
@@ -215,7 +209,7 @@
 
 ## Key References
 
-- **Pipeline**: `parse → resolve → build_hir → type_infer → lower → graph → ThirContext → analyze → schedule → LIR → codegen`
-- **ADRs**: 007 (shape), 009/010/014 (perf), 012 (KPI), 013 (PPKT), 016 (polymorphism), 020–023 (v0.4.0 arch), 028–030 (memory), 032–033 (PP manifest)
+- **Pipeline**: `parse → spawn_expand → resolve → build_hir → type_infer → lower → graph → ThirContext → analyze → schedule → LIR → codegen`
+- **ADRs**: 007 (shape), 009/010/014 (perf), 012 (KPI), 013 (PPKT), 016 (polymorphism), 020–023 (v0.4.0 arch), 028–030 (memory), 032–033 (PP manifest), 036 (ringbuf wait-loop)
 - **Spec is source of truth** over code; versioned specs frozen at tag points
 - **Measure before optimizing** — performance characterization informs priorities

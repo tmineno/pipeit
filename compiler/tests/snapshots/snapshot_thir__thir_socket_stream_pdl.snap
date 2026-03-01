@@ -8,6 +8,7 @@ ThirContext summary
     tick_rate_hz: 10000
     timer_spin: None
     overrun_policy: drop
+    wait_timeout_ms: 50
   param_cpp_types:
     amp -> float
     freq -> float

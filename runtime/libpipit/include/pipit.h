@@ -75,6 +75,10 @@ inline void set_actor_task_rate_hz(double task_rate_hz) {
 
 } // namespace detail
 
+// ── Wait result for blocking ring buffer operations ─────────────────────────
+
+enum class WaitResult { ready, timeout, stopped };
+
 template <typename T, std::size_t Capacity, std::size_t Readers = 1> class RingBuffer {
     static_assert(Capacity > 0, "RingBuffer capacity must be > 0");
     static_assert(Readers > 0, "RingBuffer must have at least one reader");
@@ -150,6 +154,97 @@ template <typename T, std::size_t Capacity, std::size_t Readers = 1> class RingB
         std::size_t t = tails_[reader_idx].value.load(std::memory_order_acquire);
         return h - t;
     }
+
+    /// Block until `count` tokens are readable, or until stopped/timed out.
+    /// Hybrid polling: spin ~100 → yield ~100 → sleep 1ms until deadline.
+    ///
+    /// Preconditions: reader_idx < Readers, count <= Capacity.
+    /// Postconditions: returns ready, timeout, or stopped.
+    /// Failure modes: timeout after deadline, stopped on stop signal.
+    /// Side effects: none (does not consume tokens).
+    WaitResult wait_readable(std::size_t reader_idx, std::size_t count,
+                             const std::atomic<bool> &stop, std::chrono::milliseconds timeout) {
+        using Clock = std::chrono::steady_clock;
+        auto deadline = Clock::now() + timeout;
+        // Phase 1: spin
+        for (int i = 0; i < 100; ++i) {
+            if (available(reader_idx) >= count)
+                return WaitResult::ready;
+            if (stop.load(std::memory_order_acquire))
+                return WaitResult::stopped;
+        }
+        // Phase 2: yield
+        for (int i = 0; i < 100; ++i) {
+            if (available(reader_idx) >= count)
+                return WaitResult::ready;
+            if (stop.load(std::memory_order_acquire))
+                return WaitResult::stopped;
+            if (Clock::now() >= deadline)
+                return WaitResult::timeout;
+            std::this_thread::yield();
+        }
+        // Phase 3: sleep
+        while (true) {
+            if (available(reader_idx) >= count)
+                return WaitResult::ready;
+            if (stop.load(std::memory_order_acquire))
+                return WaitResult::stopped;
+            if (Clock::now() >= deadline)
+                return WaitResult::timeout;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    /// Block until `count` tokens of write space are available, or until stopped/timed out.
+    /// Hybrid polling: spin ~100 → yield ~100 → sleep 1ms until deadline.
+    ///
+    /// Preconditions: count <= Capacity.
+    /// Postconditions: returns ready, timeout, or stopped.
+    /// Failure modes: timeout after deadline, stopped on stop signal.
+    /// Side effects: none (does not advance cursors).
+    WaitResult wait_writable(std::size_t count, const std::atomic<bool> &stop,
+                             std::chrono::milliseconds timeout) {
+        using Clock = std::chrono::steady_clock;
+        auto deadline = Clock::now() + timeout;
+        auto check_space = [&]() -> bool {
+            std::size_t h = head_.load(std::memory_order_relaxed);
+            std::size_t mt = tails_[0].value.load(std::memory_order_acquire);
+            for (std::size_t i = 1; i < Readers; ++i) {
+                std::size_t t = tails_[i].value.load(std::memory_order_acquire);
+                if (t < mt)
+                    mt = t;
+            }
+            std::size_t used = h - mt;
+            return used <= Capacity && Capacity - used >= count;
+        };
+        // Phase 1: spin
+        for (int i = 0; i < 100; ++i) {
+            if (check_space())
+                return WaitResult::ready;
+            if (stop.load(std::memory_order_acquire))
+                return WaitResult::stopped;
+        }
+        // Phase 2: yield
+        for (int i = 0; i < 100; ++i) {
+            if (check_space())
+                return WaitResult::ready;
+            if (stop.load(std::memory_order_acquire))
+                return WaitResult::stopped;
+            if (Clock::now() >= deadline)
+                return WaitResult::timeout;
+            std::this_thread::yield();
+        }
+        // Phase 3: sleep
+        while (true) {
+            if (check_space())
+                return WaitResult::ready;
+            if (stop.load(std::memory_order_acquire))
+                return WaitResult::stopped;
+            if (Clock::now() >= deadline)
+                return WaitResult::timeout;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
 };
 
 // ── SPSC partial specialization (ADR-029) ───────────────────────────────────
@@ -220,6 +315,81 @@ template <typename T, std::size_t Capacity> class RingBuffer<T, Capacity, 1> {
         std::size_t h = head_.load(std::memory_order_acquire);
         std::size_t t = tail_.value.load(std::memory_order_acquire);
         return h - t;
+    }
+
+    /// Hybrid polling: spin ~100 → yield ~100 → sleep 1ms until deadline.
+    WaitResult wait_readable(std::size_t reader_idx, std::size_t count,
+                             const std::atomic<bool> &stop, std::chrono::milliseconds timeout) {
+        (void)reader_idx;
+        using Clock = std::chrono::steady_clock;
+        auto deadline = Clock::now() + timeout;
+        // Phase 1: spin
+        for (int i = 0; i < 100; ++i) {
+            if (available() >= count)
+                return WaitResult::ready;
+            if (stop.load(std::memory_order_acquire))
+                return WaitResult::stopped;
+        }
+        // Phase 2: yield
+        for (int i = 0; i < 100; ++i) {
+            if (available() >= count)
+                return WaitResult::ready;
+            if (stop.load(std::memory_order_acquire))
+                return WaitResult::stopped;
+            if (Clock::now() >= deadline)
+                return WaitResult::timeout;
+            std::this_thread::yield();
+        }
+        // Phase 3: sleep
+        while (true) {
+            if (available() >= count)
+                return WaitResult::ready;
+            if (stop.load(std::memory_order_acquire))
+                return WaitResult::stopped;
+            if (Clock::now() >= deadline)
+                return WaitResult::timeout;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    /// Hybrid polling: spin ~100 → yield ~100 → sleep 1ms until deadline.
+    WaitResult wait_writable(std::size_t count, const std::atomic<bool> &stop,
+                             std::chrono::milliseconds timeout) {
+        using Clock = std::chrono::steady_clock;
+        auto deadline = Clock::now() + timeout;
+        auto check_space = [&]() -> bool {
+            std::size_t h = head_.load(std::memory_order_relaxed);
+            std::size_t t = tail_.value.load(std::memory_order_acquire);
+            std::size_t used = h - t;
+            return used <= Capacity && Capacity - used >= count;
+        };
+        // Phase 1: spin
+        for (int i = 0; i < 100; ++i) {
+            if (check_space())
+                return WaitResult::ready;
+            if (stop.load(std::memory_order_acquire))
+                return WaitResult::stopped;
+        }
+        // Phase 2: yield
+        for (int i = 0; i < 100; ++i) {
+            if (check_space())
+                return WaitResult::ready;
+            if (stop.load(std::memory_order_acquire))
+                return WaitResult::stopped;
+            if (Clock::now() >= deadline)
+                return WaitResult::timeout;
+            std::this_thread::yield();
+        }
+        // Phase 3: sleep
+        while (true) {
+            if (check_space())
+                return WaitResult::ready;
+            if (stop.load(std::memory_order_acquire))
+                return WaitResult::stopped;
+            if (Clock::now() >= deadline)
+                return WaitResult::timeout;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
     }
 };
 

@@ -6,7 +6,7 @@ LirProgram (2 consts, 1 params, 0 binds, 6 inter-task bufs, 3 tasks, 4 probes)
   const lp_coeff: float[5] = [0.1f, 0.2f, 0.4f, 0.2f, 0.1f]
   const bp_coeff: float[5] = [0.05f, -0.1f, 0.3f, -0.1f, 0.05f]
   param agc_gain: float = "1" (cli: std::stof)
-  directives: mem=134217728, overrun=drop, timer=Fixed(10000)
+  directives: mem=134217728, overrun=drop, timer=Fixed(10000), wait_timeout=50ms
   inter-task ctl: int32_t[256] readers=1 [] skip_writes [shared]
   inter-task data_buf: float[256] readers=1 [] skip_writes [shared]
   inter-task filtered: float[512] readers=1 [analysis] [shared]

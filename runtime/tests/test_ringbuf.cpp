@@ -214,6 +214,141 @@ TEST(generic_multi_reader_still_works) {
     ASSERT_TRUE(out1 == 7.0f);
 }
 
+// ── Wait tests: verify hybrid polling behavior ──
+
+TEST(wait_readable_data_available) {
+    pipit::RingBuffer<float, 64, 1> rb;
+    float val = 1.0f;
+    ASSERT_TRUE(rb.write(&val, 1));
+    std::atomic<bool> stop{false};
+    auto result = rb.wait_readable(0, 1, stop, std::chrono::milliseconds(50));
+    ASSERT_TRUE(result == pipit::WaitResult::ready);
+}
+
+TEST(wait_writable_space_available) {
+    pipit::RingBuffer<float, 64, 1> rb;
+    std::atomic<bool> stop{false};
+    auto result = rb.wait_writable(1, stop, std::chrono::milliseconds(50));
+    ASSERT_TRUE(result == pipit::WaitResult::ready);
+}
+
+TEST(wait_readable_generic_data_available) {
+    pipit::RingBuffer<float, 64, 2> rb;
+    float val = 1.0f;
+    ASSERT_TRUE(rb.write(&val, 1));
+    std::atomic<bool> stop{false};
+    auto result = rb.wait_readable(0, 1, stop, std::chrono::milliseconds(50));
+    ASSERT_TRUE(result == pipit::WaitResult::ready);
+}
+
+// ── Wait behavior tests: stop, timeout, concurrent ──
+
+TEST(wait_readable_stop_returns_stopped) {
+    pipit::RingBuffer<float, 64, 1> rb;
+    std::atomic<bool> stop{true}; // already stopped
+    auto result = rb.wait_readable(0, 1, stop, std::chrono::milliseconds(1000));
+    ASSERT_TRUE(result == pipit::WaitResult::stopped);
+}
+
+TEST(wait_readable_timeout_on_empty) {
+    pipit::RingBuffer<float, 64, 1> rb;
+    std::atomic<bool> stop{false};
+    auto t0 = std::chrono::steady_clock::now();
+    auto result = rb.wait_readable(0, 1, stop, std::chrono::milliseconds(10));
+    auto elapsed = std::chrono::steady_clock::now() - t0;
+    ASSERT_TRUE(result == pipit::WaitResult::timeout);
+    // Should have waited at least 5ms (allowing for scheduling variance)
+    ASSERT_TRUE(elapsed >= std::chrono::milliseconds(5));
+}
+
+TEST(wait_writable_timeout_on_full) {
+    pipit::RingBuffer<float, 4, 1> rb;
+    float src[4] = {1, 2, 3, 4};
+    ASSERT_TRUE(rb.write(src, 4));
+    std::atomic<bool> stop{false};
+    auto result = rb.wait_writable(1, stop, std::chrono::milliseconds(10));
+    ASSERT_TRUE(result == pipit::WaitResult::timeout);
+}
+
+TEST(wait_writable_stop_returns_stopped) {
+    pipit::RingBuffer<float, 4, 1> rb;
+    float src[4] = {1, 2, 3, 4};
+    ASSERT_TRUE(rb.write(src, 4));
+    std::atomic<bool> stop{true};
+    auto result = rb.wait_writable(1, stop, std::chrono::milliseconds(1000));
+    ASSERT_TRUE(result == pipit::WaitResult::stopped);
+}
+
+TEST(wait_readable_unblocked_by_writer) {
+    pipit::RingBuffer<int, 64, 1> rb;
+    std::atomic<bool> stop{false};
+    std::atomic<bool> done{false};
+    std::atomic<int> wait_result{-1};
+
+    // Reader thread: blocks waiting for data
+    std::thread reader([&]() {
+        auto result = rb.wait_readable(0, 1, stop, std::chrono::milliseconds(500));
+        wait_result.store(static_cast<int>(result), std::memory_order_release);
+        done.store(true, std::memory_order_release);
+    });
+
+    // Give reader time to enter wait
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+    // Writer: provide data to unblock reader
+    int val = 42;
+    ASSERT_TRUE(rb.write(&val, 1));
+
+    reader.join();
+    ASSERT_TRUE(done.load());
+    ASSERT_TRUE(wait_result.load() == static_cast<int>(pipit::WaitResult::ready));
+}
+
+TEST(wait_readable_unblocked_by_stop) {
+    pipit::RingBuffer<int, 64, 1> rb;
+    std::atomic<bool> stop{false};
+    std::atomic<int> wait_result{-1};
+
+    // Reader thread: blocks waiting for data that never comes
+    std::thread reader([&]() {
+        auto result = rb.wait_readable(0, 1, stop, std::chrono::milliseconds(500));
+        wait_result.store(static_cast<int>(result), std::memory_order_release);
+    });
+
+    // Give reader time to enter wait
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+    // Signal stop
+    stop.store(true, std::memory_order_release);
+
+    reader.join();
+    ASSERT_TRUE(wait_result.load() == static_cast<int>(pipit::WaitResult::stopped));
+}
+
+TEST(wait_writable_unblocked_by_reader) {
+    pipit::RingBuffer<int, 4, 1> rb;
+    int src[4] = {1, 2, 3, 4};
+    ASSERT_TRUE(rb.write(src, 4));
+    std::atomic<bool> stop{false};
+    std::atomic<int> wait_result{-1};
+
+    // Writer thread: blocks waiting for space
+    std::thread writer([&]() {
+        auto result = rb.wait_writable(1, stop, std::chrono::milliseconds(500));
+        wait_result.store(static_cast<int>(result), std::memory_order_release);
+    });
+
+    // Give writer time to enter wait
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+    // Reader: free space to unblock writer
+    int dst[2];
+    ASSERT_TRUE(rb.read(dst, 2));
+
+    writer.join();
+    ASSERT_TRUE(wait_result.load() == static_cast<int>(pipit::WaitResult::ready));
+}
+
 int main() {
     printf("All RingBuffer tests passed.\n");
     return 0;

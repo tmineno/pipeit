@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Arg, BindEndpoint, Scalar, SetValue, ShapeConstraint, Span, Value};
+use crate::ast::{Arg, BindEndpoint, BufferIndex, Scalar, SetValue, ShapeConstraint, Span, Value};
 use crate::id::{CallId, DefId, TaskId};
 
 // ── Program ─────────────────────────────────────────────────────────────────
@@ -92,7 +92,14 @@ pub struct HirPipeExpr {
 #[derive(Debug, Clone)]
 pub enum HirPipeSource {
     ActorCall(HirActorCall),
+    /// Plain or element buffer read: resolved name is `"name"` or `"name__i"`.
     BufferRead(String, Span),
+    /// Gather read: `@name[*]` — reads all elements of a shared array family.
+    GatherRead {
+        family_name: String,
+        family_size: u32,
+        span: Span,
+    },
     TapRef(String, Span),
 }
 
@@ -103,10 +110,12 @@ pub enum HirPipeElem {
     Probe(String, Span),
 }
 
-/// A pipe sink (`-> buffer_name`).
+/// A pipe sink (`-> buffer_name` or `-> name[*]`).
 #[derive(Debug, Clone)]
 pub struct HirSink {
     pub buffer_name: String,
+    /// If this is a scatter write (`-> name[*]`), stores the family size.
+    pub scatter: Option<u32>,
     pub span: Span,
 }
 
@@ -253,6 +262,9 @@ fn fmt_pipe_source(f: &mut fmt::Formatter<'_>, source: &HirPipeSource) -> fmt::R
     match source {
         HirPipeSource::ActorCall(call) => fmt_actor_call(f, call),
         HirPipeSource::BufferRead(name, _) => write!(f, "buffer_read({})", name),
+        HirPipeSource::GatherRead { family_name, .. } => {
+            write!(f, "gather_read({}[*])", family_name)
+        }
         HirPipeSource::TapRef(name, _) => write!(f, "^{}", name),
     }
 }
@@ -481,6 +493,7 @@ pub fn build_hir(
         id_alloc,
         expanded_call_ids: HashMap::new(),
         expanded_call_spans: HashMap::new(),
+        used_call_ids: HashSet::new(),
     };
     builder.build()
 }
@@ -491,6 +504,8 @@ struct HirBuilder<'a> {
     id_alloc: &'a mut IdAllocator,
     expanded_call_ids: HashMap<Span, CallId>,
     expanded_call_spans: HashMap<CallId, Span>,
+    /// Track used CallIds to prevent aliasing when spawned tasks share spans.
+    used_call_ids: HashSet<CallId>,
 }
 
 impl<'a> HirBuilder<'a> {
@@ -531,9 +546,10 @@ impl<'a> HirBuilder<'a> {
                         span: stmt.span,
                     });
                 }
-                StatementKind::Define(_) | StatementKind::Bind(_) => {
+                StatementKind::Define(_) | StatementKind::Bind(_) | StatementKind::Shared(_) => {
                     // Defines: consumed during expansion, not emitted to HIR.
                     // Binds: collected separately below from resolved.binds.
+                    // Shared: consumed during resolve, not emitted to HIR.
                 }
             }
         }
@@ -674,9 +690,38 @@ impl<'a> HirBuilder<'a> {
             }
         }
 
-        let sink = expr.sink.as_ref().map(|s| HirSink {
-            buffer_name: s.buffer.name.clone(),
-            span: s.span,
+        let sink = expr.sink.as_ref().map(|s| {
+            let family_name = &s.buffer.name.name;
+            match &s.buffer.index {
+                BufferIndex::None => HirSink {
+                    buffer_name: family_name.clone(),
+                    scatter: None,
+                    span: s.span,
+                },
+                BufferIndex::Literal(i, _) => HirSink {
+                    buffer_name: format!("{}__{}", family_name, i),
+                    scatter: None,
+                    span: s.span,
+                },
+                BufferIndex::Ident(ident) => HirSink {
+                    buffer_name: format!("{}__{}", family_name, ident.name),
+                    scatter: None,
+                    span: s.span,
+                },
+                BufferIndex::Star(_) => {
+                    let family_size = self
+                        .resolved
+                        .shared_arrays
+                        .get(family_name)
+                        .map(|sa| sa.size)
+                        .unwrap_or(0);
+                    HirSink {
+                        buffer_name: family_name.clone(),
+                        scatter: Some(family_size),
+                        span: s.span,
+                    }
+                }
+            }
         });
 
         // Handle source expansion
@@ -712,8 +757,41 @@ impl<'a> HirBuilder<'a> {
                 }
                 ExpandedCall::InlinedDefine(pipes) => ExpandedSource::InlinedDefine(pipes),
             },
-            PipeSource::BufferRead(ident) => {
-                ExpandedSource::Single(HirPipeSource::BufferRead(ident.name.clone(), ident.span))
+            PipeSource::BufferRead(ref buffer_ref) => {
+                let family_name = &buffer_ref.name.name;
+                let span = buffer_ref.name.span;
+                match &buffer_ref.index {
+                    BufferIndex::None => {
+                        ExpandedSource::Single(HirPipeSource::BufferRead(family_name.clone(), span))
+                    }
+                    BufferIndex::Literal(i, _) => ExpandedSource::Single(
+                        HirPipeSource::BufferRead(format!("{}__{}", family_name, i), span),
+                    ),
+                    BufferIndex::Ident(ident) => {
+                        // Const index — resolve via shared_arrays + const values.
+                        // After spawn expansion, this is a const-based index.
+                        // The resolve phase already validated this, so we trust the name.
+                        ExpandedSource::Single(HirPipeSource::BufferRead(
+                            format!("{}__{}", family_name, ident.name),
+                            span,
+                        ))
+                    }
+                    BufferIndex::Star(_) => {
+                        if let Some(sa) = self.resolved.shared_arrays.get(family_name) {
+                            ExpandedSource::Single(HirPipeSource::GatherRead {
+                                family_name: family_name.clone(),
+                                family_size: sa.size,
+                                span,
+                            })
+                        } else {
+                            // Resolve should have caught this — fallback to plain
+                            ExpandedSource::Single(HirPipeSource::BufferRead(
+                                family_name.clone(),
+                                span,
+                            ))
+                        }
+                    }
+                }
             }
             PipeSource::TapRef(ident) => {
                 ExpandedSource::Single(HirPipeSource::TapRef(ident.name.clone(), ident.span))
@@ -743,13 +821,26 @@ impl<'a> HirBuilder<'a> {
             let id = self.id_alloc.alloc_call();
             self.expanded_call_ids.insert(call.span, id);
             self.expanded_call_spans.insert(id, call.span);
+            self.used_call_ids.insert(id);
             id
         } else if let Some(&id) = self.resolved.call_ids.get(&call.span) {
-            id
+            if self.used_call_ids.contains(&id) {
+                // Spawn-expanded tasks share source spans — allocate fresh CallId
+                // to avoid aliasing (H2 violation).
+                let fresh = self.id_alloc.alloc_call();
+                self.expanded_call_ids.insert(call.span, fresh);
+                self.expanded_call_spans.insert(fresh, call.span);
+                self.used_call_ids.insert(fresh);
+                fresh
+            } else {
+                self.used_call_ids.insert(id);
+                id
+            }
         } else {
             let id = self.id_alloc.alloc_call();
             self.expanded_call_ids.insert(call.span, id);
             self.expanded_call_spans.insert(id, call.span);
+            self.used_call_ids.insert(id);
             id
         };
 

@@ -400,6 +400,7 @@ set overrun = drop
 | `overrun` | IDENT | `drop` | オーバーラン時のポリシー（§5.4.3 参照） |
 | `tick_rate` | FREQ | `10kHz` | OSタイマーのウェイク周波数。K = ceil(タスク周波数 / tick_rate)。高周波タスクのバッチ処理に使用 |
 | `timer_spin` | NUMBER or `auto` | `10000` | デッドライン前のスピンウェイト時間（ナノ秒）。`auto` でEWMAベースの適応的スピン調整を有効化。CPU使用量と引き換えにタイマー精度を向上 |
+| `wait_timeout` | NUMBER | `50` | タスク間リングバッファの待機タイムアウト（ミリ秒）。1–60000。タイムアウト時はランタイムエラー |
 
 現行実装のスケジュール生成アルゴリズムは固定であり、タスク内では PASS（Periodic Asynchronous Static Schedule）を用いる。`set` によるスケジューリングアルゴリズム選択は v0.2 ではサポートしない。
 
@@ -653,7 +654,7 @@ clock 48kHz capture[ch=0..CH] {
 - `clock ... capture[ch=0..CH]` は `capture[0]` 〜 `capture[CH-1]` の `CH` 個へ静的展開される
 - 展開後の各タスクは通常の `clock` タスクと同一セマンティクスで実行され、相互に並列である
 - `idx` はコンパイル時インデックス変数であり、spawn 本体内で actor 引数と buffer 添字に使用できる
-- `begin` / `end` は正のコンパイル時整数でなければならない。`begin < end` を満たさない場合はコンパイルエラー
+- `begin` / `end` は非負のコンパイル時整数でなければならない（`begin = 0` は有効）。`begin < end` を満たさない場合はコンパイルエラー
 - spawn 展開は name resolve / 型推論 / SDF 解析の前に実行される
 
 ### 5.5 パイプ演算子

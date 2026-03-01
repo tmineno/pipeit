@@ -19,6 +19,7 @@ pub mod pipeline;
 pub mod registry;
 pub mod resolve;
 pub mod schedule;
+pub mod spawn;
 pub mod subgraph_index;
 pub mod thir;
 pub mod timing;

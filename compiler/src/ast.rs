@@ -37,8 +37,9 @@ pub enum StatementKind {
     Const(ConstStmt),
     Param(ParamStmt),
     Define(DefineStmt),
-    Task(TaskStmt),
+    Task(Box<TaskStmt>),
     Bind(BindStmt),
+    Shared(SharedDecl),
 }
 
 // ── set_stmt: 'set' IDENT '=' set_value ──
@@ -134,6 +135,8 @@ pub struct TaskStmt {
     pub freq: f64,
     pub freq_span: Span,
     pub name: Ident,
+    /// Optional spawn clause: `clock freq name[idx=begin..end] { ... }` (v0.4.8).
+    pub spawn: Option<SpawnClause>,
     pub body: TaskBody,
 }
 
@@ -203,8 +206,8 @@ pub struct PipeExpr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PipeSource {
-    /// `@name` — shared buffer read
-    BufferRead(Ident),
+    /// `@name` or `@name[idx]` or `@name[*]` — shared buffer read
+    BufferRead(BufferRef),
     /// `:name` — tap reference (consume side)
     TapRef(Ident),
     /// `name(args)` — actor call
@@ -221,10 +224,10 @@ pub enum PipeElem {
     Probe(Ident),
 }
 
-/// `-> name` — shared buffer write (sink)
+/// `-> name` or `-> name[idx]` or `-> name[*]` — shared buffer write (sink)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sink {
-    pub buffer: Ident,
+    pub buffer: BufferRef,
     pub span: Span,
 }
 
@@ -290,6 +293,58 @@ pub enum Scalar {
     StringLit(String, Span),
     /// Bare identifier in value position — const reference (resolved later).
     Ident(Ident),
+}
+
+// ── Buffer reference (v0.4.8) ──
+
+/// Index into a shared buffer array.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BufferIndex {
+    /// Plain buffer reference: `name` (no subscript).
+    None,
+    /// Integer literal: `name[0]`.
+    Literal(u32, Span),
+    /// Const or spawn index variable: `name[ch]`.
+    Ident(Ident),
+    /// All-element reference: `name[*]`.
+    Star(Span),
+}
+
+/// A buffer reference with optional subscript.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BufferRef {
+    pub name: Ident,
+    pub index: BufferIndex,
+}
+
+// ── Shared buffer array (v0.4.8) ──
+
+/// `shared name[N]` — declares a family of N shared buffers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SharedDecl {
+    pub name: Ident,
+    pub size: ShapeDim,
+    pub span: Span,
+}
+
+// ── Spawn clause (v0.4.8) ──
+
+/// Spawn range bound — non-negative integer (unlike ShapeDim which requires > 0).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SpawnBound {
+    /// Integer literal bound: `0`, `24`.
+    Literal(u32, Span),
+    /// Const reference bound: `CH`.
+    ConstRef(Ident),
+}
+
+/// Spawn clause on a task: `clock freq name[idx=begin..end] { ... }`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpawnClause {
+    pub index_var: Ident,
+    pub begin: SpawnBound,
+    pub end: SpawnBound,
+    pub span: Span,
 }
 
 // ── Identifier ──

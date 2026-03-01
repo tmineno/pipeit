@@ -5,7 +5,7 @@ expression: output
 LirProgram (0 consts, 2 params, 0 binds, 0 inter-task bufs, 2 tasks, 0 probes)
   param freq: float = "100000" (cli: std::stof)
   param amp: float = "0.8f" (cli: std::stof)
-  directives: mem=67108864, overrun=drop, timer=Fixed(10000)
+  directives: mem=67108864, overrun=drop, timer=Fixed(10000), wait_timeout=50ms
   task 'receiver' @ 1000Hz K=1
     edge_buffers: _e2_3: float[1] [local]
     firings:
