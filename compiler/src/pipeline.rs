@@ -268,6 +268,19 @@ pub fn run_pipeline(
 ) -> Result<(), PipelineError> {
     let passes = required_passes(terminal);
 
+    // Spawn expansion: AST → AST pre-pass (before name resolution).
+    let spawn_result = crate::spawn::expand_spawns(&state.upstream.program);
+    state.upstream.program = spawn_result.program;
+    for d in &spawn_result.diagnostics {
+        if d.level == DiagLevel::Error {
+            state.has_error = true;
+        }
+    }
+    state.diagnostics.extend(spawn_result.diagnostics);
+    if state.has_error {
+        return Ok(());
+    }
+
     for &pass_id in &passes {
         // ThirContext-dependent passes run in a scoped block
         if matches!(
