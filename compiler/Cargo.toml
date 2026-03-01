@@ -1,6 +1,6 @@
 [package]
 name = "pcc"
-version = "0.4.0"
+version = "0.4.5"
 edition = "2021"
 description = "Pipit Compiler Collection — compiles .pdl pipeline definitions to native executables"
 
