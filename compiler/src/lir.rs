@@ -67,6 +67,7 @@ pub struct LirDirectives {
     pub mem_bytes: u64,
     pub overrun_policy: String,
     pub timer_spin: LirTimerSpin,
+    pub wait_timeout_ms: u64,
 }
 
 /// Timer spin mode — resolved from `set timer_spin` directive.
@@ -610,8 +611,11 @@ impl std::fmt::Display for LirProgram {
         };
         writeln!(
             f,
-            "  directives: mem={}, overrun={}, timer={}",
-            self.directives.mem_bytes, self.directives.overrun_policy, timer
+            "  directives: mem={}, overrun={}, timer={}, wait_timeout={}ms",
+            self.directives.mem_bytes,
+            self.directives.overrun_policy,
+            timer,
+            self.directives.wait_timeout_ms
         )?;
 
         // Binds
@@ -995,6 +999,7 @@ impl<'a> LirBuilder<'a> {
             mem_bytes: self.thir.mem_bytes,
             overrun_policy: self.thir.overrun_policy.clone(),
             timer_spin,
+            wait_timeout_ms: self.thir.wait_timeout_ms,
         }
     }
 

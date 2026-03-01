@@ -6,7 +6,7 @@ LirProgram (2 consts, 1 params, 0 binds, 1 inter-task bufs, 2 tasks, 1 probes)
   const coeff: float[5] = [0.1f, 0.2f, 0.4f, 0.2f, 0.1f]
   const fft_size = 256
   param gain: float = "1" (cli: std::stof)
-  directives: mem=67108864, overrun=drop, timer=Fixed(10000)
+  directives: mem=67108864, overrun=drop, timer=Fixed(10000), wait_timeout=50ms
   inter-task signal: float[512] readers=1 [drain] [shared]
   task 'capture' @ 10000000Hz K=500
     edge_buffers: _e0_1: float[1280] [local], _e1_2: float[1280] [local], _e2_3: cfloat[1280] [local], _e4_5: float[1280] [local], _e5_6: float[256] [local], _e8_9: float[1280] [local]

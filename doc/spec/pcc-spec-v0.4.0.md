@@ -54,7 +54,7 @@ Compatibility gate scope includes:
 ### 3.1 Implementation
 
 `pcc` is implemented in Rust (see [ADR-001](../adr/001-rust-for-pcc.md)).
-Generated C++ targets C++17 and links `libpipit`.
+Generated C++ targets C++20 and links `libpipit`.
 
 There is no Rust/C++ FFI boundary inside compiler phases. `pcc`:
 
@@ -806,7 +806,7 @@ Dependencies:
 
 - `libpipit`
 - actor headers (`-I` / `--actor-path`)
-- C++17 toolchain
+- C++20 toolchain
 
 ---
 

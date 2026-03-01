@@ -1765,38 +1765,40 @@ impl<'a> CodegenCtx<'a> {
     /// Emit shared buffer read from LIR data.
     fn emit_lir_buffer_read(&mut self, task_name: &str, io: &LirBufferIo, indent: &str) {
         let reader_idx = io.reader_idx.unwrap_or(0);
+        let timeout_ms = self.lir.directives.wait_timeout_ms;
         if io.reader_count == 1 {
             let _ = writeln!(self.out, "{}// SPSC: single-reader fast path", indent);
         }
-        let _ = writeln!(
-            self.out,
-            "{}int _rb_retry_{}_{} = 0;",
-            indent, io.src_node_id.0, io.peer_node_id.0
-        );
         let _ = writeln!(self.out, "{}while (true) {{", indent);
         let _ = writeln!(
             self.out,
-            "{}    if (!_ringbuf_{}.read({}, {}, {})) {{",
+            "{}    if (_ringbuf_{}.read({}, {}, {})) break;",
             indent, io.buffer_name, reader_idx, io.edge_var, io.total_tokens
         );
         let _ = writeln!(
             self.out,
-            "{}        if (_stop.load(std::memory_order_acquire)) {{",
+            "{}    if (_stop.load(std::memory_order_acquire)) return;",
             indent
         );
-        let _ = writeln!(self.out, "{}            return;", indent);
-        let _ = writeln!(self.out, "{}        }}", indent);
+        let wr_var = format!("_wr_{}_{}", io.src_node_id.0, io.peer_node_id.0);
         let _ = writeln!(
             self.out,
-            "{}        if (++_rb_retry_{}_{} < 1000000) {{",
-            indent, io.src_node_id.0, io.peer_node_id.0
+            "{}    auto {} = _ringbuf_{}.wait_readable({}, {}, _stop, std::chrono::milliseconds({}));",
+            indent, wr_var, io.buffer_name, reader_idx, io.total_tokens, timeout_ms
         );
-        let _ = writeln!(self.out, "{}            std::this_thread::yield();", indent);
-        let _ = writeln!(self.out, "{}            continue;", indent);
-        let _ = writeln!(self.out, "{}        }}", indent);
         let _ = writeln!(
             self.out,
-            "{}        std::fprintf(stderr, \"runtime error: task '{}' failed to read {} token(s) from shared buffer '{}'\\n\");",
+            "{}    if ({} == pipit::WaitResult::stopped) return;",
+            indent, wr_var
+        );
+        let _ = writeln!(
+            self.out,
+            "{}    if ({} == pipit::WaitResult::timeout) {{",
+            indent, wr_var
+        );
+        let _ = writeln!(
+            self.out,
+            "{}        std::fprintf(stderr, \"runtime error: task '{}' timeout waiting for {} token(s) from shared buffer '{}'\\n\");",
             indent, task_name, io.total_tokens, io.buffer_name
         );
         let _ = writeln!(
@@ -1811,44 +1813,45 @@ impl<'a> CodegenCtx<'a> {
         );
         let _ = writeln!(self.out, "{}        return;", indent);
         let _ = writeln!(self.out, "{}    }}", indent);
-        let _ = writeln!(self.out, "{}    break;", indent);
         let _ = writeln!(self.out, "{}}}", indent);
     }
 
     /// Emit shared buffer write from LIR data.
     fn emit_lir_buffer_write(&mut self, task_name: &str, io: &LirBufferIo, indent: &str) {
+        let timeout_ms = self.lir.directives.wait_timeout_ms;
         if io.reader_count == 1 {
             let _ = writeln!(self.out, "{}// SPSC: single-reader fast path", indent);
         }
-        let _ = writeln!(
-            self.out,
-            "{}int _rb_retry_{}_{} = 0;",
-            indent, io.src_node_id.0, io.peer_node_id.0
-        );
         let _ = writeln!(self.out, "{}while (true) {{", indent);
         let _ = writeln!(
             self.out,
-            "{}    if (!_ringbuf_{}.write({}, {})) {{",
+            "{}    if (_ringbuf_{}.write({}, {})) break;",
             indent, io.buffer_name, io.edge_var, io.total_tokens
         );
         let _ = writeln!(
             self.out,
-            "{}        if (_stop.load(std::memory_order_acquire)) {{",
+            "{}    if (_stop.load(std::memory_order_acquire)) return;",
             indent
         );
-        let _ = writeln!(self.out, "{}            return;", indent);
-        let _ = writeln!(self.out, "{}        }}", indent);
+        let wr_var = format!("_ww_{}_{}", io.src_node_id.0, io.peer_node_id.0);
         let _ = writeln!(
             self.out,
-            "{}        if (++_rb_retry_{}_{} < 1000000) {{",
-            indent, io.src_node_id.0, io.peer_node_id.0
+            "{}    auto {} = _ringbuf_{}.wait_writable({}, _stop, std::chrono::milliseconds({}));",
+            indent, wr_var, io.buffer_name, io.total_tokens, timeout_ms
         );
-        let _ = writeln!(self.out, "{}            std::this_thread::yield();", indent);
-        let _ = writeln!(self.out, "{}            continue;", indent);
-        let _ = writeln!(self.out, "{}        }}", indent);
         let _ = writeln!(
             self.out,
-            "{}        std::fprintf(stderr, \"runtime error: task '{}' failed to write {} token(s) to shared buffer '{}'\\n\");",
+            "{}    if ({} == pipit::WaitResult::stopped) return;",
+            indent, wr_var
+        );
+        let _ = writeln!(
+            self.out,
+            "{}    if ({} == pipit::WaitResult::timeout) {{",
+            indent, wr_var
+        );
+        let _ = writeln!(
+            self.out,
+            "{}        std::fprintf(stderr, \"runtime error: task '{}' timeout waiting to write {} token(s) to shared buffer '{}'\\n\");",
             indent, task_name, io.total_tokens, io.buffer_name
         );
         let _ = writeln!(
@@ -1863,7 +1866,6 @@ impl<'a> CodegenCtx<'a> {
         );
         let _ = writeln!(self.out, "{}        return;", indent);
         let _ = writeln!(self.out, "{}    }}", indent);
-        let _ = writeln!(self.out, "{}    break;", indent);
         let _ = writeln!(self.out, "{}}}", indent);
     }
 

@@ -1224,13 +1224,28 @@ fn shared_buffer_io_checks_status_and_stops_on_failure() {
     );
 
     assert!(
-        cpp.contains("if (!_ringbuf_sig.write("),
-        "write should check ring-buffer status, got:\n{}",
+        cpp.contains("_ringbuf_sig.write("),
+        "write should use ring-buffer, got:\n{}",
         cpp
     );
     assert!(
-        cpp.contains("if (!_ringbuf_sig.read("),
-        "read should check ring-buffer status, got:\n{}",
+        cpp.contains("_ringbuf_sig.read("),
+        "read should use ring-buffer, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("wait_readable("),
+        "read loop should call wait_readable, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("wait_writable("),
+        "write loop should call wait_writable, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("WaitResult::timeout"),
+        "timeout branch should set stop flag, got:\n{}",
         cpp
     );
     assert!(
@@ -2062,5 +2077,73 @@ clock 48kHz audio {
         "bind_shm_header",
         &runtime_include,
         &project_root().join("examples"),
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Wait timeout codegen
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn wait_timeout_default() {
+    let cpp = generate_inline_cpp(
+        concat!(
+            "clock 1kHz w { constant(0.0) -> sig }\n",
+            "clock 1kHz r { @sig | stdout() }\n",
+        ),
+        "wait_timeout_default",
+    );
+    assert!(
+        cpp.contains("std::chrono::milliseconds(50)"),
+        "default wait_timeout should be 50ms, got:\n{}",
+        cpp
+    );
+}
+
+#[test]
+fn wait_timeout_explicit() {
+    let cpp = generate_inline_cpp(
+        concat!(
+            "set wait_timeout = 200\n",
+            "clock 1kHz w { constant(0.0) -> sig }\n",
+            "clock 1kHz r { @sig | stdout() }\n",
+        ),
+        "wait_timeout_explicit",
+    );
+    assert!(
+        cpp.contains("std::chrono::milliseconds(200)"),
+        "explicit wait_timeout=200 should appear in generated code, got:\n{}",
+        cpp
+    );
+}
+
+#[test]
+fn wait_loop_shape() {
+    let cpp = generate_inline_cpp(
+        concat!(
+            "clock 1kHz w { constant(0.0) -> sig }\n",
+            "clock 1kHz r { @sig | stdout() }\n",
+        ),
+        "wait_loop_shape",
+    );
+    assert!(
+        cpp.contains("wait_readable("),
+        "read loop should use wait_readable, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("wait_writable("),
+        "write loop should use wait_writable, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("pipit::WaitResult::timeout"),
+        "loop should handle timeout result, got:\n{}",
+        cpp
+    );
+    assert!(
+        cpp.contains("pipit::WaitResult::stopped"),
+        "loop should handle stopped result, got:\n{}",
+        cpp
     );
 }

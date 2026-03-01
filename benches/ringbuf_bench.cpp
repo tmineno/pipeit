@@ -245,4 +245,96 @@ static void BM_RingBuffer_ChunkScaling(benchmark::State &state) {
 }
 BENCHMARK(BM_RingBuffer_ChunkScaling)->Arg(16)->Arg(64)->Arg(256);
 
+// ── Wait-enabled throughput ─────────────────────────────────────────────────
+//
+// SPSC sustained throughput using wait_readable/wait_writable instead of
+// raw retry-yield loops. Measures overhead of hybrid polling under load.
+
+static void BM_RingBuffer_WaitThroughput(benchmark::State &state) {
+    static constexpr std::size_t CAP = 4096;
+    static constexpr std::size_t CHUNK = 64;
+    static constexpr uint64_t TARGET = 1'000'000;
+
+    for (auto _ : state) {
+        RingBuffer<float, CAP, 1> rb;
+        std::atomic<bool> stop{false};
+
+        float write_data[CHUNK];
+        for (std::size_t i = 0; i < CHUNK; ++i)
+            write_data[i] = static_cast<float>(i);
+
+        // Reader thread using wait_readable
+        std::thread reader([&] {
+            maybe_pin_current_thread(1);
+            float buf[CHUNK];
+            uint64_t read_total = 0;
+            while (read_total < TARGET) {
+                auto wr = rb.wait_readable(0, CHUNK, stop, std::chrono::milliseconds(1000));
+                if (wr == WaitResult::stopped || wr == WaitResult::timeout)
+                    break;
+                if (rb.read(0, buf, CHUNK)) {
+                    read_total += CHUNK;
+                }
+            }
+        });
+
+        maybe_pin_current_thread(0);
+
+        // Writer using wait_writable
+        uint64_t written = 0;
+        while (written < TARGET) {
+            auto wr = rb.wait_writable(CHUNK, stop, std::chrono::milliseconds(1000));
+            if (wr == WaitResult::stopped || wr == WaitResult::timeout)
+                break;
+            if (rb.write(write_data, CHUNK)) {
+                written += CHUNK;
+            }
+        }
+
+        stop.store(true, std::memory_order_release);
+        reader.join();
+
+        state.SetItemsProcessed(written);
+        state.SetBytesProcessed(written * sizeof(float));
+    }
+}
+BENCHMARK(BM_RingBuffer_WaitThroughput)->Unit(benchmark::kMillisecond);
+
+// ── Wait wakeup latency ─────────────────────────────────────────────────────
+//
+// Measures time from writer publish to reader wakeup via wait_readable.
+// Writer delays briefly, then writes; reader measures wakeup latency.
+
+static void BM_RingBuffer_WaitLatency(benchmark::State &state) {
+    static constexpr std::size_t CAP = 64;
+
+    for (auto _ : state) {
+        RingBuffer<float, CAP, 1> rb;
+        std::atomic<bool> stop{false};
+        std::atomic<int64_t> latency_ns{0};
+
+        // Reader: wait for one token, measure wakeup time
+        std::thread reader([&] {
+            auto t0 = std::chrono::steady_clock::now();
+            auto wr = rb.wait_readable(0, 1, stop, std::chrono::milliseconds(500));
+            auto t1 = std::chrono::steady_clock::now();
+            if (wr == WaitResult::ready) {
+                latency_ns.store(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count(),
+                    std::memory_order_release);
+            }
+        });
+
+        // Brief delay then write
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        float val = 1.0f;
+        rb.write(&val, 1);
+
+        reader.join();
+
+        state.counters["wakeup_ns"] = static_cast<double>(latency_ns.load());
+    }
+}
+BENCHMARK(BM_RingBuffer_WaitLatency)->Unit(benchmark::kMicrosecond)->Iterations(100);
+
 BENCHMARK_MAIN();

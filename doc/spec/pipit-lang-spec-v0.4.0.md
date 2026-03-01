@@ -400,6 +400,7 @@ set overrun = drop
 | `overrun` | IDENT | `drop` | オーバーラン時のポリシー（§5.4.3 参照） |
 | `tick_rate` | FREQ | `10kHz` | OSタイマーのウェイク周波数。K = ceil(タスク周波数 / tick_rate)。高周波タスクのバッチ処理に使用 |
 | `timer_spin` | NUMBER or `auto` | `10000` | デッドライン前のスピンウェイト時間（ナノ秒）。`auto` でEWMAベースの適応的スピン調整を有効化。CPU使用量と引き換えにタイマー精度を向上 |
+| `wait_timeout` | NUMBER | `50` | タスク間リングバッファの待機タイムアウト（ミリ秒）。1–60000。タイムアウト時はランタイムエラー |
 
 現行実装のスケジュール生成アルゴリズムは固定であり、タスク内では PASS（Periodic Asynchronous Static Schedule）を用いる。`set` によるスケジューリングアルゴリズム選択は v0.2 ではサポートしない。
 

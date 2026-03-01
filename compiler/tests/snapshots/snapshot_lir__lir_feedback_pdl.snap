@@ -4,7 +4,7 @@ expression: output
 ---
 LirProgram (0 consts, 1 params, 0 binds, 0 inter-task bufs, 1 tasks, 1 probes)
   param alpha: float = "0.5f" (cli: std::stof)
-  directives: mem=16777216, overrun=drop, timer=Fixed(10000)
+  directives: mem=16777216, overrun=drop, timer=Fixed(10000), wait_timeout=50ms
   task 'iir' @ 1000Hz K=1
     feedback _fb_6_7: float[1] init=0
     edge_buffers: _e0_1: float[1] [local], _e1_2: float[1] [local], _e2_3: float[1] [local], _fb_6_7: [1] (fb) [local]
