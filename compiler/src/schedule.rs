@@ -370,6 +370,11 @@ impl<'a> ScheduleCtx<'a> {
             adj.entry(edge.source).or_default().push(edge.target);
         }
 
+        // Pre-sort each adjacency list once for deterministic traversal order.
+        for neighbors in adj.values_mut() {
+            neighbors.sort_by_key(|id| id.0);
+        }
+
         // Kahn's algorithm with deterministic ordering (sort by NodeId)
         let mut queue: Vec<NodeId> = in_degree
             .iter()
@@ -389,9 +394,7 @@ impl<'a> ScheduleCtx<'a> {
             });
 
             if let Some(neighbors) = adj.get(&node_id) {
-                let mut sorted = neighbors.clone();
-                sorted.sort_by_key(|id| id.0);
-                for next in sorted {
+                for &next in neighbors {
                     if let Some(deg) = in_degree.get_mut(&next) {
                         *deg -= 1;
                         if *deg == 0 {
@@ -1335,5 +1338,69 @@ mod tests {
         let cert = verify_schedule(&sched_result.schedule, &graph_result.graph, &task_names);
         assert!(cert.s1_all_tasks_scheduled, "S1 should still pass");
         assert!(!cert.s2_all_nodes_fired, "S2 should fail");
+    }
+
+    /// Verify that sort_subgraph produces identical firing sequences across
+    /// repeated runs.  This guards the pre-sorted adjacency invariant: the
+    /// topological order must be deterministic even when multiple nodes share
+    /// the same in-degree (tie-break by NodeId).
+    #[test]
+    fn sort_subgraph_determinism() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let reg = test_registry();
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("examples/example.pdl");
+        let source = std::fs::read_to_string(&path).expect("failed to read example.pdl");
+
+        let mut hashes = Vec::new();
+        for _ in 0..10 {
+            let result = schedule_source(&source, &reg);
+            assert!(
+                result
+                    .diagnostics
+                    .iter()
+                    .all(|d| d.level != DiagLevel::Error),
+                "schedule errors: {:#?}",
+                result.diagnostics
+            );
+            let mut hasher = DefaultHasher::new();
+            let mut task_names: Vec<_> = result.schedule.tasks.keys().collect();
+            task_names.sort();
+            for task_name in &task_names {
+                let task_meta = &result.schedule.tasks[*task_name];
+                task_name.hash(&mut hasher);
+                match &task_meta.schedule {
+                    TaskSchedule::Pipeline(sg) => {
+                        for f in &sg.firings {
+                            f.node_id.0.hash(&mut hasher);
+                            f.repetition_count.hash(&mut hasher);
+                        }
+                    }
+                    TaskSchedule::Modal { control, modes } => {
+                        for f in &control.firings {
+                            f.node_id.0.hash(&mut hasher);
+                            f.repetition_count.hash(&mut hasher);
+                        }
+                        for (name, sg) in modes {
+                            name.hash(&mut hasher);
+                            for f in &sg.firings {
+                                f.node_id.0.hash(&mut hasher);
+                                f.repetition_count.hash(&mut hasher);
+                            }
+                        }
+                    }
+                }
+            }
+            hashes.push(hasher.finish());
+        }
+        assert!(
+            hashes.windows(2).all(|w| w[0] == w[1]),
+            "schedule should be deterministic across runs, got hashes: {:?}",
+            hashes
+        );
     }
 }
