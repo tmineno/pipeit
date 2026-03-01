@@ -35,7 +35,7 @@ usage() {
 Usage: run_all.sh [options]
 
 Core options:
-  --filter <category>      Repeatable. Categories: compiler, ringbuf, timer, thread, pdl, e2e, profile, all
+  --filter <category>      Repeatable. Categories: compiler, ringbuf, timer, thread, pdl, e2e, shm, profile, all
   --output-dir <path>      Output directory for benchmark artifacts and report
 
 Report options:
@@ -297,11 +297,13 @@ bencher_to_gbench_json() {
 build_and_run_gbench() {
     local src="$1"
     local name="$2"
+    shift 2
+    local extra_flags="$*"
     local exe="$BUILD_DIR/$name"
 
     echo "  Building $name..."
     if ! $CXX $CXX_FLAGS -I "$RUNTIME_INCLUDE" -I "$RUNTIME_INCLUDE/third_party" -I "$EXAMPLES_DIR" \
-         "$src" $BENCH_LIB_FLAGS -o "$exe" 2>/dev/null; then
+         "$src" $BENCH_LIB_FLAGS $extra_flags -o "$exe" 2>/dev/null; then
         echo "  Build failed for $name"
         return 1
     fi
@@ -327,7 +329,7 @@ run_benchmarks() {
     echo ""
 
     if should_run "compiler"; then
-        echo "[1/6] Compiler benchmarks"
+        echo "[1/7] Compiler benchmarks"
         local compiler_txt="$BUILD_DIR/compiler_bench_raw.txt"
         if cargo bench --manifest-path "$PROJECT_ROOT/compiler/Cargo.toml" \
             --bench compiler_bench -- --output-format bencher \
@@ -344,7 +346,7 @@ run_benchmarks() {
     fi
 
     if should_run "ringbuf"; then
-        echo "[2/6] Ring buffer benchmarks"
+        echo "[2/7] Ring buffer benchmarks"
         if build_and_run_gbench "$SCRIPT_DIR/ringbuf_bench.cpp" "ringbuf_bench"; then
             run_section "ringbuf" "pass"
         else
@@ -355,7 +357,7 @@ run_benchmarks() {
     fi
 
     if should_run "timer"; then
-        echo "[3/6] Timer benchmarks"
+        echo "[3/7] Timer benchmarks"
         if build_and_run_gbench "$SCRIPT_DIR/timer_bench.cpp" "timer_bench"; then
             run_section "timer" "pass"
         else
@@ -366,7 +368,7 @@ run_benchmarks() {
     fi
 
     if should_run "thread"; then
-        echo "[4/6] Thread benchmarks"
+        echo "[4/7] Thread benchmarks"
         if build_and_run_gbench "$SCRIPT_DIR/thread_bench.cpp" "thread_bench"; then
             run_section "thread" "pass"
         else
@@ -377,7 +379,7 @@ run_benchmarks() {
     fi
 
     if should_run "e2e"; then
-        echo "[5/6] E2E max throughput benchmarks"
+        echo "[5/7] E2E max throughput benchmarks"
         if build_and_run_gbench "$SCRIPT_DIR/e2e_bench.cpp" "e2e_bench"; then
             run_section "e2e" "pass"
         else
@@ -387,8 +389,19 @@ run_benchmarks() {
         echo ""
     fi
 
+    if should_run "shm"; then
+        echo "[6/7] SHM shared-memory throughput benchmarks"
+        if build_and_run_gbench "$SCRIPT_DIR/shm_bench.cpp" "shm_bench" -lrt; then
+            run_section "shm" "pass"
+        else
+            run_section "shm" "fail"
+            FINAL_EXIT=1
+        fi
+        echo ""
+    fi
+
     if should_run "pdl"; then
-        echo "[6/6] End-to-end PDL benchmarks"
+        echo "[7/7] End-to-end PDL benchmarks"
 
         pdl_pass=0
         pdl_fail=0

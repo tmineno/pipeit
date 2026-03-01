@@ -307,6 +307,7 @@ runtime_cmd=(
     --filter timer
     --filter thread
     --filter e2e
+    --filter shm
     --output-dir "$RUNTIME_OUT_DIR"
 )
 
@@ -320,7 +321,7 @@ compile_cmd=(
     --warm-up-time "$COMPILE_WARMUP_TIME"
     --output-format bencher
 )
-runtime_cmd_display="benches/run_all.sh --filter ringbuf --filter timer --filter thread --filter e2e --output-dir ${RUNTIME_OUT_DIR_REL}"
+runtime_cmd_display="benches/run_all.sh --filter ringbuf --filter timer --filter thread --filter e2e --filter shm --output-dir ${RUNTIME_OUT_DIR_REL}"
 compile_cmd_display="cargo bench --manifest-path compiler/Cargo.toml --bench compiler_bench -- kpi/full_compile_latency --sample-size ${COMPILE_SAMPLE_SIZE} --measurement-time ${COMPILE_MEASUREMENT_TIME} --warm-up-time ${COMPILE_WARMUP_TIME} --output-format bencher"
 
 log "report id: $COMMIT_ID (source=$ID_SOURCE)"
@@ -348,6 +349,7 @@ ringbuf_json="$RUNTIME_OUT_DIR/ringbuf_bench.json"
 timer_json="$RUNTIME_OUT_DIR/timer_bench.json"
 thread_json="$RUNTIME_OUT_DIR/thread_bench.json"
 e2e_json="$RUNTIME_OUT_DIR/e2e_bench.json"
+shm_json="$RUNTIME_OUT_DIR/shm_bench.json"
 
 declare -A compile_ns=(
     [simple]="NA"
@@ -371,6 +373,16 @@ if [ -f "$e2e_json" ]; then
     socket_error_message="$(jq -r '[.benchmarks[] | select((.name | startswith("BM_E2E_SocketLoopback/")) and (.error_occurred // false)) | .error_message] | unique | join("; ")' "$e2e_json")"
     if [ -z "$socket_error_message" ] || [ "$socket_error_message" = "null" ]; then
         socket_error_message="-"
+    fi
+fi
+
+shm_error_count="NA"
+shm_error_message="-"
+if [ -f "$shm_json" ]; then
+    shm_error_count="$(jq -r '[.benchmarks[] | select((.name | startswith("BM_SHM_Loopback/")) and (.error_occurred // false))] | length' "$shm_json")"
+    shm_error_message="$(jq -r '[.benchmarks[] | select((.name | startswith("BM_SHM_Loopback/")) and (.error_occurred // false)) | .error_message] | unique | join("; ")' "$shm_json")"
+    if [ -z "$shm_error_message" ] || [ "$shm_error_message" = "null" ]; then
+        shm_error_message="-"
     fi
 fi
 
@@ -453,6 +465,17 @@ add_metric "e2e.socket_1024_rx_samples_per_sec" \
     "$(json_value "$e2e_json" "BM_E2E_SocketLoopback/1024/iterations:1/manual_time" "rx_samples_per_sec")" \
     "samples/s"
 add_metric "e2e.socket_error_count" "$socket_error_count" "count"
+
+add_metric "shm.loopback_64_rx_samples_per_sec" \
+    "$(json_value "$shm_json" "BM_SHM_Loopback/64/iterations:1/manual_time" "rx_samples_per_sec")" \
+    "samples/s"
+add_metric "shm.loopback_256_rx_samples_per_sec" \
+    "$(json_value "$shm_json" "BM_SHM_Loopback/256/iterations:1/manual_time" "rx_samples_per_sec")" \
+    "samples/s"
+add_metric "shm.loopback_1024_rx_samples_per_sec" \
+    "$(json_value "$shm_json" "BM_SHM_Loopback/1024/iterations:1/manual_time" "rx_samples_per_sec")" \
+    "samples/s"
+add_metric "shm.loopback_error_count" "$shm_error_count" "count"
 
 previous_report=""
 if compgen -G "$REPORT_ROOT/*-bench.md" >/dev/null 2>&1; then
@@ -572,6 +595,26 @@ fi
     echo "- Socket benchmark errors: \`$socket_error_count\`"
     if [ "$socket_error_message" != "-" ]; then
         echo "- Socket error message: $socket_error_message"
+    fi
+    echo ""
+    echo "## SHM Throughput"
+    echo ""
+    echo "| Benchmark | rx_samples_per_sec | Delta vs prev |"
+    echo "|---|---:|---:|"
+    for item in \
+        "SHM/64|shm.loopback_64_rx_samples_per_sec" \
+        "SHM/256|shm.loopback_256_rx_samples_per_sec" \
+        "SHM/1024|shm.loopback_1024_rx_samples_per_sec"; do
+        label="${item%%|*}"
+        key="${item##*|}"
+        cur="${metric_values[$key]}"
+        prev="${prev_values[$key]:-}"
+        echo "| $label | $(format_si "$cur") | $(metric_delta "$cur" "$prev") |"
+    done
+    echo ""
+    echo "- SHM benchmark errors: \`$shm_error_count\`"
+    if [ "$shm_error_message" != "-" ]; then
+        echo "- SHM error message: $shm_error_message"
     fi
     echo ""
     echo "## KPI Snapshot (Stable Keys)"

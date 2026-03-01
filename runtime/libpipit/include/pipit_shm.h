@@ -496,8 +496,15 @@ class ShmReader {
         auto *sb = const_cast<Superblock *>(superblock());
         uint64_t latest = shm_load_acquire(&sb->write_seq);
 
+        // Reader attached before writer published: resync once data arrives
+        if (want_seq_ == 0) {
+            if (latest == 0)
+                return 0; // writer hasn't published yet
+            want_seq_ = (latest >= slot_count_) ? latest - slot_count_ + 1 : 1;
+        }
+
         // No new data
-        if (latest < want_seq_ || want_seq_ == 0)
+        if (latest < want_seq_)
             return 0;
 
         // Overflow detection: reader too far behind

@@ -21,55 +21,15 @@
 | v0.4.2 | — | Diagnostics completion: all 10 E0100–E0206 enriched with `cause_chain`, `related_spans`, hints |
 | v0.4.3 | — | Bind-based external integration: `bind` grammar/IR/inference, stable IDs, `--emit interface`, `BindIoAdapter` codegen, runtime rebind |
 | v0.4.4 | — | PP record manifest extraction (ADR-032), `--actor-meta` required (ADR-033, breaking), E0700 diagnostic, 667 tests |
+| v0.4.5 | — | PSHM bind transport: `shm(name, slots, slot_bytes)` endpoint, `pipit_shm.h` runtime, codegen lowering, SHM benchmark, cross-process example |
 
 ---
 
-## v0.4.5 - Shared-Memory Bind Transport (PSHM)
+## v0.4.6 - Bind Infrastructure Polish
 
-**Goal**: Implement `shm(...)` bind transport for multi-process local IPC.
+**Goal**: Remaining bind-layer refinements deferred from v0.4.5.
 
-> Depends on v0.4.3 (merged). Phase 2 (PSHM runtime core) is parallelizable.
-
-### Phase 1: Compiler Surface Alignment
-
-- [x] Add `shm(name, slots, slot_bytes)` endpoint parsing/validation (E0720–E0726)
-- [x] Add endpoint option range checks (`slots > 0`, `slot_bytes > 0`, `slot_bytes % 8 == 0`)
 - [ ] Change interface manifest to opt-in (`--emit interface`, `--interface-out`)
-
-### Phase 2: PSHM Runtime Core (Protocol v0.1.0)
-
-- [x] Superblock + slot header binary layout per spec (`pipit_shm.h`)
-- [x] Single-writer publish (release-store), reader consume (acquire-load + overwrite detection)
-- [x] Shared-memory object lifecycle (create/open/map/unmap/close)
-
-### Phase 3: Contract Validation and Attach
-
-- [x] Validate attach-time contract against compiler-inferred bind contract
-- [x] Reject mismatched endpoints at startup with diagnostics
-- [x] Endpoint precedence (`CLI --bind` override vs DSL default)
-
-### Phase 4: Rebind Epoch Semantics
-
-- [x] Iteration-boundary rebind apply for PSHM endpoints (three-phase lock-safe pattern)
-- [x] Epoch fence markers during endpoint switch
-- [x] Reader resynchronization across epoch transition
-
-### Phase 5: Codegen and Runtime Wiring
-
-- [x] Lower `bind ... = shm(...)` to PSHM adapter in generated C++
-- [x] Keep UDP/Unix datagram and `socket_write`/`socket_read` backward compat
-
-### Phase 6: Verification & Performance
-
-- [x] Struct layout tests (Superblock=128B, SlotHeader=64B) — `static_assert` in `pipit_shm.h`
-- [x] Codegen unit tests + integration compile tests
-- [ ] Throughput/latency vs UDP baseline → `doc/performance/`
-
-### Exit Criteria
-
-- [ ] Two PDL executables exchange data via `bind ... = shm(...)` on one host
-- [x] Rebind is atomic at iteration boundary, no mixed-epoch visibility
-- [x] No regressions in existing UDP/Unix bind or legacy socket actors
 
 ---
 
