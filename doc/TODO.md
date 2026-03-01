@@ -20,46 +20,21 @@
 | v0.4.1 | — | MemoryKind enum (ADR-028), SPSC ring buffer (ADR-029), param sync simplification (ADR-030), `alignas(64)` edges |
 | v0.4.2 | — | Diagnostics completion: all 10 E0100–E0206 enriched with `cause_chain`, `related_spans`, hints |
 | v0.4.4 | — | PP record manifest extraction (ADR-032), `--actor-meta` required (ADR-033, breaking), E0700 diagnostic, 667 tests |
+| v0.4.5 | — | Phase latency optimization (all 4 gates PASS), analyze/build_lir/emit_cpp hot-path rewrites, benchmark infrastructure (build cache, parallel compile, quick mode), 667 tests |
 
 ---
 
-## v0.4.5 - Compiler Latency Refactoring
+## v0.4.6 - Compiler Latency Stretch & Parallelization
 
-**Goal**: Reduce compiler phase latency to the ~8000 ns/iter order with benchmark-locked refactors.
+**Goal**: build_lir stretch optimizations and multi-threaded compilation.
 
-### Current Gate Status
-
-| Gate | Target | Current | Status |
-|---|---:|---:|---|
-| build_lir/complex | ≤ 10,000 ns | **6,400** | **PASS** |
-| emit_cpp/complex | ≤ 9,000 ns | **7,600** | **PASS** |
-| analyze/complex | ≤ 8,500 ns | **5,800** | **PASS** |
-| full_compile regression | no regression | ~41,000 | **PASS** |
-
-<details>
-<summary>M1: Measurement Hygiene — DONE</summary>
-
-Label consistency, 3× median gate methodology, verification commands in report template, filename-sorted comparator. See `doc/performance/README.md`.
-
-</details>
-
-<details>
-<summary>M2: Analyze Phase Optimization — DONE (5,800 ns, target ≤ 8,500)</summary>
-
-- Merged `check_unresolved_frame_dims` + `check_dim_source_conflicts` → single `check_node_dim_constraints` (~450 ns algorithmic improvement)
-- Cached `subgraphs_of()` results as `all_subgraphs` in `AnalyzeCtx` (~22 Vec allocs eliminated)
-- Fixed benchmark scope: excluded `build_thir_context` from measured closure (9,200→5,800 ns measurement fix)
-- Note: `node_actor_meta` HashMap precomputation tested and reverted (overhead for small graphs)
-
-</details>
-
-### M3: build_lir Stretch Goals (gate passed — incremental)
+### M1: build_lir Stretch Goals (gate passed — incremental)
 
 - [ ] Cache dim-resolution decisions per actor node in `resolve_missing_param_value`
 - [ ] Memoize inferred wire type during subgraph edge-buffer construction
 - [ ] Reduce `String`/`HashMap` churn in schedule-dim override construction
 
-### M4: Compilation Parallelization (measurement-driven, deterministic output)
+### M2: Compilation Parallelization (measurement-driven, deterministic output)
 
 - [ ] `--compile-jobs N` with default `1`; keep single-thread baseline
 - [ ] Benchmark matrix for parallel scaling (`N=1,2,4`) on `multitask`, `complex`, `modal`
@@ -67,48 +42,10 @@ Label consistency, 3× median gate methodology, verification commands in report 
 - [ ] Determinism guardrails: stable sort, deterministic diagnostics, byte-identical C++
 - [ ] Auto-disable parallel path for tiny programs where overhead exceeds benefit
 
-### M5: v0.4.5 Close
+### M3: v0.4.6 Close
 
-- [x] All 4 phase latency gates — **PASS**
-- [x] Stable 3× median runs recorded
-- [ ] Parallel compile speedup gate: requires M4
-
-### M6: Runtime Benchmark Infrastructure
-
-> `commit_characterize.sh` spends 90% of time (~40s) in C++ compilation via `run_all.sh`. Actual benchmark execution is ~2ms per binary.
-
-- [x] Precompiled binaries: cache in `target/bench_cache/`, skip rebuild when source/headers unchanged
-- [x] Parallel compilation: build all benchmark binaries concurrently before sequential execution
-
-<details>
-<summary>Completed optimizations (analyze, build_lir, emit_cpp, benchmarks)</summary>
-
-**Benchmark decomposition**: Split `kpi/phase_latency/codegen` into `build_thir_context`, `build_lir`, `emit_cpp`. Legacy codegen kept for trend continuity.
-
-**Analyze**: O(1) `HashSet` cycle guards, nested `span_derived_dims` HashMap, precomputed `node_port_rates` cache.
-
-**build_lir**: Merged edge buffer/name construction, `EdgeAdjacency` + precomputed `firing_reps`, buffer reader metadata cache, benchmark scope fix.
-
-**emit_cpp**: `task_index` HashMap for O(1) lookup, `strip_prefix` replaces `format!`, `indent_plus4()` pre-sized allocation, `Cow<str>` multi-input rewrite.
-
-</details>
-
-<details>
-<summary>Verification commands</summary>
-
-```sh
-# Phase latency gates
-./benches/compiler_bench_stable.sh \
-  --filter 'kpi/phase_latency/(analyze|build_lir|emit_cpp)/complex' \
-  --sample-size 40 --measurement-time 1.0
-
-# Full compile regression check
-./benches/compiler_bench_stable.sh \
-  --filter 'kpi/full_compile_latency/(complex|modal)' \
-  --sample-size 40 --measurement-time 1.0
-```
-
-</details>
+- [ ] Parallel compile speedup gate
+- [ ] Stable 3× median runs recorded
 
 ---
 
