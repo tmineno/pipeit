@@ -450,6 +450,16 @@ fn scan_actors(source: &str, file: &Path) -> Result<Vec<ActorMeta>, RegistryErro
     let mut pos = 0;
     let bytes = stripped.as_bytes();
 
+    // Build newline offset table once for O(log n) line lookup.
+    let newline_offsets: Vec<usize> = stripped
+        .bytes()
+        .enumerate()
+        .filter_map(|(i, b)| if b == b'\n' { Some(i) } else { None })
+        .collect();
+    let line_at = |byte_offset: usize| -> usize {
+        newline_offsets.partition_point(|&nl| nl < byte_offset) + 1
+    };
+
     while pos < bytes.len() {
         // Find "ACTOR(" at word boundary
         if let Some(idx) = stripped[pos..].find("ACTOR(") {
@@ -480,7 +490,7 @@ fn scan_actors(source: &str, file: &Path) -> Result<Vec<ActorMeta>, RegistryErro
             match extract_balanced(bytes, paren_start, b'(', b')') {
                 Some(content_end) => {
                     let inner = &stripped[paren_start + 1..content_end];
-                    let line = stripped[..abs_idx].chars().filter(|&c| c == '\n').count() + 1;
+                    let line = line_at(abs_idx);
 
                     let actor = parse_actor_macro(inner, &type_params, file, line)?;
                     results.push(actor);
@@ -488,7 +498,7 @@ fn scan_actors(source: &str, file: &Path) -> Result<Vec<ActorMeta>, RegistryErro
                     pos = content_end + 1;
                 }
                 None => {
-                    let line = stripped[..abs_idx].chars().filter(|&c| c == '\n').count() + 1;
+                    let line = line_at(abs_idx);
                     return Err(RegistryError::ParseError {
                         file: file.to_path_buf(),
                         line,
@@ -976,27 +986,34 @@ pub fn scan_actors_pp(
     let mut include_registry = Registry::new();
     let mut actor_path_registry = Registry::new();
 
+    // Precompute canonical parent directories for actor-path headers once,
+    // avoiding per-record filesystem canonicalize calls.
+    let actor_path_canonical: Vec<PathBuf> = actor_path_headers
+        .iter()
+        .filter_map(|ap| ap.parent().and_then(|p| std::fs::canonicalize(p).ok()))
+        .collect();
+
     for (meta, source_path) in records {
         let source = PathBuf::from(&source_path);
 
-        // Determine which group this record belongs to
+        // Determine which group this record belongs to.
+        // Fast path: match by filename.
         let is_actor_path = actor_path_headers.iter().any(|ap| {
-            // Match if the __FILE__ path ends with the same filename,
-            // or if the source path is under an actor-path directory
             if let (Some(ap_name), Some(src_name)) = (ap.file_name(), source.file_name()) {
-                if ap_name == src_name {
-                    return true;
-                }
+                ap_name == src_name
+            } else {
+                false
             }
-            if let Some(ap_parent) = ap.parent() {
-                if let Ok(src_canonical) = std::fs::canonicalize(&source) {
-                    if let Ok(ap_canonical) = std::fs::canonicalize(ap_parent) {
-                        return src_canonical.starts_with(&ap_canonical);
-                    }
-                }
+        }) || {
+            // Slow path: canonical prefix match (one canonicalize per record).
+            if let Ok(src_canonical) = std::fs::canonicalize(&source) {
+                actor_path_canonical
+                    .iter()
+                    .any(|canon_parent| src_canonical.starts_with(canon_parent))
+            } else {
+                false
             }
-            false
-        });
+        };
 
         let registry = if is_actor_path {
             &mut actor_path_registry
