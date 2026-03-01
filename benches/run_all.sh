@@ -17,6 +17,7 @@ DEFAULT_BENCH_OUTPUT_DIR="$SCRIPT_DIR/results"
 BENCH_OUTPUT_DIR="$DEFAULT_BENCH_OUTPUT_DIR"
 REPORT_DIR="$(pwd)"
 BUILD_DIR=""
+BENCH_CACHE_DIR="$PROJECT_ROOT/target/bench_cache"
 
 CXX="${CXX:-c++}"
 CXX_FLAGS="-std=c++20 -O3 -march=native -DNDEBUG"
@@ -29,6 +30,7 @@ FILTERS=()
 GENERATE_REPORT=false
 JSON_INPUT=""
 REPORT_TOP=20
+QUICK_MODE=false
 
 usage() {
     cat <<'USAGE'
@@ -37,6 +39,7 @@ Usage: run_all.sh [options]
 Core options:
   --filter <category>      Repeatable. Categories: compiler, ringbuf, timer, thread, pdl, e2e, profile, all
   --output-dir <path>      Output directory for benchmark artifacts and report
+  --quick                  Quick mode: shorter runs, skip heavy manual-time benchmarks
 
 Report options:
   --report                 Enable Markdown report generation
@@ -78,6 +81,10 @@ while [[ $# -gt 0 ]]; do
             REPORT_TOP="$2"
             shift 2
             ;;
+        --quick)
+            QUICK_MODE=true
+            shift
+            ;;
         --help)
             usage
             exit 0
@@ -112,6 +119,18 @@ should_run() {
             return 0
         fi
     done
+    return 1
+}
+
+needs_rebuild() {
+    local src="$1"
+    local exe="$2"
+    [ ! -f "$exe" ] && return 0
+    [ "$src" -nt "$exe" ] && return 0
+    # Rebuild if any runtime/example header is newer than the binary
+    if find "$RUNTIME_INCLUDE" "$EXAMPLES_DIR" -name '*.h' -newer "$exe" -print -quit 2>/dev/null | grep -q .; then
+        return 0
+    fi
     return 1
 }
 
@@ -294,33 +313,55 @@ bencher_to_gbench_json() {
     fi
 }
 
-build_and_run_gbench() {
+build_gbench() {
     local src="$1"
     local name="$2"
-    local exe="$BUILD_DIR/$name"
+    local exe="$BENCH_CACHE_DIR/$name"
 
-    echo "  Building $name..."
-    if ! $CXX $CXX_FLAGS -I "$RUNTIME_INCLUDE" -I "$RUNTIME_INCLUDE/third_party" -I "$EXAMPLES_DIR" \
-         "$src" $BENCH_LIB_FLAGS -o "$exe" 2>/dev/null; then
-        echo "  Build failed for $name"
-        return 1
+    if ! needs_rebuild "$src" "$exe"; then
+        return 0
     fi
 
-    echo "  Running $name..."
-    "$exe" --benchmark_format=json --benchmark_out="$BENCH_OUTPUT_DIR/${name}.json" >/dev/null
+    $CXX $CXX_FLAGS -I "$RUNTIME_INCLUDE" -I "$RUNTIME_INCLUDE/third_party" -I "$EXAMPLES_DIR" \
+         "$src" $BENCH_LIB_FLAGS -o "$exe" 2>/dev/null
+}
+
+run_gbench() {
+    local name="$1"
+    local cat="${2:-}"
+    local exe="$BENCH_CACHE_DIR/$name"
+
+    local args=("--benchmark_format=json" "--benchmark_out=$BENCH_OUTPUT_DIR/${name}.json")
+    if [ "$QUICK_MODE" = true ] && [ -n "$cat" ]; then
+        args+=("--benchmark_min_time=0.1s")
+        case "$cat" in
+            ringbuf) args+=("--benchmark_filter=BM_RingBuffer_Contention") ;;
+            timer)   args+=("--benchmark_filter=BM_Timer_FrequencySweep/10000/|BM_Timer_AdaptiveSpin/-1") ;;
+            thread)  args+=("--benchmark_filter=BM_TaskDeadline") ;;
+            e2e)     args+=("--benchmark_filter=BM_E2E_PipelineOnly") ;;
+        esac
+    fi
+
+    echo "  Running $name${QUICK_MODE:+ (quick)}..."
+    "$exe" "${args[@]}" >/dev/null
 }
 
 run_benchmarks() {
     BUILD_DIR="/tmp/pipit_bench_build_$$"
     mkdir -p "$BUILD_DIR"
     mkdir -p "$BENCH_OUTPUT_DIR"
+    mkdir -p "$BENCH_CACHE_DIR"
 
     cleanup() {
         rm -rf "$BUILD_DIR"
     }
     trap cleanup EXIT
 
-    echo "=== Pipit Benchmark Suite ==="
+    if [ "$QUICK_MODE" = true ]; then
+        echo "=== Pipit Benchmark Suite (QUICK MODE) ==="
+    else
+        echo "=== Pipit Benchmark Suite ==="
+    fi
     echo "Output directory: $BENCH_OUTPUT_DIR"
     echo "Build directory:  $BUILD_DIR"
     echo "Filters:          ${FILTERS[*]}"
@@ -343,48 +384,55 @@ run_benchmarks() {
         echo ""
     fi
 
-    if should_run "ringbuf"; then
-        echo "[2/6] Ring buffer benchmarks"
-        if build_and_run_gbench "$SCRIPT_DIR/ringbuf_bench.cpp" "ringbuf_bench"; then
-            run_section "ringbuf" "pass"
-        else
-            run_section "ringbuf" "fail"
-            FINAL_EXIT=1
+    # ── Parallel C++ benchmark compilation ──
+    build_cats=()
+    build_pids=()
+    for cat in ringbuf timer thread e2e; do
+        if should_run "$cat"; then
+            build_cats+=("$cat")
+            build_gbench "$SCRIPT_DIR/${cat}_bench.cpp" "${cat}_bench" &
+            build_pids+=($!)
         fi
-        echo ""
-    fi
+    done
 
-    if should_run "timer"; then
-        echo "[3/6] Timer benchmarks"
-        if build_and_run_gbench "$SCRIPT_DIR/timer_bench.cpp" "timer_bench"; then
-            run_section "timer" "pass"
-        else
-            run_section "timer" "fail"
-            FINAL_EXIT=1
-        fi
+    if [ ${#build_pids[@]} -gt 0 ]; then
+        echo "[2-5/6] Building C++ benchmarks (parallel, cached)..."
+        build_ok=()
+        for i in "${!build_pids[@]}"; do
+            if wait "${build_pids[$i]}"; then
+                build_ok+=("1")
+                echo "  ${build_cats[$i]}_bench: OK"
+            else
+                build_ok+=("0")
+                echo "  ${build_cats[$i]}_bench: FAILED"
+            fi
+        done
         echo ""
-    fi
 
-    if should_run "thread"; then
-        echo "[4/6] Thread benchmarks"
-        if build_and_run_gbench "$SCRIPT_DIR/thread_bench.cpp" "thread_bench"; then
-            run_section "thread" "pass"
-        else
-            run_section "thread" "fail"
-            FINAL_EXIT=1
-        fi
-        echo ""
-    fi
-
-    if should_run "e2e"; then
-        echo "[5/6] E2E max throughput benchmarks"
-        if build_and_run_gbench "$SCRIPT_DIR/e2e_bench.cpp" "e2e_bench"; then
-            run_section "e2e" "pass"
-        else
-            run_section "e2e" "fail"
-            FINAL_EXIT=1
-        fi
-        echo ""
+        # ── Sequential benchmark execution ──
+        idx=0
+        for cat in "${build_cats[@]}"; do
+            case "$cat" in
+                ringbuf) echo "[2/6] Ring buffer benchmarks" ;;
+                timer)   echo "[3/6] Timer benchmarks" ;;
+                thread)  echo "[4/6] Thread benchmarks" ;;
+                e2e)     echo "[5/6] E2E max throughput benchmarks" ;;
+            esac
+            if [ "${build_ok[$idx]}" = "1" ]; then
+                if run_gbench "${cat}_bench" "$cat"; then
+                    run_section "$cat" "pass"
+                else
+                    run_section "$cat" "fail"
+                    FINAL_EXIT=1
+                fi
+            else
+                echo "  Build failed"
+                run_section "$cat" "fail"
+                FINAL_EXIT=1
+            fi
+            echo ""
+            idx=$((idx + 1))
+        done
     fi
 
     if should_run "pdl"; then

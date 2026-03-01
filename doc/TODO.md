@@ -25,9 +25,7 @@
 
 ## v0.4.5 - Compiler Latency Refactoring
 
-**Goal**: Reduce compiler phase latency (especially `analyze` + codegen path) to the ~8000 ns/iter order with benchmark-locked refactors.
-
-> **Reference**: review note `agent-review/pipeit-refactor/2026-02-28-codegen-analyze-latency-strategy.md`
+**Goal**: Reduce compiler phase latency to the ~8000 ns/iter order with benchmark-locked refactors.
 
 ### Current Gate Status
 
@@ -38,105 +36,65 @@
 | analyze/complex | ≤ 8,500 ns | **5,800** | **PASS** |
 | full_compile regression | no regression | ~41,000 | **PASS** |
 
----
+<details>
+<summary>M1: Measurement Hygiene — DONE</summary>
 
-### M1: Measurement Hygiene (prerequisite for further tuning) — DONE
+Label consistency, 3× median gate methodology, verification commands in report template, filename-sorted comparator. See `doc/performance/README.md`.
 
-- [x] Fix scenario label consistency — verified consistent across benchmarks, reports, and scripts
-- [x] Reconcile `full_compile` regression signal — +3.1% was stale Criterion baseline; stable 2× median confirms ~43 µs (no regression vs ~41 µs pre-optimization)
-- [x] Standardize gate decisions on stable 3× median — documented in `doc/performance/README.md` § Gate Decision Methodology
-- [x] Treat benchmark-definition changes separately — documented in `doc/performance/README.md` § Benchmark-definition vs algorithmic changes
-- [x] Add verification commands to reports — added `## Verification` section to `commit_characterize.sh` report template
-- [x] Fix previous-report comparator (`ls -1t` → filename-sorted) — `commit_characterize.sh` now uses `printf | sort -r`
+</details>
 
-### M2: Analyze Phase Optimization (main remaining gate) — DONE
+<details>
+<summary>M2: Analyze Phase Optimization — DONE (5,800 ns, target ≤ 8,500)</summary>
 
-> Target: `analyze/complex ≤ 8,500 ns/iter` → **PASS** at **5,800 ns** (3× median)
+- Merged `check_unresolved_frame_dims` + `check_dim_source_conflicts` → single `check_node_dim_constraints` (~450 ns algorithmic improvement)
+- Cached `subgraphs_of()` results as `all_subgraphs` in `AnalyzeCtx` (~22 Vec allocs eliminated)
+- Fixed benchmark scope: excluded `build_thir_context` from measured closure (9,200→5,800 ns measurement fix)
+- Note: `node_actor_meta` HashMap precomputation tested and reverted (overhead for small graphs)
 
-Completed:
+</details>
 
-- [x] Merge `check_unresolved_frame_dims` + `check_dim_source_conflicts` into single `check_node_dim_constraints` — single `actor_meta()` call, single shape-dim pass, inline param/sc-index computation
-- [x] Cache `subgraphs_of()` results as `all_subgraphs` field in `AnalyzeCtx` — eliminates ~22 Vec allocations per compile
-- [x] Remove 4 helper functions: `unique_symbolic_dims`, `param_index_by_name`, `shape_constraint_index_by_symbol`, `first_symbolic_dim_name`
-- [x] Fix analyze benchmark scope — old benchmark measured `build_thir_context + analyze` (~9,200 ns); fixed to measure only `analyze::analyze()` (~5,800 ns), matching `build_lir` benchmark pattern
+### M3: build_lir Stretch Goals (gate passed — incremental)
 
-Benchmark-definition note: the 9,200→5,800 drop is a **measurement scope fix**, not an algorithmic speedup. The algorithmic improvement from merging dim checks was ~450 ns (from the original ~6,480 ns true-analyze baseline). See `doc/performance/README.md` § Benchmark-definition vs algorithmic changes.
-
-Note: `node_actor_meta` HashMap precomputation was tested and reverted — adds overhead for small graphs (~10 nodes).
-
-### M3: build_lir Stretch Goals (gate passed — incremental improvements)
-
-> build_lir already at 6,400 ns (target ≤ 10,000). These are opportunistic.
-
-- [ ] Cache dim-resolution decisions per actor node to avoid repeated shape/span/schedule lookups in `resolve_missing_param_value`
-- [ ] Memoize inferred wire type during subgraph edge-buffer construction to avoid repeated trace walks
-- [ ] Reduce transient `String`/`HashMap` churn in schedule-dim override construction for empty/single-symbol cases
+- [ ] Cache dim-resolution decisions per actor node in `resolve_missing_param_value`
+- [ ] Memoize inferred wire type during subgraph edge-buffer construction
+- [ ] Reduce `String`/`HashMap` churn in schedule-dim override construction
 
 ### M4: Compilation Parallelization (measurement-driven, deterministic output)
 
-> Depends on: M1 (stable baseline), M2 (analyze optimized for serial path first)
+- [ ] `--compile-jobs N` with default `1`; keep single-thread baseline
+- [ ] Benchmark matrix for parallel scaling (`N=1,2,4`) on `multitask`, `complex`, `modal`
+- [ ] Parallelize per-task work: `analyze`, `schedule`, `build_lir`, `emit_cpp`
+- [ ] Determinism guardrails: stable sort, deterministic diagnostics, byte-identical C++
+- [ ] Auto-disable parallel path for tiny programs where overhead exceeds benefit
 
-- [ ] Add `--compile-jobs N` (or env equivalent) with default `1`; keep single-thread path as baseline
-- [ ] Add benchmark matrix for compile parallel scaling (`N=1,2,4`) on `multitask`, `complex`, `modal`
-- [ ] Parallelize per-task/subgraph work where dependencies are independent:
-  - [ ] `analyze`: run task-local checks/inference in parallel, deterministic merge
-  - [ ] `schedule`: parallelize per-task schedule construction with stable reduction order
-  - [ ] `build_lir`: parallelize per-task LIR construction, stable task ordering in final IR
-  - [ ] `emit_cpp`: parallelize task-level code emission, deterministic concatenation
-- [ ] Enforce determinism guardrails: stable sort before merge, deterministic diagnostic order, byte-identical C++
-- [ ] Avoid lock-heavy shared mutation in hot paths (prefer thread-local accumulation + final reduce)
-- [ ] Add compatibility fallback: auto-disable parallel path for tiny programs where overhead exceeds benefit
+### M5: v0.4.5 Close
 
-### M5: v0.4.5 Close (all gates confirmed)
+- [x] All 4 phase latency gates — **PASS**
+- [x] Stable 3× median runs recorded
+- [ ] Parallel compile speedup gate: requires M4
 
-- [x] `build_lir/complex ≤ 10k ns` — **PASS** (6,400)
-- [x] `emit_cpp/complex ≤ 9k ns` — **PASS** (7,600)
-- [x] `analyze/complex ≤ 8.5k ns` — **PASS** (5,800; benchmark scope fix + algorithmic improvement)
-- [x] `full_compile/{complex,modal}` no regression — **PASS** (~41k after M2)
-- [x] Stable 3× median runs recorded in `tmp/build-lir-benchmark-fix/report.md`
-- [ ] Parallel compile speedup gate (opt-in `--compile-jobs`): requires M4
+### M6: Runtime Benchmark Infrastructure
 
-### Completed Work
+> `commit_characterize.sh` spends 90% of time (~40s) in C++ compilation via `run_all.sh`. Actual benchmark execution is ~2ms per binary.
+
+- [x] Precompiled binaries: cache in `target/bench_cache/`, skip rebuild when source/headers unchanged
+- [x] Parallel compilation: build all benchmark binaries concurrently before sequential execution
 
 <details>
-<summary>Benchmark Decomposition (done)</summary>
+<summary>Completed optimizations (analyze, build_lir, emit_cpp, benchmarks)</summary>
 
-- [x] Split `kpi/phase_latency/codegen` into `build_thir_context`, `build_lir`, `emit_cpp`
-- [x] Keep legacy `kpi/phase_latency/codegen` for trend continuity
-- [x] Add per-bucket `complex` scenario reporting to commit characterization
+**Benchmark decomposition**: Split `kpi/phase_latency/codegen` into `build_thir_context`, `build_lir`, `emit_cpp`. Legacy codegen kept for trend continuity.
+
+**Analyze**: O(1) `HashSet` cycle guards, nested `span_derived_dims` HashMap, precomputed `node_port_rates` cache.
+
+**build_lir**: Merged edge buffer/name construction, `EdgeAdjacency` + precomputed `firing_reps`, buffer reader metadata cache, benchmark scope fix.
+
+**emit_cpp**: `task_index` HashMap for O(1) lookup, `strip_prefix` replaces `format!`, `indent_plus4()` pre-sized allocation, `Cow<str>` multi-input rewrite.
 
 </details>
 
 <details>
-<summary>Analyze optimizations applied (done)</summary>
-
-- [x] Replace O(N) cycle guards (`Vec::contains`) → O(1) `HashSet` visited tracking
-- [x] Nested `span_derived_dims` HashMap eliminates `sym.clone()` + `.to_string()`
-- [x] Precomputed `node_port_rates` cache eliminates redundant end-of-pass walks
-
-</details>
-
-<details>
-<summary>build_lir optimizations applied (done)</summary>
-
-- [x] Merged edge buffer/name construction into single pass (`build_edge_buffers_and_names`)
-- [x] `EdgeAdjacency` struct + precomputed `firing_reps` HashMap per subgraph
-- [x] Buffer reader metadata cache in `LirBuilder`
-- [x] Benchmark fix: exclude THIR rebuild from measured closure
-
-</details>
-
-<details>
-<summary>emit_cpp optimizations applied (done)</summary>
-
-- [x] `task_index` HashMap for O(1) task lookup (replaces 6 linear scans)
-- [x] `strip_prefix` replaces `format!` in hoisted actor search
-- [x] `indent_plus4()` pre-sized allocation
-- [x] `Cow<str>` multi-input rewrite, dynamic output buffer sizing
-
-</details>
-
-### Verification Commands
+<summary>Verification commands</summary>
 
 ```sh
 # Phase latency gates
@@ -148,31 +106,20 @@ Note: `node_actor_meta` HashMap precomputation was tested and reverted — adds 
 ./benches/compiler_bench_stable.sh \
   --filter 'kpi/full_compile_latency/(complex|modal)' \
   --sample-size 40 --measurement-time 1.0
-
-# Parallel scaling (after M4)
-for n in 1 2 4; do
-  PIPIT_COMPILE_JOBS=$n ./benches/compiler_bench_stable.sh \
-    --filter 'kpi/full_compile_latency/(multitask|modal)' \
-    --sample-size 30 --measurement-time 0.8
-done
 ```
+
+</details>
 
 ---
 
 ## v0.5.x - Ecosystem & Quality of Life
 
-**Goal**: Make Pipit easier to use and deploy in real projects.
-
 ### Deferred from v0.4.x: Compiler Latency Profiling & Recovery
 
-> **Reference**: review-0004. Acceptance gate: cold-compile KPI within 10% of v0.3.4 baseline (`7248b44`).
-
 - [ ] Phase benchmarks for `build_hir`, `type_infer`, `lower`, `build_thir`, `build_lir` + `--emit phase-timing`
-- [ ] Explicit timing for `build_thir_context()` (currently untimed)
 - [ ] Formal KPI A/B benchmark against v0.3.4 baseline; record disposition in ADR-031
 - [ ] Remove `LirInterTaskBuffer.skip_writes` and `.reader_tasks` (dead fields)
-- [ ] Whole-program output cache (`cache.rs`): SHA-256 key, `$XDG_CACHE_HOME/pipit/v1/`, skip-cache-if-warnings, `--no-cache`
-- [ ] Deterministic `invalidation_key` hashing (deferred from v0.4.1)
+- [ ] Whole-program output cache (`cache.rs`): SHA-256 key, `$XDG_CACHE_HOME/pipit/v1/`, `--no-cache`
 
 ### Deferred Backlog from v0.3.x–v0.4.x
 
@@ -186,39 +133,13 @@ done
 - [ ] String/HashMap churn reduction in monomorphization keys (v0.3.4)
 - [ ] Cache PP extraction outputs by header content hash (v0.4.4)
 - [ ] Skip manifest regen when actor-signature set unchanged (v0.4.4)
-- [ ] Re-benchmark two-step manifest workflow (v0.4.4)
-- [ ] KPI exit criteria: complex/modal ≥5% improvement vs v0.3.3, no regressions (v0.3.4)
-- [ ] Task-internal branch parallelization study — safety gate, effect classification, prototype (v0.3.4)
 
 ### Standard Actor Library Expansion
 
-#### Phase 2: Signal Processing Basics
-
-- [ ] Simple filters: `lpf`, `hpf`, `notch` (Butterworth/biquad)
-- [ ] Transforms: `ifft(N)`, `rfft(N)` (validate against FFTW)
-- [ ] Windowing: `window(N, type)` — hann, hamming, blackman
-
-#### Phase 3: Advanced Signal Processing
-
-- [ ] WAV file I/O: `wavread(path)`, `wavwrite(path)` (16/24/32-bit PCM)
-- [ ] Advanced filters: `iir(b, a)`, `bpf(low, high, order)`
-- [ ] Resampling: `resample(M, N)`, `interp(N)`, `downsample(N)`
-- [ ] Advanced transforms: `dct(N)`, `hilbert(N)`, `stft(N, hop)`, `istft(N, hop)`
-- [ ] Advanced statistics: `var`, `std`, `xcorr`, `acorr`, `convolve`
-- [ ] Control flow: `gate`, `clipper`, `limiter`, `agc`
-
-#### Infrastructure
-
-- [ ] Per-actor unit test framework + edge case testing (zero, infinity, NaN)
-- [ ] Actor API reference, usage examples, performance docs
-- [ ] Example pipelines: audio effects, SDR, sensor processing
-- [ ] Header split: `io.h`, `filters.h`, etc. + `--actor-path` discovery
-
-#### Performance & Benchmarking
-
-- [ ] Regression detection with statistical comparison, CI integration, flamegraphs
-- [ ] Performance tuning guide (CPU affinity, NUMA, compiler flags)
-- [ ] Extended testing: 24-hour drift test, comparison with GNU Radio
+- [ ] **Phase 2**: `lpf`, `hpf`, `notch` filters; `ifft(N)`, `rfft(N)` transforms; `window(N, type)`
+- [ ] **Phase 3**: WAV I/O, `iir`, `bpf`, resampling, `dct`, `hilbert`, `stft`/`istft`, `var`/`std`/`xcorr`, `gate`/`clipper`/`limiter`/`agc`
+- [ ] **Infra**: per-actor unit tests, API reference, example pipelines, header split + `--actor-path`
+- [ ] **Perf**: regression detection, CI flamegraphs, 24-hour drift test
 
 ### Runtime & Build
 
@@ -242,10 +163,9 @@ done
 
 ### Legacy Text Scanner Removal (deferred from v0.4.4)
 
-- [ ] Migrate 54 `load_header()` call sites (17 files) to golden manifest
+- [ ] Migrate 54 `load_header()` call sites to golden manifest
 - [ ] Rewrite registry.rs scanner-specific unit tests
 - [ ] Delete dead functions: `load_header`, `scan_actors`, `strip_comments`, `parse_actor_macro`
-- [ ] Mark as breaking API change (`refactor!:`)
 - See review note: `agent-review/pipeit-clang/2026-02-28-text-scanner-removal-plan.md`
 
 ### Production Capabilities
@@ -260,6 +180,6 @@ done
 ## Key References
 
 - **Pipeline**: `parse → resolve → build_hir → type_infer → lower → graph → ThirContext → analyze → schedule → LIR → codegen`
-- **ADRs**: 007 (shape inference), 009/010/014 (perf), 012 (KPI), 013 (PPKT), 015 (spec alignment), 016 (polymorphism), 017 (port-rate), 020–023 (v0.4.0 arch), 028–030 (memory), 032–033 (PP manifest)
+- **ADRs**: 007 (shape), 009/010/014 (perf), 012 (KPI), 013 (PPKT), 016 (polymorphism), 020–023 (v0.4.0 arch), 028–030 (memory), 032–033 (PP manifest)
 - **Spec is source of truth** over code; versioned specs frozen at tag points
 - **Measure before optimizing** — performance characterization informs priorities

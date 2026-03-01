@@ -17,6 +17,7 @@ COMPILE_TIMEOUT_SEC=30
 COMPILE_SAMPLE_SIZE=10
 COMPILE_MEASUREMENT_TIME=0.10
 COMPILE_WARMUP_TIME=0.05
+QUICK_MODE=false
 
 usage() {
     cat <<'USAGE'
@@ -37,6 +38,7 @@ Options:
   --compile-sample-size <n>      Criterion sample size (default: 10)
   --compile-measurement-time <s> Criterion measurement time in seconds (default: 0.10)
   --compile-warm-up-time <s>     Criterion warm-up time in seconds (default: 0.05)
+  --quick                        Quick mode: shorter runtime benchmarks (~10s vs ~40s)
   --help                         Show this help
 
 Examples:
@@ -230,6 +232,10 @@ while [[ $# -gt 0 ]]; do
             COMPILE_WARMUP_TIME="$2"
             shift 2
             ;;
+        --quick)
+            QUICK_MODE=true
+            shift
+            ;;
         --help)
             usage
             exit 0
@@ -252,10 +258,13 @@ esac
 
 # Skip if HEAD commit does not touch Rust source in compiler/.
 # pre-commit post-commit stage provides no file list, so we check here.
-compiler_rs_changed="$(git -C "$PROJECT_ROOT" diff --name-only HEAD~1 HEAD -- 'compiler/src/*.rs' 'compiler/tests/*.rs' 2>/dev/null || true)"
-if [ -z "$compiler_rs_changed" ]; then
-    log "no compiler Rust source changed in HEAD — skipping"
-    exit 0
+# --force bypasses this check.
+if [ "$FORCE" = false ]; then
+    compiler_rs_changed="$(git -C "$PROJECT_ROOT" diff --name-only HEAD~1 HEAD -- 'compiler/src/*.rs' 'compiler/tests/*.rs' 2>/dev/null || true)"
+    if [ -z "$compiler_rs_changed" ]; then
+        log "no compiler Rust source changed in HEAD — skipping"
+        exit 0
+    fi
 fi
 
 for cmd in git cargo jq timeout sha1sum sed awk; do
@@ -309,6 +318,9 @@ runtime_cmd=(
     --filter e2e
     --output-dir "$RUNTIME_OUT_DIR"
 )
+if [ "$QUICK_MODE" = true ]; then
+    runtime_cmd+=(--quick)
+fi
 
 compile_cmd=(
     cargo bench
