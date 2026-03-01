@@ -67,6 +67,12 @@ pub fn expand_spawns(program: &Program) -> SpawnResult {
 // ── Const collection ────────────────────────────────────────────────
 
 /// Scan const statements and extract those with integer scalar values.
+///
+/// Also used by `resolve.rs` to resolve shared-array sizes.
+pub fn collect_integer_consts_from(stmts: &[Statement]) -> HashMap<String, u32> {
+    collect_integer_consts(stmts)
+}
+
 fn collect_integer_consts(stmts: &[Statement]) -> HashMap<String, u32> {
     let mut map = HashMap::new();
     for stmt in stmts {

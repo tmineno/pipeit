@@ -40,6 +40,7 @@ pub struct ResolvedProgram {
     pub tasks: HashMap<String, TaskEntry>,
     pub binds: HashMap<String, BindEntry>,
     pub buffers: HashMap<String, BufferInfo>,
+    pub shared_arrays: HashMap<String, SharedArrayInfo>,
     pub call_resolutions: HashMap<CallId, CallResolution>,
     pub task_resolutions: HashMap<String, TaskResolution>,
     pub probes: Vec<ProbeEntry>,
@@ -110,6 +111,14 @@ pub struct BufferInfo {
     pub readers: Vec<(String, Span)>,
 }
 
+/// Metadata for a `shared name[N]` buffer array declaration (v0.4.8).
+#[derive(Debug, Clone)]
+pub struct SharedArrayInfo {
+    pub name: String,
+    pub size: u32,
+    pub name_span: Span,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallResolution {
     Actor,
@@ -177,6 +186,8 @@ struct ResolveCtx<'a> {
     pending_tap_refs: Vec<PendingTapRef>,
     /// Stable ID allocator (ADR-021).
     id_alloc: IdAllocator,
+    /// Integer const values for buffer index resolution (v0.4.8).
+    const_values: HashMap<String, u32>,
 }
 
 impl<'a> ResolveCtx<'a> {
@@ -190,6 +201,7 @@ impl<'a> ResolveCtx<'a> {
                 tasks: HashMap::new(),
                 binds: HashMap::new(),
                 buffers: HashMap::new(),
+                shared_arrays: HashMap::new(),
                 call_resolutions: HashMap::new(),
                 task_resolutions: HashMap::new(),
                 probes: Vec::new(),
@@ -202,6 +214,7 @@ impl<'a> ResolveCtx<'a> {
             pending_buffer_reads: Vec::new(),
             pending_tap_refs: Vec::new(),
             id_alloc: IdAllocator::new(),
+            const_values: HashMap::new(),
         }
     }
 
@@ -218,6 +231,10 @@ impl<'a> ResolveCtx<'a> {
     // ── Pass 1: collect globals ─────────────────────────────────────────
 
     fn collect_globals(&mut self, program: &Program) {
+        // Pre-scan: collect integer const values for shared-array size and buffer index resolution.
+        self.const_values = crate::spawn::collect_integer_consts_from(&program.statements);
+        let const_values = self.const_values.clone();
+
         for (i, stmt) in program.statements.iter().enumerate() {
             match &stmt.kind {
                 StatementKind::Const(c) => {
@@ -335,7 +352,31 @@ impl<'a> ResolveCtx<'a> {
                         );
                     }
                 }
-                StatementKind::Set(_) | StatementKind::Shared(_) => {}
+                StatementKind::Shared(decl) => {
+                    let name = &decl.name.name;
+                    // Check name collision with existing shared arrays
+                    if self.resolved.shared_arrays.contains_key(name) {
+                        self.error(
+                            codes::E0034,
+                            decl.name.span,
+                            format!("duplicate shared array '{}'", name),
+                        );
+                    } else {
+                        // Resolve size to integer
+                        let size = Self::resolve_shape_dim_to_u32(&decl.size, &const_values);
+                        if let Some(size) = size {
+                            self.resolved.shared_arrays.insert(
+                                name.clone(),
+                                SharedArrayInfo {
+                                    name: name.clone(),
+                                    size,
+                                    name_span: decl.name.span,
+                                },
+                            );
+                        }
+                    }
+                }
+                StatementKind::Set(_) => {}
             }
         }
 
@@ -390,8 +431,41 @@ impl<'a> ResolveCtx<'a> {
             }
         }
 
+        // Shared array name collisions with other namespaces
+        for (name, sa) in &self.resolved.shared_arrays {
+            if self.resolved.consts.contains_key(name) {
+                collision_errors.push((
+                    sa.name_span,
+                    format!("'{}' is defined as both a const and a shared array", name),
+                ));
+            }
+            if self.resolved.params.contains_key(name) {
+                collision_errors.push((
+                    sa.name_span,
+                    format!("'{}' is defined as both a param and a shared array", name),
+                ));
+            }
+            if self.resolved.binds.contains_key(name) {
+                collision_errors.push((
+                    sa.name_span,
+                    format!("'{}' is defined as both a bind and a shared array", name),
+                ));
+            }
+        }
+
         for (span, message) in collision_errors {
             self.error(codes::E0005, span, message);
+        }
+    }
+
+    /// Resolve a `ShapeDim` to a concrete u32 size using the const value map.
+    fn resolve_shape_dim_to_u32(
+        dim: &ShapeDim,
+        const_values: &HashMap<String, u32>,
+    ) -> Option<u32> {
+        match dim {
+            ShapeDim::Literal(n, _) => Some(*n),
+            ShapeDim::ConstRef(ident) => const_values.get(&ident.name).copied(),
         }
     }
 
@@ -512,11 +586,14 @@ impl<'a> ResolveCtx<'a> {
                     self.resolve_actor_call(call, scope, taps);
                 }
                 PipeSource::BufferRead(ref buffer_ref) => {
-                    self.pending_buffer_reads.push((
-                        buffer_ref.name.name.clone(),
-                        task_name.clone(),
-                        buffer_ref.name.span,
-                    ));
+                    let resolved_buf = self.resolve_buffer_ref(buffer_ref, &task_name, false);
+                    if let Some(buf_name) = resolved_buf {
+                        self.pending_buffer_reads.push((
+                            buf_name,
+                            task_name.clone(),
+                            buffer_ref.name.span,
+                        ));
+                    }
                 }
                 PipeSource::TapRef(ident) => {
                     if let Some(info) = taps.get_mut(&ident.name) {
@@ -574,30 +651,204 @@ impl<'a> ResolveCtx<'a> {
 
             // Sink
             if let Some(sink) = &line.sink {
-                let buf_name = &sink.buffer.name.name;
-                let buf_span = sink.buffer.name.span;
-                if let Some(existing) = self.resolved.buffers.get(buf_name) {
-                    if existing.writer_task != task_name {
-                        self.error(
-                            codes::E0010,
-                            buf_span,
-                            format!(
-                                "multiple writers to shared buffer '{}': first written by task '{}' (offset {})",
-                                buf_name, existing.writer_task, existing.writer_span.start
-                            ),
+                let resolved_buf = self.resolve_buffer_ref(&sink.buffer, &task_name, true);
+                if let Some(buf_name) = resolved_buf {
+                    let buf_span = sink.buffer.name.span;
+                    if let Some(existing) = self.resolved.buffers.get(&buf_name) {
+                        if existing.writer_task != task_name {
+                            self.error(
+                                codes::E0010,
+                                buf_span,
+                                format!(
+                                    "multiple writers to shared buffer '{}': first written by task '{}' (offset {})",
+                                    buf_name, existing.writer_task, existing.writer_span.start
+                                ),
+                            );
+                        }
+                        // Same task writing same buffer from multiple lines is OK
+                    } else {
+                        self.resolved.buffers.insert(
+                            buf_name,
+                            BufferInfo {
+                                writer_task: task_name.clone(),
+                                writer_span: buf_span,
+                                readers: Vec::new(),
+                            },
                         );
                     }
-                    // Same task writing same buffer from multiple lines is OK
-                } else {
-                    self.resolved.buffers.insert(
-                        buf_name.clone(),
-                        BufferInfo {
-                            writer_task: task_name.clone(),
-                            writer_span: buf_span,
-                            readers: Vec::new(),
-                        },
-                    );
                 }
+            }
+        }
+    }
+
+    /// Resolve a `BufferRef` to its resolved buffer name.
+    ///
+    /// For plain buffers (`BufferIndex::None`): returns the buffer name as-is.
+    /// For element refs (`name[i]`): validates against shared array, returns `"name__i"`.
+    /// For star refs (`name[*]`): validates against shared array, returns all
+    ///   element buffer names registered individually.
+    /// For ident refs (`name[CONST]`): resolves const to integer, then as element.
+    ///
+    /// Returns `None` on error (diagnostic already emitted).
+    /// `is_sink` indicates this is a write (sink) rather than a read (source).
+    fn resolve_buffer_ref(
+        &mut self,
+        buffer_ref: &BufferRef,
+        task_name: &str,
+        is_sink: bool,
+    ) -> Option<String> {
+        let family_name = &buffer_ref.name.name;
+        let span = buffer_ref.name.span;
+
+        match &buffer_ref.index {
+            BufferIndex::None => {
+                // Plain buffer reference — same as before.
+                Some(family_name.clone())
+            }
+            BufferIndex::Literal(i, idx_span) => {
+                let sa = match self.resolved.shared_arrays.get(family_name) {
+                    Some(sa) => sa,
+                    None => {
+                        self.error(
+                            codes::E0032,
+                            span,
+                            format!(
+                                "buffer subscript on '{}' which is not a shared array",
+                                family_name
+                            ),
+                        );
+                        return None;
+                    }
+                };
+                if *i >= sa.size {
+                    self.error(
+                        codes::E0031,
+                        *idx_span,
+                        format!(
+                            "index {} out of bounds for shared array '{}' (size {})",
+                            i, family_name, sa.size
+                        ),
+                    );
+                    return None;
+                }
+                Some(format!("{}__{}", family_name, i))
+            }
+            BufferIndex::Ident(ident) => {
+                // Resolve const identifier to integer index.
+                // After spawn expansion, spawn index variables are already substituted.
+                // Only const-based indexing remains here.
+                let sa = match self.resolved.shared_arrays.get(family_name) {
+                    Some(sa) => sa,
+                    None => {
+                        self.error(
+                            codes::E0032,
+                            span,
+                            format!(
+                                "buffer subscript on '{}' which is not a shared array",
+                                family_name
+                            ),
+                        );
+                        return None;
+                    }
+                };
+                // Look up the const value
+                if !self.resolved.consts.contains_key(&ident.name) {
+                    self.error(
+                        codes::E0015,
+                        ident.span,
+                        format!("undefined const '{}' used as buffer index", ident.name),
+                    );
+                    return None;
+                }
+                // We need the actual integer value. Check against const_values
+                // from the program (stored during collect_globals pre-scan).
+                // Since we don't store const values in ResolvedProgram, we need
+                // to re-derive them. Store a copy in ResolveCtx.
+                let idx = match self.const_values.get(&ident.name) {
+                    Some(v) => *v,
+                    None => {
+                        self.error(
+                            codes::E0035,
+                            ident.span,
+                            format!(
+                                "const '{}' cannot be used as buffer index (must resolve to a non-negative integer)",
+                                ident.name
+                            ),
+                        );
+                        return None;
+                    }
+                };
+                if idx >= sa.size {
+                    self.error(
+                        codes::E0031,
+                        ident.span,
+                        format!(
+                            "index {} (from const '{}') out of bounds for shared array '{}' (size {})",
+                            idx, ident.name, family_name, sa.size
+                        ),
+                    );
+                    return None;
+                }
+                Some(format!("{}__{}", family_name, idx))
+            }
+            BufferIndex::Star(star_span) => {
+                let sa = match self.resolved.shared_arrays.get(family_name) {
+                    Some(sa) => sa.clone(),
+                    None => {
+                        self.error(
+                            codes::E0032,
+                            span,
+                            format!(
+                                "buffer subscript on '{}' which is not a shared array",
+                                family_name
+                            ),
+                        );
+                        return None;
+                    }
+                };
+                // For star refs, register individual element buffers
+                if is_sink {
+                    // Check for writer conflicts with element writers
+                    for i in 0..sa.size {
+                        let elem_name = format!("{}__{}", family_name, i);
+                        if let Some(existing) = self.resolved.buffers.get(&elem_name) {
+                            self.error(
+                                codes::E0033,
+                                *star_span,
+                                format!(
+                                    "star write '-> {}[*]' conflicts with element write '-> {}[{}]' in task '{}' (offset {})",
+                                    family_name, family_name, i, existing.writer_task, existing.writer_span.start
+                                ),
+                            );
+                            return None;
+                        }
+                    }
+                    // Register all element buffers as written by this task
+                    for i in 0..sa.size {
+                        let elem_name = format!("{}__{}", family_name, i);
+                        self.resolved.buffers.insert(
+                            elem_name,
+                            BufferInfo {
+                                writer_task: task_name.to_string(),
+                                writer_span: *star_span,
+                                readers: Vec::new(),
+                            },
+                        );
+                    }
+                } else {
+                    // Read: register pending reads for all elements
+                    for i in 0..sa.size {
+                        let elem_name = format!("{}__{}", family_name, i);
+                        self.pending_buffer_reads.push((
+                            elem_name,
+                            task_name.to_string(),
+                            *star_span,
+                        ));
+                    }
+                }
+                // Return the family name as the "resolved" name for star refs.
+                // Downstream phases will see `name[*]` and know to use all elements.
+                Some(family_name.clone())
             }
         }
     }
@@ -1741,5 +1992,141 @@ clock 1kHz t {
         );
         assert_eq!(buf_info.readers.len(), 1);
         assert_eq!(buf_info.readers[0].0, "t");
+    }
+
+    // ── v0.4.8: Shared array resolve ────────────────────────────────
+
+    #[test]
+    fn shared_array_registration() {
+        let r = resolve_ok("const CH = 4\nshared buf[CH]");
+        let sa = r.shared_arrays.get("buf").expect("shared array 'buf'");
+        assert_eq!(sa.size, 4);
+        assert_eq!(sa.name, "buf");
+    }
+
+    #[test]
+    fn shared_array_literal_size() {
+        let r = resolve_ok("shared buf[8]");
+        let sa = r.shared_arrays.get("buf").expect("shared array 'buf'");
+        assert_eq!(sa.size, 8);
+    }
+
+    #[test]
+    fn shared_array_element_write_read() {
+        let reg = test_registry();
+        let r = resolve_ok_with(
+            "shared buf[4]\nclock 1kHz writer {\n  constant(0) -> buf[0]\n}\nclock 1kHz reader {\n  @buf[0] | stdout()\n}",
+            &reg,
+        );
+        let info = r.buffers.get("buf__0").expect("element buffer 'buf__0'");
+        assert_eq!(info.writer_task, "writer");
+        assert_eq!(info.readers.len(), 1);
+        assert_eq!(info.readers[0].0, "reader");
+    }
+
+    #[test]
+    fn shared_array_index_out_of_bounds() {
+        let reg = test_registry();
+        let result = resolve_source(
+            "shared buf[2]\nclock 1kHz w {\n  constant(0) -> buf[5]\n}",
+            &reg,
+        );
+        let errs = errors(&result);
+        assert!(
+            errs.iter().any(|d| d.code == Some(codes::E0031)),
+            "expected E0031 (index out of bounds), got: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn shared_array_subscript_on_non_array() {
+        let reg = test_registry();
+        let result = resolve_source("clock 1kHz w {\n  constant(0) -> buf[0]\n}", &reg);
+        let errs = errors(&result);
+        assert!(
+            errs.iter().any(|d| d.code == Some(codes::E0032)),
+            "expected E0032 (subscript on non-array), got: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn shared_array_star_write() {
+        let reg = test_registry();
+        let r = resolve_ok_with(
+            "shared buf[3]\nclock 1kHz w {\n  constant(0) -> buf[*]\n}",
+            &reg,
+        );
+        for i in 0..3 {
+            let name = format!("buf__{}", i);
+            assert!(r.buffers.contains_key(&name), "missing {}", name);
+            assert_eq!(r.buffers[&name].writer_task, "w");
+        }
+    }
+
+    #[test]
+    fn shared_array_star_read() {
+        let reg = test_registry();
+        let r = resolve_ok_with(
+            "shared buf[3]\nclock 1kHz w {\n  constant(0) -> buf[*]\n}\nclock 1kHz reader {\n  @buf[*] | stdout()\n}",
+            &reg,
+        );
+        for i in 0..3 {
+            let name = format!("buf__{}", i);
+            let info = r
+                .buffers
+                .get(&name)
+                .unwrap_or_else(|| panic!("missing {}", name));
+            assert!(info.readers.iter().any(|(t, _)| t == "reader"));
+        }
+    }
+
+    #[test]
+    fn shared_array_duplicate_name() {
+        let result = resolve_source("shared buf[2]\nshared buf[4]", &Registry::new());
+        let errs = errors(&result);
+        assert!(
+            errs.iter().any(|d| d.code == Some(codes::E0034)),
+            "expected E0034 (duplicate shared array), got: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn shared_array_name_collides_with_const() {
+        let result = resolve_source("const buf = 1\nshared buf[4]", &Registry::new());
+        let errs = errors(&result);
+        assert!(
+            errs.iter().any(|d| d.code == Some(codes::E0005)),
+            "expected E0005 (name collision), got: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn shared_array_const_index() {
+        let reg = test_registry();
+        let r = resolve_ok_with(
+            "const IDX = 1\nshared buf[4]\nclock 1kHz w {\n  constant(0) -> buf[IDX]\n}",
+            &reg,
+        );
+        let info = r.buffers.get("buf__1").expect("element buffer 'buf__1'");
+        assert_eq!(info.writer_task, "w");
+    }
+
+    #[test]
+    fn shared_array_star_writer_conflicts_with_element_writer() {
+        let reg = test_registry();
+        let result = resolve_source(
+            "shared buf[3]\nclock 1kHz w1 {\n  constant(0) -> buf[0]\n}\nclock 1kHz w2 {\n  constant(0) -> buf[*]\n}",
+            &reg,
+        );
+        let errs = errors(&result);
+        assert!(
+            errs.iter().any(|d| d.code == Some(codes::E0033)),
+            "expected E0033 (star/element conflict), got: {:?}",
+            errs
+        );
     }
 }

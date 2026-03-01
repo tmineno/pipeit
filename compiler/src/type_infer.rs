@@ -1112,6 +1112,7 @@ mod tests {
             defines: HashMap::new(),
             tasks: HashMap::new(),
             buffers: HashMap::new(),
+            shared_arrays: HashMap::new(),
             call_resolutions: HashMap::new(),
             task_resolutions: HashMap::new(),
             probes: vec![],
