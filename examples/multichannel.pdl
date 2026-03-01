@@ -1,0 +1,31 @@
+# multichannel.pdl — Multi-channel acquisition with gather
+# ========================================================
+# Demonstrates: shared buffer arrays, spawn clause for static
+#               task replication, element refs, star ref gather.
+#
+# Pattern: N independent capture tasks write to a shared buffer
+#          array; a single processing task gathers all channels.
+
+set mem = 64MB
+set overrun = drop
+
+# Number of channels
+const CH = 4
+
+# Per-channel FIR filter coefficients
+const lp_coeff = [0.25, 0.5, 0.25]
+
+# Shared buffer array: one element per channel
+shared raw[CH]
+
+# Spawn CH capture tasks — each writes to its own element.
+# capture[0] writes to raw[0], capture[1] to raw[1], etc.
+clock 48kHz capture[ch=0..CH] {
+    sine<float>(1000.0, 1.0) | fir<float>(lp_coeff) -> raw[ch]
+}
+
+# Single processing task gathers all channels via @raw[*]
+# and outputs the interleaved result.
+clock 48kHz process {
+    @raw[*] | stdout<float>()
+}
