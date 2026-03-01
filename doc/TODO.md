@@ -35,8 +35,8 @@
 |---|---:|---:|---|
 | build_lir/complex | ≤ 10,000 ns | **6,400** | **PASS** |
 | emit_cpp/complex | ≤ 9,000 ns | **7,600** | **PASS** |
-| analyze/complex | ≤ 8,500 ns | **9,650** | MISS |
-| full_compile regression | no regression | ~43,000 | **PASS** |
+| analyze/complex | ≤ 8,500 ns | **9,200** | MISS (-4.7% from 9,650) |
+| full_compile regression | no regression | ~41,000 | **PASS** |
 
 ---
 
@@ -51,16 +51,22 @@
 
 ### M2: Analyze Phase Optimization (main remaining gate)
 
-> Target: `analyze/complex ≤ 8,500 ns/iter` (current: 9,650 — needs ~12% reduction)
+> Target: `analyze/complex ≤ 8,500 ns/iter` (current: **9,200** — needs ~8% more reduction)
 
-Priority order (highest expected impact first):
+Completed:
 
-1. [ ] Merge repeated per-node passes (`record_span_derived_dims` + `check_unresolved_frame_dims` + `check_dim_source_conflicts`) into one subgraph traversal
-2. [ ] Remove `subgraphs_of()` Vec allocation churn in analyze hot paths (use non-alloc traversal helper or cached flat list)
-3. [ ] Cache per-actor dim metadata (symbol list / param index / shape-constraint index) once per node, reuse across all checks
-4. [ ] Introduce reusable per-actor symbolic-dimension lookup plans (shared by span-derived and conflict checks)
+- [x] Merge `check_unresolved_frame_dims` + `check_dim_source_conflicts` into single `check_node_dim_constraints` — single `actor_meta()` call, single shape-dim pass, inline param/sc-index computation
+- [x] Cache `subgraphs_of()` results as `all_subgraphs` field in `AnalyzeCtx` — eliminates ~22 Vec allocations per compile
+- [x] Remove 4 helper functions: `unique_symbolic_dims`, `param_index_by_name`, `shape_constraint_index_by_symbol`, `first_symbolic_dim_name`
 
-Note: `node_actor_meta` HashMap precomputation was tested and reverted — adds overhead for small graphs (~10 nodes). These items target reducing pass count and allocation overhead instead.
+Result: 9,200 ns (3× median), -4.7% from 9,650 ns. Improvement is real but smaller than estimated (~450 ns vs ~1,950 ns projected). Likely causes: optimizer already inlines actor_meta; HashMap construction cost for 1–3 entries is cheap; `std::mem::take` borrow-checker workaround adds per-call overhead.
+
+Remaining (not yet attempted):
+
+- [ ] Merge `record_span_derived_dims` iteration with `check_shape_constraints` (would require restructuring the span-derived → infer-shapes → check-constraints dependency chain)
+- [ ] Profile-guided analysis: identify actual hot spots with `perf`/`flamegraph` to guide further optimization
+
+Note: `node_actor_meta` HashMap precomputation was tested and reverted — adds overhead for small graphs (~10 nodes).
 
 ### M3: build_lir Stretch Goals (gate passed — incremental improvements)
 
@@ -90,7 +96,7 @@ Note: `node_actor_meta` HashMap precomputation was tested and reverted — adds 
 - [x] `build_lir/complex ≤ 10k ns` — **PASS** (6,400)
 - [x] `emit_cpp/complex ≤ 9k ns` — **PASS** (7,600)
 - [ ] `analyze/complex ≤ 8.5k ns` — requires M2
-- [x] `full_compile/{complex,modal}` no regression — **PASS** (~43k, reconciled in M1)
+- [x] `full_compile/{complex,modal}` no regression — **PASS** (~41k after M2)
 - [x] Stable 3× median runs recorded in `tmp/build-lir-benchmark-fix/report.md`
 - [ ] Parallel compile speedup gate (opt-in `--compile-jobs`): requires M4
 
