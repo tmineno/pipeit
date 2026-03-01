@@ -1821,7 +1821,7 @@ impl<'a> AnalyzeCtx<'a> {
             // Check slot_bytes alignment (must be multiple of 8)
             if let Some(slot_bytes_val) = self.find_named_number(&ep.args, "slot_bytes") {
                 let v = slot_bytes_val as u64;
-                if v > 0 && v % 8 != 0 {
+                if v > 0 && !v.is_multiple_of(8) {
                     self.error_with_hint(
                         codes::E0726,
                         span,
