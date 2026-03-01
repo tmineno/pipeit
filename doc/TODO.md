@@ -24,94 +24,7 @@
 | v0.4.5 | — | PSHM bind transport (`pipit_shm.h`, codegen lowering, SHM benchmark, cross-process example); phase latency optimization (all 4 gates PASS), analyze/build_lir/emit_cpp hot-path rewrites, benchmark infrastructure (build cache, parallel compile, quick mode), 667 tests |
 | v0.4.6 | — | Bind infrastructure polish: interface manifest opt-in (`--emit interface`, `--interface-out`) |
 | v0.4.7 | — | RingBuffer wait-loop: hybrid polling (spin→yield→sleep), time-based timeout (`set wait_timeout`), `WaitResult` enum (ADR-036), C++20 upgrade, 728 tests |
-
----
-
-## v0.4.7 - RingBuffer Wait-Loop & Timeout Policy
-
-**Goal**: Replace busy-retry wait loops in inter-task ringbuf edges with blocking wait primitives and time-based timeouts. See review note: `agent-review/pipeit-refactor/2026-03-01-ringbuf-wait-loop-scheduler-review.md`.
-
-### M1: Mechanical — Wait-Policy Plumbing (no behavior change)
-
-- [x] Add `WaitResult` enum (`ready | timeout | stopped`) in `pipit.h`
-- [x] Add `wait_readable(reader_idx, tokens, stop, timeout)` and `wait_writable(tokens, stop, timeout)` stubs in `RingBuffer` (return `ready` immediately, no-op)
-- [x] Add wait-policy config types in codegen/THIR (plumbing only, not wired)
-- [x] ADR for wait-loop policy contract (ADR-036, hybrid polling rationale, timeout semantics)
-
-### M2: Behavior Change — Hybrid Polling Wait + Timeout
-
-- [x] Implement hybrid polling (spin → yield → sleep) in `RingBuffer::wait_readable` / `wait_writable`
-- [x] Switch codegen `emit_lir_buffer_read` / `emit_lir_buffer_write` to emit wait-enabled loop shape
-- [x] Replace attempt-based timeout (1,000,000 retries) with time-based timeout (default 50 ms, `set wait_timeout`)
-- [x] Add runtime tests: empty/full transitions, stop signaling, timeout, concurrent producer/consumer stress
-- [x] Upgrade default C++ standard to C++20
-
-### M3: Optimization — Tuning & Benchmarks
-
-- [x] Benchmark wait-enabled vs old retry-yield loops (ringbuf contention, timer jitter, deadline miss)
-- [x] Tune hybrid spin/yield/sleep thresholds based on benchmark data
-- [x] Record benchmark results in `doc/performance/`
-
-### M4: v0.4.7 Close
-
-- [x] All compiler tests pass (`cargo test`) — 728 tests
-- [x] All runtime tests pass (including new wait-loop tests) — 12 suites, 19 ringbuf tests
-- [x] Ringbuf contention benchmark recorded — wait-enabled 1.8M items/s, comparable to raw 1.4M items/s
-
----
-
-## v0.4.8 - Multi-Channel Spawn & Shared Buffer Array
-
-**Goal**: Implement `shared` buffer arrays (family), spawn clause for static task replication, element/full-array references (`name[idx]` / `name[*]`), and gather/scatter semantics. See lang spec §5.3.1, §5.4.5, §5.7, §11.6, §13.2.3.
-
-### M1: Parse & AST (mechanical — no behavior change)
-
-- [x] Lexer: add `shared` keyword, `*` (star) token, `..` (range dots) token
-- [x] Parser: `shared_stmt` → `'shared' IDENT '[' shape_dim ']'`
-- [x] Parser: `spawn_clause` → `'[' IDENT '=' range_expr ']'` on `task_stmt`
-- [x] Parser: `buffer_ref` → `IDENT` / `IDENT '[' index_expr ']'` / `IDENT '[' '*' ']'` in `pipe_source` and `sink`
-- [x] AST node types: `SharedDecl`, `SpawnClause`, `BufferRef(name, index)` with `BufferIndex::None | Literal(u32) | Ident(String) | Star`
-- [x] Unit tests: parse round-trip for `shared`, spawn, element ref, star ref
-
-### M2: Spawn Expansion (new compiler pass — before name resolve)
-
-- [x] Implement spawn expansion pass: expand `clock name[idx=begin..end]` into N independent `clock` tasks (`name[0]` … `name[N-1]`)
-- [x] Substitute spawn index variable in actor arguments and buffer subscripts within each expanded task body
-- [x] Validate spawn range: `begin < end`, both non-negative compile-time integers; emit diagnostic on violation
-- [x] Insert pass into pipeline between parse and resolve (spec §8: "spawn 展開は name resolve / 型推論 / SDF 解析の前に実行")
-- [x] Unit tests: expansion output, index substitution, range validation errors
-
-### M3: Shared Buffer Array — Name Resolution & Validation
-
-- [x] Register `shared` declarations in resolve scope; resolve `name[idx]` to individual buffer elements
-- [x] Resolve `name[*]` to gather/scatter virtual port referencing all family elements
-- [x] Compile-time index range check: `0 <= idx < N`, emit diagnostic for out-of-bounds
-- [x] Extend single-writer constraint to family elements; reject `-> name[*]` + `-> name[idx]` conflicts
-- [x] Unit tests: resolution, index range errors, writer conflict errors
-
-### M4: SDF Graph & Analysis — Shape Lift & Family Constraints
-
-- [x] SDF graph construction: `name[idx]` as independent shared-buffer edge; `name[*]` as gather/scatter virtual node
-- [x] GatherRead/ScatterWrite NodeKind variants with SDF rate equations
-- [x] Rate constraints for `name[*]`: gather production_rate = element_count; scatter consumption_rate = element_count
-- [x] Exhaustive match fixups across analyze.rs, dot.rs, timing.rs, lir.rs
-- [x] Diagnostics: E-codes E0026-E0035 for spawn/shared errors (spec §7)
-
-### M5: Schedule & Codegen
-
-- [x] Schedule generation for spawned tasks (each expanded task scheduled independently)
-- [x] LIR: LirGatherIo/LirScatterIo types with per-element buffer metadata
-- [x] Codegen: `@name[idx]` / `-> name[idx]` emit same C++ as plain shared buffers (element-wise)
-- [x] Codegen: `@name[*]` (gather) — emit sequential reads from `name[0]..name[N-1]` into contiguous frame
-- [x] Codegen: `-> name[*]` (scatter) — emit slice-and-write from contiguous frame to each element
-- [x] Integration tests: shared_element_simple, spawn_basic, gather_read, scatter_write
-- [x] Fix spawn CallId aliasing (H2 violation) and star ref buffer registration
-
-### M6: v0.4.8 Close
-
-- [x] All compiler tests pass (`cargo test`) — 770 tests
-- [x] Spec updates: lang spec §5.4.5 non-negative, pcc spec phase table + diagnostic catalog
-- [x] Spawn expansion + gather/scatter codegen verified via integration tests
+| v0.4.8 | — | Multi-channel spawn & shared buffer arrays: `shared` arrays, `spawn` clause, element/star refs (`name[idx]`/`name[*]`), gather/scatter codegen, E0026-E0035, 770 tests |
 
 ---
 
@@ -207,7 +120,7 @@
 
 ## Key References
 
-- **Pipeline**: `parse → resolve → build_hir → type_infer → lower → graph → ThirContext → analyze → schedule → LIR → codegen`
+- **Pipeline**: `parse → spawn_expand → resolve → build_hir → type_infer → lower → graph → ThirContext → analyze → schedule → LIR → codegen`
 - **ADRs**: 007 (shape), 009/010/014 (perf), 012 (KPI), 013 (PPKT), 016 (polymorphism), 020–023 (v0.4.0 arch), 028–030 (memory), 032–033 (PP manifest), 036 (ringbuf wait-loop)
 - **Spec is source of truth** over code; versioned specs frozen at tag points
 - **Measure before optimizing** — performance characterization informs priorities
