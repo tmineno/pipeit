@@ -33,7 +33,40 @@
 
 ---
 
-## v0.4.7 - Compiler Latency Stretch & Parallelization
+## v0.4.7 - RingBuffer Wait-Loop & Timeout Policy
+
+**Goal**: Replace busy-retry wait loops in inter-task ringbuf edges with blocking wait primitives and time-based timeouts. See review note: `agent-review/pipeit-refactor/2026-03-01-ringbuf-wait-loop-scheduler-review.md`.
+
+### M1: Mechanical — Wait-Policy Plumbing (no behavior change)
+
+- [ ] Add `WaitResult` enum (`ready | timeout | stopped`) in `pipit.h`
+- [ ] Add `wait_readable(reader_idx, tokens, stop, timeout)` and `wait_writable(tokens, stop, timeout)` stubs in `RingBuffer` (return `ready` immediately, no-op)
+- [ ] Add wait-policy config types in codegen/THIR (plumbing only, not wired)
+- [ ] ADR for wait-loop policy contract (Option C rationale, fallback strategy, timeout semantics)
+
+### M2: Behavior Change — Atomic Wait/Notify + Fallback
+
+- [ ] Implement `atomic_wait`/`atomic_notify` path in `RingBuffer::wait_readable` / `wait_writable` (C++20)
+- [ ] Implement hybrid-polling fallback path (`spin → yield → sleep`) when `atomic_wait` unavailable
+- [ ] Switch codegen `emit_lir_buffer_read` / `emit_lir_buffer_write` to emit wait-enabled loop shape
+- [ ] Replace attempt-based timeout (1,000,000 retries) with time-based timeout (default 50 ms)
+- [ ] Add runtime tests: empty/full transitions, stop signaling, timeout, concurrent producer/consumer stress
+
+### M3: Optimization — Tuning & Benchmarks
+
+- [ ] Benchmark wait-enabled vs old retry-yield loops (ringbuf contention, timer jitter, deadline miss)
+- [ ] Tune hybrid spin/yield/sleep thresholds based on benchmark data
+- [ ] Record benchmark results in `doc/performance/`
+
+### M4: v0.4.7 Close
+
+- [ ] All compiler tests pass (`cargo test`)
+- [ ] All runtime tests pass (including new wait-loop tests)
+- [ ] Ringbuf contention benchmark shows improvement over v0.4.5 baseline
+
+---
+
+## v0.4.8 - Compiler Latency Stretch & Parallelization
 
 **Goal**: build_lir stretch optimizations and multi-threaded compilation.
 
@@ -51,7 +84,7 @@
 - [ ] Determinism guardrails: stable sort, deterministic diagnostics, byte-identical C++
 - [ ] Auto-disable parallel path for tiny programs where overhead exceeds benefit
 
-### M3: v0.4.7 Close
+### M3: v0.4.8 Close
 
 - [ ] Parallel compile speedup gate
 - [ ] Stable 3× median runs recorded
