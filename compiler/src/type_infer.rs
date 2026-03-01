@@ -277,6 +277,14 @@ impl<'a> TypeInferEngine<'a> {
             HirPipeSource::BufferRead(name, _span) => {
                 upstream_type.or_else(|| self.buffer_types.get(name.as_str()).copied())
             }
+            HirPipeSource::GatherRead { family_name, .. } => {
+                // For gather read, look up any element buffer type (they should all match)
+                upstream_type.or_else(|| {
+                    self.buffer_types
+                        .get(format!("{family_name}__0").as_str())
+                        .copied()
+                })
+            }
             HirPipeSource::TapRef(name, _span) => {
                 upstream_type.or_else(|| self.tap_types.get(name.as_str()).copied())
             }

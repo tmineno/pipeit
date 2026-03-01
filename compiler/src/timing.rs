@@ -197,6 +197,8 @@ fn node_label(kind: &NodeKind) -> String {
         NodeKind::Probe { probe_name } => format!("probe({probe_name})"),
         NodeKind::BufferRead { buffer_name } => format!("read({buffer_name})"),
         NodeKind::BufferWrite { buffer_name } => format!("write({buffer_name})"),
+        NodeKind::GatherRead { family_name, .. } => format!("gather({family_name})"),
+        NodeKind::ScatterWrite { family_name, .. } => format!("scatter({family_name})"),
     }
 }
 

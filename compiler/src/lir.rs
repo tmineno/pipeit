@@ -1625,6 +1625,18 @@ impl<'a> LirBuilder<'a> {
                     self.build_buffer_write(task_name, sched, node, buffer_name, edge_bufs, adj);
                 LirFiringKind::BufferWrite(io)
             }
+            NodeKind::GatherRead {
+                family_name,
+                element_count,
+            } => {
+                todo!("M5: gather LIR for {}[*] ({})", family_name, element_count)
+            }
+            NodeKind::ScatterWrite {
+                family_name,
+                element_count,
+            } => {
+                todo!("M5: scatter LIR for {}[*] ({})", family_name, element_count)
+            }
         }
     }
 

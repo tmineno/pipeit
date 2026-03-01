@@ -338,13 +338,20 @@ impl<'a> AnalyzeCtx<'a> {
             NodeKind::Actor { name, .. } => {
                 self.actor_meta(name).and_then(|m| m.out_type.as_concrete())
             }
-            NodeKind::Fork { .. } | NodeKind::Probe { .. } | NodeKind::BufferWrite { .. } => {
+            NodeKind::Fork { .. }
+            | NodeKind::Probe { .. }
+            | NodeKind::BufferWrite { .. }
+            | NodeKind::ScatterWrite { .. } => {
                 // Trace backwards to find upstream actor
                 self.trace_type_backward(node.id, sub)
             }
             NodeKind::BufferRead { buffer_name } => {
                 // Find the writer task's BufferWrite and trace back from there
                 self.infer_buffer_type(buffer_name)
+            }
+            NodeKind::GatherRead { family_name, .. } => {
+                // Infer type from first element buffer
+                self.infer_buffer_type(&format!("{family_name}__0"))
             }
         }
     }
@@ -355,12 +362,15 @@ impl<'a> AnalyzeCtx<'a> {
             NodeKind::Actor { name, .. } => {
                 self.actor_meta(name).and_then(|m| m.in_type.as_concrete())
             }
-            NodeKind::Fork { .. } | NodeKind::Probe { .. } | NodeKind::BufferRead { .. } => {
+            NodeKind::Fork { .. }
+            | NodeKind::Probe { .. }
+            | NodeKind::BufferRead { .. }
+            | NodeKind::GatherRead { .. } => {
                 // Passthrough: input type == output type, trace backward
                 self.trace_type_backward(node.id, sub)
             }
-            NodeKind::BufferWrite { .. } => {
-                // BufferWrite accepts whatever type the upstream produces
+            NodeKind::BufferWrite { .. } | NodeKind::ScatterWrite { .. } => {
+                // BufferWrite/ScatterWrite accepts whatever type the upstream produces
                 self.trace_type_backward(node.id, sub)
             }
         }
@@ -426,6 +436,10 @@ impl<'a> AnalyzeCtx<'a> {
                     self.inferred_shapes.get(&node.id),
                 )
             }
+            // GatherRead produces element_count tokens on its single output edge
+            NodeKind::GatherRead { element_count, .. } => Some(*element_count),
+            // ScatterWrite produces 1 token per output edge (one per element buffer)
+            NodeKind::ScatterWrite { .. } => Some(1),
             _ => Some(1),
         }
     }
@@ -453,6 +467,10 @@ impl<'a> AnalyzeCtx<'a> {
                     self.inferred_shapes.get(&node.id),
                 )
             }
+            // GatherRead consumes element_count total (1 per incoming inter-task edge)
+            NodeKind::GatherRead { element_count, .. } => Some(*element_count),
+            // ScatterWrite consumes element_count tokens from its single input edge
+            NodeKind::ScatterWrite { element_count, .. } => Some(*element_count),
             _ => Some(1),
         }
     }
@@ -2466,6 +2484,8 @@ fn node_display_name(node: &Node) -> String {
         NodeKind::Probe { probe_name } => format!("?{}", probe_name),
         NodeKind::BufferRead { buffer_name } => format!("@{}", buffer_name),
         NodeKind::BufferWrite { buffer_name } => format!("->{}", buffer_name),
+        NodeKind::GatherRead { family_name, .. } => format!("@{}[*]", family_name),
+        NodeKind::ScatterWrite { family_name, .. } => format!("->{}[*]", family_name),
     }
 }
 

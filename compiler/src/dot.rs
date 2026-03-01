@@ -147,6 +147,8 @@ fn node_label(kind: &NodeKind) -> String {
         NodeKind::Probe { probe_name } => format!("?{probe_name}"),
         NodeKind::BufferRead { buffer_name } => format!("@{buffer_name}"),
         NodeKind::BufferWrite { buffer_name } => format!("->{buffer_name}"),
+        NodeKind::GatherRead { family_name, .. } => format!("@{family_name}[*]"),
+        NodeKind::ScatterWrite { family_name, .. } => format!("->{family_name}[*]"),
     }
 }
 
@@ -158,6 +160,8 @@ fn node_attrs(kind: &NodeKind) -> String {
         NodeKind::Probe { .. } => ("circle", "lightgreen"),
         NodeKind::BufferRead { .. } => ("cylinder", "lightsalmon"),
         NodeKind::BufferWrite { .. } => ("cylinder", "lightsalmon"),
+        NodeKind::GatherRead { .. } => ("cylinder", "lightsalmon"),
+        NodeKind::ScatterWrite { .. } => ("cylinder", "lightsalmon"),
     };
     let label = node_label(kind);
     format!("shape={shape}, style=filled, fillcolor={color}, label=\"{label}\"")
