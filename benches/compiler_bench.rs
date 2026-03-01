@@ -239,33 +239,34 @@ fn bench_graph_phase(c: &mut Criterion, source: &str, registry: &registry::Regis
 }
 
 fn bench_analyze_phase(c: &mut Criterion, source: &str, registry: &registry::Registry) {
-    bench_phase(
-        c,
-        "analyze",
-        || {
-            let ast = parse_ast(source);
-            let mut rr = resolve::resolve(&ast, registry);
-            let hir = hir::build_hir(&ast, &rr.resolved, &mut rr.id_alloc);
-            let gr = graph::build_graph(&hir, &rr.resolved, registry);
-            let tr = type_infer::type_infer(&hir, &rr.resolved, registry);
-            let lr = lower::lower_and_verify(&hir, &rr.resolved, &tr.typed, registry);
-            (rr, hir, gr, tr, lr)
-        },
-        |(rr, hir, gr, tr, lr)| {
-            assert_no_errors("resolve", &rr.diagnostics);
-            assert_no_errors("graph", &gr.diagnostics);
-            let thir = thir::build_thir_context(
-                &hir,
-                &rr.resolved,
-                &tr.typed,
-                &lr.lowered,
-                registry,
-                &gr.graph,
-            );
+    // Build all upstream artifacts once; ThirContext borrows from them so we
+    // cannot use iter_batched (self-referential).  analyze is a pure function
+    // of immutable inputs, so reusing the same inputs is valid.
+    let ast = parse_ast(source);
+    let mut rr = resolve::resolve(&ast, registry);
+    let hir = hir::build_hir(&ast, &rr.resolved, &mut rr.id_alloc);
+    let gr = graph::build_graph(&hir, &rr.resolved, registry);
+    assert_no_errors("resolve", &rr.diagnostics);
+    assert_no_errors("graph", &gr.diagnostics);
+    let tr = type_infer::type_infer(&hir, &rr.resolved, registry);
+    let lr = lower::lower_and_verify(&hir, &rr.resolved, &tr.typed, registry);
+    let thir = thir::build_thir_context(
+        &hir,
+        &rr.resolved,
+        &tr.typed,
+        &lr.lowered,
+        registry,
+        &gr.graph,
+    );
+
+    let mut group = c.benchmark_group("kpi/phase_latency/analyze");
+    group.bench_function("complex", |b| {
+        b.iter(|| {
             let r = analyze::analyze(black_box(&thir), black_box(&gr.graph));
             black_box(&r.analysis);
-        },
-    );
+        });
+    });
+    group.finish();
 }
 
 fn bench_schedule_phase(c: &mut Criterion, source: &str, registry: &registry::Registry) {
@@ -319,6 +320,8 @@ fn bench_codegen_phase(
     registry: &registry::Registry,
     opts: &codegen::CodegenOptions,
 ) {
+    // Legacy composite benchmark (build_thir_context + build_lir + codegen_from_lir).
+    // Kept for trend continuity during migration to decomposed buckets.
     bench_phase(
         c,
         "codegen",
@@ -358,6 +361,119 @@ fn bench_codegen_phase(
                 &gr.graph,
             );
             let lir = lir::build_lir(&thir, &gr.graph, &ar.analysis, &sr.schedule);
+            let result = codegen::codegen_from_lir(
+                black_box(&gr.graph),
+                black_box(&sr.schedule),
+                opts,
+                black_box(&lir),
+            );
+            black_box(&result);
+        },
+    );
+}
+
+// ── Decomposed codegen sub-phase benchmarks ────────────────────────────────
+// Each bucket isolates exactly one function call so that latency attribution
+// is unambiguous. See TODO.md v0.4.5 "Benchmark Decomposition".
+
+fn bench_build_thir_context_phase(c: &mut Criterion, source: &str, registry: &registry::Registry) {
+    bench_phase(
+        c,
+        "build_thir_context",
+        || {
+            let ast = parse_ast(source);
+            let mut rr = resolve::resolve(&ast, registry);
+            let hir = hir::build_hir(&ast, &rr.resolved, &mut rr.id_alloc);
+            let gr = graph::build_graph(&hir, &rr.resolved, registry);
+            let tr = type_infer::type_infer(&hir, &rr.resolved, registry);
+            let lr = lower::lower_and_verify(&hir, &rr.resolved, &tr.typed, registry);
+            (rr, hir, gr, tr, lr)
+        },
+        |(rr, hir, gr, tr, lr)| {
+            assert_no_errors("resolve", &rr.diagnostics);
+            assert_no_errors("graph", &gr.diagnostics);
+            let thir = thir::build_thir_context(
+                black_box(&hir),
+                black_box(&rr.resolved),
+                black_box(&tr.typed),
+                black_box(&lr.lowered),
+                registry,
+                black_box(&gr.graph),
+            );
+            black_box(&thir);
+        },
+    );
+}
+
+fn bench_build_lir_phase(c: &mut Criterion, source: &str, registry: &registry::Registry) {
+    // Build all upstream artifacts once; ThirContext borrows from them so we
+    // cannot use iter_batched (self-referential).  build_lir is a pure
+    // function of immutable inputs, so reusing the same inputs is valid.
+    let ast = parse_ast(source);
+    let mut rr = resolve::resolve(&ast, registry);
+    let hir = hir::build_hir(&ast, &rr.resolved, &mut rr.id_alloc);
+    let gr = graph::build_graph(&hir, &rr.resolved, registry);
+    assert_no_errors("graph", &gr.diagnostics);
+    let tr = type_infer::type_infer(&hir, &rr.resolved, registry);
+    let lr = lower::lower_and_verify(&hir, &rr.resolved, &tr.typed, registry);
+    let thir = thir::build_thir_context(
+        &hir,
+        &rr.resolved,
+        &tr.typed,
+        &lr.lowered,
+        registry,
+        &gr.graph,
+    );
+    let ar = analyze::analyze(&thir, &gr.graph);
+    assert_no_errors("analyze", &ar.diagnostics);
+    let sr = schedule::schedule(&thir, &gr.graph, &ar.analysis);
+    assert_no_errors("schedule", &sr.diagnostics);
+
+    let mut group = c.benchmark_group("kpi/phase_latency/build_lir");
+    group.bench_function("complex", |b| {
+        b.iter(|| {
+            let lir = lir::build_lir(
+                black_box(&thir),
+                black_box(&gr.graph),
+                black_box(&ar.analysis),
+                black_box(&sr.schedule),
+            );
+            black_box(&lir);
+        });
+    });
+    group.finish();
+}
+
+fn bench_emit_cpp_phase(
+    c: &mut Criterion,
+    source: &str,
+    registry: &registry::Registry,
+    opts: &codegen::CodegenOptions,
+) {
+    bench_phase(
+        c,
+        "emit_cpp",
+        || {
+            let ast = parse_ast(source);
+            let mut rr = resolve::resolve(&ast, registry);
+            let hir = hir::build_hir(&ast, &rr.resolved, &mut rr.id_alloc);
+            let gr = graph::build_graph(&hir, &rr.resolved, registry);
+            let tr = type_infer::type_infer(&hir, &rr.resolved, registry);
+            let lr = lower::lower_and_verify(&hir, &rr.resolved, &tr.typed, registry);
+            let thir = thir::build_thir_context(
+                &hir,
+                &rr.resolved,
+                &tr.typed,
+                &lr.lowered,
+                registry,
+                &gr.graph,
+            );
+            let ar = analyze::analyze(&thir, &gr.graph);
+            let sr = schedule::schedule(&thir, &gr.graph, &ar.analysis);
+            let lir = lir::build_lir(&thir, &gr.graph, &ar.analysis, &sr.schedule);
+            (gr, sr, lir)
+        },
+        |(gr, sr, lir)| {
             let result = codegen::codegen_from_lir(
                 black_box(&gr.graph),
                 black_box(&sr.schedule),
@@ -423,6 +539,10 @@ fn bench_kpi_phase_latency(c: &mut Criterion) {
     bench_analyze_phase(c, source, &registry);
     bench_schedule_phase(c, source, &registry);
     bench_codegen_phase(c, source, &registry, &opts);
+    // Decomposed codegen sub-phases (v0.4.5)
+    bench_build_thir_context_phase(c, source, &registry);
+    bench_build_lir_phase(c, source, &registry);
+    bench_emit_cpp_phase(c, source, &registry, &opts);
 }
 
 // KPI: parser scaling vs number of tasks.

@@ -43,12 +43,14 @@ Each report always includes these sections in order:
 2. Commands used
 3. Status (`runtime/e2e`, `compile`)
 4. Full compile latency table (`simple`, `multitask`, `complex`, `modal`)
-5. Runtime deadline miss rate table (`1kHz`, `10kHz`, `48kHz`)
-6. Ring buffer contention table (`1/2/4/8 readers`)
-7. E2E throughput table (pipeline + socket rx)
-8. Stable KPI table with fixed metric keys
-9. Artifact paths
-10. Machine-readable metrics block
+5. Phase latency table (complex scenario: `build_thir_context`, `build_lir`, `emit_cpp`)
+6. Runtime deadline miss rate table (`1kHz`, `10kHz`, `48kHz`)
+7. Ring buffer contention table (`1/2/4/8 readers`)
+8. E2E throughput table (pipeline + socket rx)
+9. Stable KPI table with fixed metric keys
+10. Artifact paths
+11. Verification commands (stable benchmark reproduction)
+12. Machine-readable metrics block
 
 Path policy:
 
@@ -66,8 +68,9 @@ Numeric display policy:
 - Every stable metric row has:
   - `Value`
   - `Delta vs prev`
-- `Delta vs prev` is computed against the most recently modified previous
-  `*-bench.md` file in this directory (excluding the report being written).
+- `Delta vs prev` is computed against the most recent previous
+  `*-bench.md` file by filename timestamp (reverse lexicographic sort),
+  excluding the report being written.
 - Machine-readable block markers:
   - `<!-- PIPIT_METRICS_BEGIN -->`
   - `<!-- PIPIT_METRICS_END -->`
@@ -86,3 +89,40 @@ Numeric display policy:
 # Explicit id, overwrite existing report
 ./benches/commit_characterize.sh --commit-id <id> --force
 ```
+
+## Gate Decision Methodology
+
+Characterize reports (post-commit hook) use quick settings (`--sample-size 10`,
+`--measurement-time 0.10`) and are intended for **trend monitoring only**.
+They must not be used for gate pass/fail decisions.
+
+Gate decisions use `compiler_bench_stable.sh` with the following protocol:
+
+- **CPU pinning**: `taskset -c 1` (or `$PIPIT_BENCH_CPU`)
+- **Sample size**: 40
+- **Measurement time**: 1.0 s
+- **Warm-up time**: 0.2 s
+- **Runs**: 3 independent runs; take the **median of median estimates**
+
+```bash
+# Gate verification (3× median)
+for i in 1 2 3; do
+  ./benches/compiler_bench_stable.sh \
+    --filter 'kpi/(full_compile_latency|phase_latency)' \
+    --sample-size 40 --measurement-time 1.0 \
+    2>&1 | tee tmp/gate_run${i}.txt
+done
+```
+
+### Benchmark-definition vs algorithmic changes
+
+When a benchmark measurement changes due to a **definition change** (e.g.,
+excluding THIR rebuild from the `build_lir` benchmark closure), the
+reported delta conflates two effects:
+
+1. The measurement scope change (what is being timed)
+2. Any algorithmic improvement applied in the same commit
+
+These must be documented separately in optimization reports. A
+benchmark-definition fix is a measurement hygiene improvement, not an
+algorithmic speedup.

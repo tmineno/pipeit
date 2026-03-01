@@ -321,6 +321,13 @@ pub mod codes {
     pub const E0710: DiagCode = DiagCode("E0710"); // bind: unsupported transport
     pub const E0711: DiagCode = DiagCode("E0711"); // bind: unsupported dtype for PPKT
     pub const E0712: DiagCode = DiagCode("E0712"); // bind: unresolved endpoint argument
+    pub const E0720: DiagCode = DiagCode("E0720"); // shm: missing required `slots` argument
+    pub const E0721: DiagCode = DiagCode("E0721"); // shm: missing required `slot_bytes` argument
+    pub const E0722: DiagCode = DiagCode("E0722"); // shm: `slots` must be > 0
+    pub const E0723: DiagCode = DiagCode("E0723"); // shm: `slot_bytes` must be > 0
+    pub const E0724: DiagCode = DiagCode("E0724"); // shm: missing required name (positional arg)
+    pub const E0725: DiagCode = DiagCode("E0725"); // shm: `slots`/`slot_bytes` must be integer literals
+    pub const E0726: DiagCode = DiagCode("E0726"); // shm: `slot_bytes` must be a multiple of 8
     pub const W0710: DiagCode = DiagCode("W0710"); // bind: no endpoint address (placeholder)
     pub const W0711: DiagCode = DiagCode("W0711"); // bind: dtype unresolved, no I/O adapter
 
@@ -330,7 +337,8 @@ pub mod codes {
         E0014, E0015, E0016, E0017, E0018, E0019, E0020, E0021, E0022, E0023, E0024, E0025, W0001,
         W0002, E0100, E0101, E0102, E0200, E0201, E0202, E0203, E0204, E0205, E0206, E0300, E0301,
         E0302, E0303, E0304, E0305, E0306, E0307, E0308, E0309, E0310, E0311, E0312, W0300, E0400,
-        W0400, E0500, E0600, E0601, E0602, E0603, E0700, E0710, E0711, E0712, W0710, W0711,
+        W0400, E0500, E0600, E0601, E0602, E0603, E0700, E0710, E0711, E0712, E0720, E0721, E0722,
+        E0723, E0724, E0725, E0726, W0710, W0711,
     ];
 }
 
@@ -439,7 +447,8 @@ mod tests {
         // 25 resolve errors + 2 resolve warnings
         // + 3 type_infer + 7 lower + 13 analyze errors + 1 analyze warning
         // + 1 schedule error + 1 schedule warning + 1 graph + 4 pipeline
-        // + 1 usage (E0700) + 3 codegen errors (E0710-E0712) + 2 codegen warnings (W0710-W0711)
-        assert_eq!(codes::ALL_CODES.len(), 64);
+        // + 1 usage (E0700) + 3 codegen errors (E0710-E0712) + 7 shm errors (E0720-E0726)
+        // + 2 codegen warnings (W0710-W0711)
+        assert_eq!(codes::ALL_CODES.len(), 71);
     }
 }

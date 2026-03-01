@@ -1,0 +1,25 @@
+# reader.pdl — SHM shared-memory reader
+# ======================================
+# Consumes samples from shared memory written by writer.pdl and
+# prints them to stdout for verification.
+#
+# The writer process must be started first so the shared-memory
+# segment exists before the reader attaches.
+#
+# Usage:
+#   ./examples/build/shm_writer --duration 2s &
+#   sleep 0.5
+#   ./examples/build/shm_reader --duration 1s
+#
+#   # Override the shm name at runtime:
+#   ./examples/build/shm_reader --bind sig=my_ring --duration 1s
+
+# IN bind: samples read from 'sig' arrive via shared memory.
+# Geometry (slots, slot_bytes) must match the writer.
+bind sig = shm("pipit_demo", slots=64, slot_bytes=1024)
+
+# Receive 256-sample blocks from shared memory and print first/last
+# sample of each block.  Block size (256 floats) matches the writer.
+clock 48kHz consumer {
+    @sig | dump_block()
+}

@@ -17,6 +17,7 @@ COMPILE_TIMEOUT_SEC=30
 COMPILE_SAMPLE_SIZE=10
 COMPILE_MEASUREMENT_TIME=0.10
 COMPILE_WARMUP_TIME=0.05
+QUICK_MODE=false
 
 usage() {
     cat <<'USAGE'
@@ -37,6 +38,7 @@ Options:
   --compile-sample-size <n>      Criterion sample size (default: 10)
   --compile-measurement-time <s> Criterion measurement time in seconds (default: 0.10)
   --compile-warm-up-time <s>     Criterion warm-up time in seconds (default: 0.05)
+  --quick                        Quick mode: shorter runtime benchmarks (~10s vs ~40s)
   --help                         Show this help
 
 Examples:
@@ -230,6 +232,10 @@ while [[ $# -gt 0 ]]; do
             COMPILE_WARMUP_TIME="$2"
             shift 2
             ;;
+        --quick)
+            QUICK_MODE=true
+            shift
+            ;;
         --help)
             usage
             exit 0
@@ -252,10 +258,13 @@ esac
 
 # Skip if HEAD commit does not touch Rust source in compiler/.
 # pre-commit post-commit stage provides no file list, so we check here.
-compiler_rs_changed="$(git -C "$PROJECT_ROOT" diff --name-only HEAD~1 HEAD -- 'compiler/src/*.rs' 'compiler/tests/*.rs' 2>/dev/null || true)"
-if [ -z "$compiler_rs_changed" ]; then
-    log "no compiler Rust source changed in HEAD — skipping"
-    exit 0
+# --force bypasses this check.
+if [ "$FORCE" = false ]; then
+    compiler_rs_changed="$(git -C "$PROJECT_ROOT" diff --name-only HEAD~1 HEAD -- 'compiler/src/*.rs' 'compiler/tests/*.rs' 2>/dev/null || true)"
+    if [ -z "$compiler_rs_changed" ]; then
+        log "no compiler Rust source changed in HEAD — skipping"
+        exit 0
+    fi
 fi
 
 for cmd in git cargo jq timeout sha1sum sed awk; do
@@ -307,21 +316,25 @@ runtime_cmd=(
     --filter timer
     --filter thread
     --filter e2e
+    --filter shm
     --output-dir "$RUNTIME_OUT_DIR"
 )
+if [ "$QUICK_MODE" = true ]; then
+    runtime_cmd+=(--quick)
+fi
 
 compile_cmd=(
     cargo bench
     --manifest-path "$PROJECT_ROOT/compiler/Cargo.toml"
     --bench compiler_bench
-    -- kpi/full_compile_latency
+    -- "kpi/(full_compile_latency|phase_latency/(build_thir_context|build_lir|emit_cpp))"
     --sample-size "$COMPILE_SAMPLE_SIZE"
     --measurement-time "$COMPILE_MEASUREMENT_TIME"
     --warm-up-time "$COMPILE_WARMUP_TIME"
     --output-format bencher
 )
-runtime_cmd_display="benches/run_all.sh --filter ringbuf --filter timer --filter thread --filter e2e --output-dir ${RUNTIME_OUT_DIR_REL}"
-compile_cmd_display="cargo bench --manifest-path compiler/Cargo.toml --bench compiler_bench -- kpi/full_compile_latency --sample-size ${COMPILE_SAMPLE_SIZE} --measurement-time ${COMPILE_MEASUREMENT_TIME} --warm-up-time ${COMPILE_WARMUP_TIME} --output-format bencher"
+runtime_cmd_display="benches/run_all.sh --filter ringbuf --filter timer --filter thread --filter e2e --filter shm --output-dir ${RUNTIME_OUT_DIR_REL}"
+compile_cmd_display="cargo bench --manifest-path compiler/Cargo.toml --bench compiler_bench -- 'kpi/(full_compile_latency|phase_latency/(build_thir_context|build_lir|emit_cpp))' --sample-size ${COMPILE_SAMPLE_SIZE} --measurement-time ${COMPILE_MEASUREMENT_TIME} --warm-up-time ${COMPILE_WARMUP_TIME} --output-format bencher"
 
 log "report id: $COMMIT_ID (source=$ID_SOURCE)"
 log "running runtime/e2e benchmarks..."
@@ -348,6 +361,7 @@ ringbuf_json="$RUNTIME_OUT_DIR/ringbuf_bench.json"
 timer_json="$RUNTIME_OUT_DIR/timer_bench.json"
 thread_json="$RUNTIME_OUT_DIR/thread_bench.json"
 e2e_json="$RUNTIME_OUT_DIR/e2e_bench.json"
+shm_json="$RUNTIME_OUT_DIR/shm_bench.json"
 
 declare -A compile_ns=(
     [simple]="NA"
@@ -356,12 +370,24 @@ declare -A compile_ns=(
     [modal]="NA"
 )
 
+declare -A phase_latency_ns=(
+    [build_thir_context]="NA"
+    [build_lir]="NA"
+    [emit_cpp]="NA"
+)
+
 if [ -f "$COMPILE_LOG" ]; then
     while read -r scenario ns; do
         if [[ -n "${compile_ns[$scenario]+x}" ]]; then
             compile_ns["$scenario"]="$ns"
         fi
     done < <(sed -nE 's/^test kpi\/full_compile_latency\/([^ ]+) .* bench:[[:space:]]*([0-9]+) ns\/iter.*/\1 \2/p' "$COMPILE_LOG")
+    # Extract decomposed phase latency (complex scenario)
+    while read -r phase ns; do
+        if [[ -n "${phase_latency_ns[$phase]+x}" ]]; then
+            phase_latency_ns["$phase"]="$ns"
+        fi
+    done < <(sed -nE 's/^test kpi\/phase_latency\/([^/]+)\/complex .* bench:[[:space:]]*([0-9]+) ns\/iter.*/\1 \2/p' "$COMPILE_LOG")
 fi
 
 socket_error_count="NA"
@@ -371,6 +397,16 @@ if [ -f "$e2e_json" ]; then
     socket_error_message="$(jq -r '[.benchmarks[] | select((.name | startswith("BM_E2E_SocketLoopback/")) and (.error_occurred // false)) | .error_message] | unique | join("; ")' "$e2e_json")"
     if [ -z "$socket_error_message" ] || [ "$socket_error_message" = "null" ]; then
         socket_error_message="-"
+    fi
+fi
+
+shm_error_count="NA"
+shm_error_message="-"
+if [ -f "$shm_json" ]; then
+    shm_error_count="$(jq -r '[.benchmarks[] | select((.name | startswith("BM_SHM_Loopback/")) and (.error_occurred // false))] | length' "$shm_json")"
+    shm_error_message="$(jq -r '[.benchmarks[] | select((.name | startswith("BM_SHM_Loopback/")) and (.error_occurred // false)) | .error_message] | unique | join("; ")' "$shm_json")"
+    if [ -z "$shm_error_message" ] || [ "$shm_error_message" = "null" ]; then
+        shm_error_message="-"
     fi
 fi
 
@@ -396,6 +432,10 @@ add_metric "compile.full.complex_ns_per_iter" "${compile_ns[complex]}" "ns/iter"
 add_metric "compile.full.modal_ns_per_iter" "${compile_ns[modal]}" "ns/iter"
 add_metric "compile.full.wall_ms" "$compile_wall_ms" "ms"
 add_metric "compile.full.timed_out" "$compile_timed_out" "bool(0/1)"
+
+add_metric "compile.phase.build_thir_context_ns_per_iter" "${phase_latency_ns[build_thir_context]}" "ns/iter"
+add_metric "compile.phase.build_lir_ns_per_iter" "${phase_latency_ns[build_lir]}" "ns/iter"
+add_metric "compile.phase.emit_cpp_ns_per_iter" "${phase_latency_ns[emit_cpp]}" "ns/iter"
 
 add_metric "runtime.thread.deadline_1khz_miss_rate_pct" \
     "$(json_value "$thread_json" "BM_TaskDeadline/1000/2000/iterations:1/manual_time" "miss_rate_pct")" \
@@ -454,6 +494,17 @@ add_metric "e2e.socket_1024_rx_samples_per_sec" \
     "samples/s"
 add_metric "e2e.socket_error_count" "$socket_error_count" "count"
 
+add_metric "shm.loopback_64_rx_samples_per_sec" \
+    "$(json_value "$shm_json" "BM_SHM_Loopback/64/iterations:1/manual_time" "rx_samples_per_sec")" \
+    "samples/s"
+add_metric "shm.loopback_256_rx_samples_per_sec" \
+    "$(json_value "$shm_json" "BM_SHM_Loopback/256/iterations:1/manual_time" "rx_samples_per_sec")" \
+    "samples/s"
+add_metric "shm.loopback_1024_rx_samples_per_sec" \
+    "$(json_value "$shm_json" "BM_SHM_Loopback/1024/iterations:1/manual_time" "rx_samples_per_sec")" \
+    "samples/s"
+add_metric "shm.loopback_error_count" "$shm_error_count" "count"
+
 previous_report=""
 if compgen -G "$REPORT_ROOT/*-bench.md" >/dev/null 2>&1; then
     while IFS= read -r candidate; do
@@ -461,7 +512,7 @@ if compgen -G "$REPORT_ROOT/*-bench.md" >/dev/null 2>&1; then
             previous_report="$candidate"
             break
         fi
-    done < <(ls -1t "$REPORT_ROOT"/*-bench.md)
+    done < <(printf '%s\n' "$REPORT_ROOT"/*-bench.md | sort -r)
 fi
 
 declare -A prev_values
@@ -520,6 +571,21 @@ fi
         echo "| $scenario | $(format_si "$cur") | $(metric_delta "$cur" "$prev") |"
     done
     echo ""
+    echo "## Phase Latency (complex scenario)"
+    echo ""
+    echo "| Phase | ns/iter | Delta vs prev |"
+    echo "|---|---:|---:|"
+    for item in \
+        "build_thir_context|compile.phase.build_thir_context_ns_per_iter" \
+        "build_lir|compile.phase.build_lir_ns_per_iter" \
+        "emit_cpp|compile.phase.emit_cpp_ns_per_iter"; do
+        label="${item%%|*}"
+        key="${item##*|}"
+        cur="${metric_values[$key]}"
+        prev="${prev_values[$key]:-}"
+        echo "| $label | $(format_si "$cur") | $(metric_delta "$cur" "$prev") |"
+    done
+    echo ""
     echo "## Runtime Deadline Miss Rate"
     echo ""
     echo "| Clock | miss_rate_pct | Delta vs prev |"
@@ -574,6 +640,26 @@ fi
         echo "- Socket error message: $socket_error_message"
     fi
     echo ""
+    echo "## SHM Throughput"
+    echo ""
+    echo "| Benchmark | rx_samples_per_sec | Delta vs prev |"
+    echo "|---|---:|---:|"
+    for item in \
+        "SHM/64|shm.loopback_64_rx_samples_per_sec" \
+        "SHM/256|shm.loopback_256_rx_samples_per_sec" \
+        "SHM/1024|shm.loopback_1024_rx_samples_per_sec"; do
+        label="${item%%|*}"
+        key="${item##*|}"
+        cur="${metric_values[$key]}"
+        prev="${prev_values[$key]:-}"
+        echo "| $label | $(format_si "$cur") | $(metric_delta "$cur" "$prev") |"
+    done
+    echo ""
+    echo "- SHM benchmark errors: \`$shm_error_count\`"
+    if [ "$shm_error_message" != "-" ]; then
+        echo "- SHM error message: $shm_error_message"
+    fi
+    echo ""
     echo "## KPI Snapshot (Stable Keys)"
     echo ""
     echo "| Key | Value | Unit | Delta vs prev |"
@@ -590,6 +676,16 @@ fi
     echo "- Runtime log: \`${RUNTIME_LOG_REL}\`"
     echo "- Compile log: \`${COMPILE_LOG_REL}\`"
     echo "- Runtime JSON dir: \`${RUNTIME_OUT_DIR_REL}\`"
+    echo ""
+    echo "## Verification"
+    echo ""
+    echo "Reproduce compile measurements with stable settings:"
+    echo ""
+    echo '```bash'
+    echo './benches/compiler_bench_stable.sh \'
+    echo "  --filter 'kpi/(full_compile_latency|phase_latency)' \\"
+    echo '  --sample-size 40 --measurement-time 1.0'
+    echo '```'
     echo ""
     echo "## Machine Readable Metrics"
     echo ""

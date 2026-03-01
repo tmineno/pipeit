@@ -25,7 +25,7 @@ repos:
 
       - id: commit-characterize
         name: commit characterize benchmark
-        entry: ./benches/commit_characterize.sh --id-source head --skip-if-exists
+        entry: ./benches/commit_characterize.sh --id-source head --skip-if-exists --quick
         language: system
         pass_filenames: false
         always_run: true

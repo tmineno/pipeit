@@ -21,72 +21,51 @@
 | v0.4.2 | — | Diagnostics completion: all 10 E0100–E0206 enriched with `cause_chain`, `related_spans`, hints |
 | v0.4.3 | — | Bind-based external integration: `bind` grammar/IR/inference, stable IDs, `--emit interface`, `BindIoAdapter` codegen, runtime rebind |
 | v0.4.4 | — | PP record manifest extraction (ADR-032), `--actor-meta` required (ADR-033, breaking), E0700 diagnostic, 667 tests |
+| v0.4.5 | — | PSHM bind transport (`pipit_shm.h`, codegen lowering, SHM benchmark, cross-process example); phase latency optimization (all 4 gates PASS), analyze/build_lir/emit_cpp hot-path rewrites, benchmark infrastructure (build cache, parallel compile, quick mode), 667 tests |
 
 ---
 
-## v0.4.5 - Shared-Memory Bind Transport (PSHM)
+## v0.4.6 - Bind Infrastructure Polish
 
-**Goal**: Implement `shm(...)` bind transport for multi-process local IPC.
+**Goal**: Remaining bind-layer refinements deferred from v0.4.5.
 
-> Depends on v0.4.3 (merged). Phase 2 (PSHM runtime core) is parallelizable.
-
-### Phase 1: Compiler Surface Alignment
-
-- [ ] Add `shm(name, slots, slot_bytes)` endpoint parsing/validation
-- [ ] Add endpoint option range checks (`slots > 0`, `slot_bytes > 0`)
 - [ ] Change interface manifest to opt-in (`--emit interface`, `--interface-out`)
 
-### Phase 2: PSHM Runtime Core (Protocol v0.1.0)
+---
 
-- [ ] Superblock + slot header binary layout per spec
-- [ ] Single-writer publish (release-store), reader consume (acquire-load + overwrite detection)
-- [ ] Shared-memory object lifecycle (create/open/map/unmap/close)
+## v0.4.7 - Compiler Latency Stretch & Parallelization
 
-### Phase 3: Contract Validation and Attach
+**Goal**: build_lir stretch optimizations and multi-threaded compilation.
 
-- [ ] Validate attach-time contract against compiler-inferred bind contract
-- [ ] Reject mismatched endpoints at startup with diagnostics
-- [ ] Endpoint precedence (`CLI --bind` override vs DSL default)
+### M1: build_lir Stretch Goals (gate passed — incremental)
 
-### Phase 4: Rebind Epoch Semantics
+- [ ] Cache dim-resolution decisions per actor node in `resolve_missing_param_value`
+- [ ] Memoize inferred wire type during subgraph edge-buffer construction
+- [ ] Reduce `String`/`HashMap` churn in schedule-dim override construction
 
-- [ ] Iteration-boundary rebind apply for PSHM endpoints
-- [ ] Epoch fence markers during endpoint switch
-- [ ] Reader resynchronization across epoch transition
+### M2: Compilation Parallelization (measurement-driven, deterministic output)
 
-### Phase 5: Codegen and Runtime Wiring
+- [ ] `--compile-jobs N` with default `1`; keep single-thread baseline
+- [ ] Benchmark matrix for parallel scaling (`N=1,2,4`) on `multitask`, `complex`, `modal`
+- [ ] Parallelize per-task work: `analyze`, `schedule`, `build_lir`, `emit_cpp`
+- [ ] Determinism guardrails: stable sort, deterministic diagnostics, byte-identical C++
+- [ ] Auto-disable parallel path for tiny programs where overhead exceeds benefit
 
-- [ ] Lower `bind ... = shm(...)` to PSHM adapter in generated C++
-- [ ] Keep UDP/Unix datagram and `socket_write`/`socket_read` backward compat
+### M3: v0.4.7 Close
 
-### Phase 6: Verification & Performance
-
-- [ ] Struct layout tests (Superblock=128B, SlotHeader=64B)
-- [ ] Protocol, integration, rebind, determinism tests
-- [ ] Throughput/latency vs UDP baseline → `doc/performance/`
-
-### Exit Criteria
-
-- [ ] Two PDL executables exchange data via `bind ... = shm(...)` on one host
-- [ ] Rebind is atomic at iteration boundary, no mixed-epoch visibility
-- [ ] No regressions in existing UDP/Unix bind or legacy socket actors
+- [ ] Parallel compile speedup gate
+- [ ] Stable 3× median runs recorded
 
 ---
 
 ## v0.5.x - Ecosystem & Quality of Life
 
-**Goal**: Make Pipit easier to use and deploy in real projects.
-
 ### Deferred from v0.4.x: Compiler Latency Profiling & Recovery
 
-> **Reference**: review-0004. Acceptance gate: cold-compile KPI within 10% of v0.3.4 baseline (`7248b44`).
-
 - [ ] Phase benchmarks for `build_hir`, `type_infer`, `lower`, `build_thir`, `build_lir` + `--emit phase-timing`
-- [ ] Explicit timing for `build_thir_context()` (currently untimed)
 - [ ] Formal KPI A/B benchmark against v0.3.4 baseline; record disposition in ADR-031
 - [ ] Remove `LirInterTaskBuffer.skip_writes` and `.reader_tasks` (dead fields)
-- [ ] Whole-program output cache (`cache.rs`): SHA-256 key, `$XDG_CACHE_HOME/pipit/v1/`, skip-cache-if-warnings, `--no-cache`
-- [ ] Deterministic `invalidation_key` hashing (deferred from v0.4.1)
+- [ ] Whole-program output cache (`cache.rs`): SHA-256 key, `$XDG_CACHE_HOME/pipit/v1/`, `--no-cache`
 
 ### Deferred Backlog from v0.3.x–v0.4.x
 
@@ -100,41 +79,13 @@
 - [ ] String/HashMap churn reduction in monomorphization keys (v0.3.4)
 - [ ] Cache PP extraction outputs by header content hash (v0.4.4)
 - [ ] Skip manifest regen when actor-signature set unchanged (v0.4.4)
-- [ ] Re-benchmark two-step manifest workflow (v0.4.4)
-- [ ] KPI exit criteria: complex/modal ≥5% improvement vs v0.3.3, no regressions (v0.3.4)
-- [ ] Task-internal branch parallelization study — safety gate, effect classification, prototype (v0.3.4)
-- [ ] Full provenance tracing through constraint solver (v0.5.x)
-- [ ] Ambiguity/mismatch diagnostics with candidate suggestions (v0.5.x)
 
 ### Standard Actor Library Expansion
 
-#### Phase 2: Signal Processing Basics
-
-- [ ] Simple filters: `lpf`, `hpf`, `notch` (Butterworth/biquad)
-- [ ] Transforms: `ifft(N)`, `rfft(N)` (validate against FFTW)
-- [ ] Windowing: `window(N, type)` — hann, hamming, blackman
-
-#### Phase 3: Advanced Signal Processing
-
-- [ ] WAV file I/O: `wavread(path)`, `wavwrite(path)` (16/24/32-bit PCM)
-- [ ] Advanced filters: `iir(b, a)`, `bpf(low, high, order)`
-- [ ] Resampling: `resample(M, N)`, `interp(N)`, `downsample(N)`
-- [ ] Advanced transforms: `dct(N)`, `hilbert(N)`, `stft(N, hop)`, `istft(N, hop)`
-- [ ] Advanced statistics: `var`, `std`, `xcorr`, `acorr`, `convolve`
-- [ ] Control flow: `gate`, `clipper`, `limiter`, `agc`
-
-#### Infrastructure
-
-- [ ] Per-actor unit test framework + edge case testing (zero, infinity, NaN)
-- [ ] Actor API reference, usage examples, performance docs
-- [ ] Example pipelines: audio effects, SDR, sensor processing
-- [ ] Header split: `io.h`, `filters.h`, etc. + `--actor-path` discovery
-
-#### Performance & Benchmarking
-
-- [ ] Regression detection with statistical comparison, CI integration, flamegraphs
-- [ ] Performance tuning guide (CPU affinity, NUMA, compiler flags)
-- [ ] Extended testing: 24-hour drift test, comparison with GNU Radio
+- [ ] **Phase 2**: `lpf`, `hpf`, `notch` filters; `ifft(N)`, `rfft(N)` transforms; `window(N, type)`
+- [ ] **Phase 3**: WAV I/O, `iir`, `bpf`, resampling, `dct`, `hilbert`, `stft`/`istft`, `var`/`std`/`xcorr`, `gate`/`clipper`/`limiter`/`agc`
+- [ ] **Infra**: per-actor unit tests, API reference, example pipelines, header split + `--actor-path`
+- [ ] **Perf**: regression detection, CI flamegraphs, 24-hour drift test
 
 ### Runtime & Build
 
@@ -158,10 +109,9 @@
 
 ### Legacy Text Scanner Removal (deferred from v0.4.4)
 
-- [ ] Migrate 54 `load_header()` call sites (17 files) to golden manifest
+- [ ] Migrate 54 `load_header()` call sites to golden manifest
 - [ ] Rewrite registry.rs scanner-specific unit tests
 - [ ] Delete dead functions: `load_header`, `scan_actors`, `strip_comments`, `parse_actor_macro`
-- [ ] Mark as breaking API change (`refactor!:`)
 - See review note: `agent-review/pipeit-clang/2026-02-28-text-scanner-removal-plan.md`
 
 ### Production Capabilities
@@ -176,6 +126,6 @@
 ## Key References
 
 - **Pipeline**: `parse → resolve → build_hir → type_infer → lower → graph → ThirContext → analyze → schedule → LIR → codegen`
-- **ADRs**: 007 (shape inference), 009/010/014 (perf), 012 (KPI), 013 (PPKT), 015 (spec alignment), 016 (polymorphism), 017 (port-rate), 020–023 (v0.4.0 arch), 028–030 (memory), 032–033 (PP manifest)
+- **ADRs**: 007 (shape), 009/010/014 (perf), 012 (KPI), 013 (PPKT), 016 (polymorphism), 020–023 (v0.4.0 arch), 028–030 (memory), 032–033 (PP manifest)
 - **Spec is source of truth** over code; versioned specs frozen at tag points
 - **Measure before optimizing** — performance characterization informs priorities

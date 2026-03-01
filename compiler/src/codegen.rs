@@ -22,7 +22,7 @@ use crate::graph::*;
 use crate::lir::{
     fmt_bind_value, LirActorArg, LirActorFiring, LirBind, LirBindArg, LirBindValue, LirBufferIo,
     LirConstValue, LirCtrlSource, LirFiring, LirFiringGroup, LirFiringKind, LirFusedChain,
-    LirHoistedActor, LirModalBody, LirProbeFiring, LirProgram, LirSubgraph, LirTaskBody,
+    LirHoistedActor, LirModalBody, LirProbeFiring, LirProgram, LirSubgraph, LirTask, LirTaskBody,
     LirTimerSpin,
 };
 use crate::registry::PipitType;
@@ -84,6 +84,10 @@ struct CodegenCtx<'a> {
     diagnostics: Vec<Diagnostic>,
     /// Bind names that passed transport+dtype guards and had adapters emitted.
     lowered_binds: HashSet<String>,
+    /// Bind names lowered as SHM (uses `_shm_io_` prefix instead of `_bind_io_`).
+    lowered_shm_binds: HashSet<String>,
+    /// Precomputed task name → LIR task index for O(1) lookup.
+    task_index: HashMap<&'a str, usize>,
 }
 
 impl<'a> CodegenCtx<'a> {
@@ -93,15 +97,38 @@ impl<'a> CodegenCtx<'a> {
         options: &'a CodegenOptions,
         lir: &'a LirProgram,
     ) -> Self {
+        let task_index: HashMap<&str, usize> = lir
+            .tasks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.name.as_str(), i))
+            .collect();
+        // Estimate output size: ~200 bytes per task + 2K base
+        let estimated_size = 2048 + lir.tasks.len() * 200;
         CodegenCtx {
             graph,
             schedule,
             options,
             lir,
-            out: String::with_capacity(8192),
+            out: String::with_capacity(estimated_size),
             diagnostics: Vec::new(),
             lowered_binds: HashSet::new(),
+            lowered_shm_binds: HashSet::new(),
+            task_index,
         }
+    }
+
+    /// O(1) LIR task lookup by name, replacing repeated linear scans.
+    fn lir_task(&self, task_name: &str) -> Option<&'a LirTask> {
+        self.task_index.get(task_name).map(|&i| &self.lir.tasks[i])
+    }
+
+    /// Return `indent` + 4 spaces, reusing a pre-allocated buffer.
+    fn indent_plus4(&self, indent: &str) -> String {
+        let mut s = String::with_capacity(indent.len() + 4);
+        s.push_str(indent);
+        s.push_str("    ");
+        s
     }
 
     fn build_result(self) -> CodegenResult {
@@ -146,6 +173,9 @@ impl<'a> CodegenCtx<'a> {
         self.out.push_str("#include <pipit_shell.h>\n");
         if !self.lir.binds.is_empty() {
             self.out.push_str("#include <pipit_bind_io.h>\n");
+        }
+        if self.lir.binds.iter().any(|b| b.transport == "shm") {
+            self.out.push_str("#include <pipit_shm.h>\n");
         }
         self.out.push_str("#include <cstdio>\n");
         self.out.push('\n');
@@ -369,6 +399,56 @@ impl<'a> CodegenCtx<'a> {
         0
     }
 
+    /// Extract a named integer argument from bind args.
+    fn extract_named_int(args: &[LirBindArg], name: &str) -> Option<i64> {
+        args.iter().find_map(|a| match a {
+            LirBindArg::Named(k, LirBindValue::Int(n)) if k == name => Some(*n),
+            _ => None,
+        })
+    }
+
+    /// Extract the SHM positional name argument, resolving const idents.
+    fn extract_shm_positional_name(bind: &LirBind, consts: &[crate::lir::LirConst]) -> String {
+        for arg in &bind.args {
+            if let LirBindArg::Positional(val) = arg {
+                return match val {
+                    LirBindValue::String(s) => s.clone(),
+                    LirBindValue::Ident(name) => {
+                        // Resolve const reference
+                        consts
+                            .iter()
+                            .find_map(|c| {
+                                if c.name == *name {
+                                    if let crate::lir::LirConstValue::Scalar { literal } = &c.value
+                                    {
+                                        // Strip surrounding quotes from C++ literal
+                                        let s = literal.trim_matches('"');
+                                        Some(s.to_string())
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_default()
+                    }
+                    _ => String::new(),
+                };
+            }
+        }
+        String::new()
+    }
+
+    /// Convert a 16-char hex stable_id to a u64 hash for the Superblock.
+    fn stable_id_to_hash(stable_id: &str) -> String {
+        // The stable_id is a 16-char hex string from SHA-256 truncation.
+        // Parse it back to u64 for the Superblock.stable_id_hash field.
+        u64::from_str_radix(&stable_id[..stable_id.len().min(16)], 16)
+            .unwrap_or(0)
+            .to_string()
+    }
+
     // ── Phase 5c: Bind I/O adapters ────────────────────────────────────
 
     fn emit_bind_io_adapters(&mut self) {
@@ -385,7 +465,22 @@ impl<'a> CodegenCtx<'a> {
             transport: String,
         }
 
+        struct ShmAdapterInfo {
+            name: String,
+            is_out: bool,
+            ppkt_dtype: &'static str,
+            rate_hz: f64,
+            slots: i64,
+            slot_bytes: i64,
+            shm_name: String, // resolved shm object name
+            stable_id_hash: String,
+            rank: u8,
+            dims: Vec<u32>,
+            tokens_per_frame: u32,
+        }
+
         let mut adapters: Vec<BindAdapterInfo> = Vec::new();
+        let mut shm_adapters: Vec<ShmAdapterInfo> = Vec::new();
         let mut diags: Vec<Diagnostic> = Vec::new();
 
         // First pass: collect adapter info and diagnostics without &mut self.
@@ -396,8 +491,9 @@ impl<'a> CodegenCtx<'a> {
             };
 
             // Transport guard
+            let is_shm = bind.transport == "shm";
             match bind.transport.as_str() {
-                "udp" | "unix_dgram" => {}
+                "udp" | "unix_dgram" | "shm" => {}
                 other => {
                     diags.push(
                         Diagnostic::new(
@@ -414,7 +510,7 @@ impl<'a> CodegenCtx<'a> {
                 }
             }
 
-            // Dtype guard
+            // Dtype guard (shared by datagram and SHM)
             let ppkt_dtype = match &contract.dtype {
                 Some(dt) => match Self::pipit_type_to_ppkt_dtype(dt) {
                     Some(d) => d,
@@ -492,24 +588,59 @@ impl<'a> CodegenCtx<'a> {
             }
 
             let is_out = contract.direction == BindDirection::Out;
-            let chan_id = Self::bind_chan_id(bind);
             let rate_hz = contract.rate_hz.unwrap_or(-1.0);
 
-            adapters.push(BindAdapterInfo {
-                name: bind.name.clone(),
-                is_out,
-                ppkt_dtype,
-                chan_id,
-                rate_hz,
-                transport: bind.transport.clone(),
-            });
+            if is_shm {
+                // Extract SHM-specific args
+                let shm_name = Self::extract_shm_positional_name(bind, &self.lir.consts);
+                let slots = Self::extract_named_int(&bind.args, "slots").unwrap_or(0);
+                let slot_bytes = Self::extract_named_int(&bind.args, "slot_bytes").unwrap_or(0);
+
+                // Compute stable_id_hash from the hex stable_id
+                let stable_id_hash = Self::stable_id_to_hash(&bind.stable_id);
+
+                let shape = &contract.shape;
+                let rank = shape.len() as u8;
+
+                // tokens_per_frame: product of shape dims, or 1 if no shape
+                let tokens_per_frame = if shape.is_empty() {
+                    1u32
+                } else {
+                    shape.iter().product::<u32>()
+                };
+
+                shm_adapters.push(ShmAdapterInfo {
+                    name: bind.name.clone(),
+                    is_out,
+                    ppkt_dtype,
+                    rate_hz,
+                    slots,
+                    slot_bytes,
+                    shm_name,
+                    stable_id_hash,
+                    rank,
+                    dims: shape.clone(),
+                    tokens_per_frame,
+                });
+            } else {
+                let chan_id = Self::bind_chan_id(bind);
+                adapters.push(BindAdapterInfo {
+                    name: bind.name.clone(),
+                    is_out,
+                    ppkt_dtype,
+                    chan_id,
+                    rate_hz,
+                    transport: bind.transport.clone(),
+                });
+            }
         }
 
         // Flush collected diagnostics
         self.diagnostics.extend(diags);
 
+        // Emit datagram adapters
         if !adapters.is_empty() {
-            self.out.push_str("// ── Bind I/O adapters ──\n");
+            self.out.push_str("// ── Bind I/O adapters (datagram) ──\n");
             for adapter in &adapters {
                 let _ = writeln!(
                     self.out,
@@ -528,6 +659,51 @@ impl<'a> CodegenCtx<'a> {
             self.out.push('\n');
         }
 
+        // Emit SHM adapters
+        if !shm_adapters.is_empty() {
+            self.out.push_str("// ── Bind I/O adapters (SHM) ──\n");
+            for adapter in &shm_adapters {
+                // Emit dims array if non-empty
+                if !adapter.dims.is_empty() {
+                    let dims_str: Vec<String> =
+                        adapter.dims.iter().map(|d| d.to_string()).collect();
+                    let _ = writeln!(
+                        self.out,
+                        "static const uint32_t _shm_dims_{}[] = {{{}}};",
+                        adapter.name,
+                        dims_str.join(", ")
+                    );
+                }
+
+                let dims_arg = if adapter.dims.is_empty() {
+                    "nullptr".to_string()
+                } else {
+                    format!("_shm_dims_{}", adapter.name)
+                };
+
+                let _ = writeln!(
+                    self.out,
+                    "static pipit::shm::ShmIoAdapter _shm_io_{}(\"{}\", {}, {}, {:.1}, {}, {}, \"{}\", {}ULL, {}, {}, {}, &_bind_state_{});",
+                    adapter.name,
+                    escape_cpp_string(&adapter.name),
+                    adapter.is_out,
+                    adapter.ppkt_dtype,
+                    adapter.rate_hz,
+                    adapter.slots,
+                    adapter.slot_bytes,
+                    escape_cpp_string(&adapter.shm_name),
+                    adapter.stable_id_hash,
+                    adapter.rank,
+                    dims_arg,
+                    adapter.tokens_per_frame,
+                    adapter.name,
+                );
+                self.lowered_binds.insert(adapter.name.clone());
+                self.lowered_shm_binds.insert(adapter.name.clone());
+            }
+            self.out.push('\n');
+        }
+
         // Emit _apply_pending_rebinds() with reconnect calls for lowered binds.
         // Lock ordering: release state_->mtx before calling reconnect() (which acquires io_mtx_).
         self.emit_apply_pending_rebinds();
@@ -538,33 +714,69 @@ impl<'a> CodegenCtx<'a> {
             .push_str("static void _apply_pending_rebinds() {\n");
         for bind in &self.lir.binds {
             let lowered = self.lowered_binds.contains(&bind.name);
-            let _ = writeln!(
-                self.out,
-                "    if (_bind_state_{0}.rebind_pending.load(std::memory_order_acquire)) {{\n\
-                 \x20       std::string _new_ep_{0};\n\
-                 \x20       bool _did_rebind_{0} = false;\n\
-                 \x20       {{\n\
-                 \x20           std::lock_guard<std::mutex> _lk(_bind_state_{0}.mtx);\n\
-                 \x20           if (_bind_state_{0}.rebind_pending.load(std::memory_order_relaxed)) {{\n\
-                 \x20               _bind_state_{0}.current_endpoint = std::move(_bind_state_{0}.pending_endpoint);\n\
-                 \x20               _bind_state_{0}.pending_endpoint.clear();\n\
-                 \x20               _bind_state_{0}.rebind_pending.store(false, std::memory_order_release);\n\
-                 \x20               _new_ep_{0} = _bind_state_{0}.current_endpoint;\n\
-                 \x20               _did_rebind_{0} = true;\n\
-                 \x20           }}\n\
-                 \x20       }}",
-                bind.name
-            );
-            if lowered {
+            let is_shm = self.lowered_shm_binds.contains(&bind.name);
+
+            if is_shm {
+                // SHM: three-phase rebind (validate-before-commit, lock-safe, race-safe)
+                // Lock order preserved: state_->mtx released before try_reconnect() acquires io_mtx_.
                 let _ = writeln!(
                     self.out,
-                    "        if (_did_rebind_{0}) {{\n\
-                     \x20           _bind_io_{0}.reconnect(_new_ep_{0});\n\
+                    "    if (_bind_state_{0}.rebind_pending.load(std::memory_order_acquire)) {{\n\
+                     \x20       std::string _snap_ep_{0};\n\
+                     \x20       bool _have_pending_{0} = false;\n\
+                     \x20       {{\n\
+                     \x20           std::lock_guard<std::mutex> _lk(_bind_state_{0}.mtx);\n\
+                     \x20           if (_bind_state_{0}.rebind_pending.load(std::memory_order_relaxed)) {{\n\
+                     \x20               _snap_ep_{0} = _bind_state_{0}.pending_endpoint;\n\
+                     \x20               _have_pending_{0} = true;\n\
+                     \x20           }}\n\
+                     \x20       }}\n\
+                     \x20       if (_have_pending_{0}) {{\n\
+                     \x20           bool _accepted_{0} = _shm_io_{0}.try_reconnect(_snap_ep_{0});\n\
+                     \x20           {{\n\
+                     \x20               std::lock_guard<std::mutex> _lk(_bind_state_{0}.mtx);\n\
+                     \x20               if (_bind_state_{0}.pending_endpoint == _snap_ep_{0}) {{\n\
+                     \x20                   if (_accepted_{0}) {{\n\
+                     \x20                       _bind_state_{0}.current_endpoint = std::move(_snap_ep_{0});\n\
+                     \x20                   }}\n\
+                     \x20                   _bind_state_{0}.pending_endpoint.clear();\n\
+                     \x20                   _bind_state_{0}.rebind_pending.store(false, std::memory_order_release);\n\
+                     \x20               }}\n\
+                     \x20           }}\n\
+                     \x20       }}\n\
+                     \x20   }}",
+                    bind.name
+                );
+            } else {
+                // Datagram: commit-then-reconnect (reconnect always succeeds or enters no-op)
+                let _ = writeln!(
+                    self.out,
+                    "    if (_bind_state_{0}.rebind_pending.load(std::memory_order_acquire)) {{\n\
+                     \x20       std::string _new_ep_{0};\n\
+                     \x20       bool _did_rebind_{0} = false;\n\
+                     \x20       {{\n\
+                     \x20           std::lock_guard<std::mutex> _lk(_bind_state_{0}.mtx);\n\
+                     \x20           if (_bind_state_{0}.rebind_pending.load(std::memory_order_relaxed)) {{\n\
+                     \x20               _bind_state_{0}.current_endpoint = std::move(_bind_state_{0}.pending_endpoint);\n\
+                     \x20               _bind_state_{0}.pending_endpoint.clear();\n\
+                     \x20               _bind_state_{0}.rebind_pending.store(false, std::memory_order_release);\n\
+                     \x20               _new_ep_{0} = _bind_state_{0}.current_endpoint;\n\
+                     \x20               _did_rebind_{0} = true;\n\
+                     \x20           }}\n\
                      \x20       }}",
                     bind.name
                 );
+                if lowered {
+                    let _ = writeln!(
+                        self.out,
+                        "        if (_did_rebind_{0}) {{\n\
+                         \x20           _bind_io_{0}.reconnect(_new_ep_{0});\n\
+                         \x20       }}",
+                        bind.name
+                    );
+                }
+                let _ = writeln!(self.out, "    }}");
             }
-            let _ = writeln!(self.out, "    }}");
         }
         self.out.push_str("}\n\n");
     }
@@ -661,8 +873,7 @@ impl<'a> CodegenCtx<'a> {
         indent: &str,
     ) -> HashMap<NodeId, String> {
         // LIR path: emit tick-level hoisted declarations from pre-resolved LIR data
-        let lir = self.lir;
-        if let Some(lir_task) = lir.tasks.iter().find(|t| t.name == task_name) {
+        if let Some(lir_task) = self.lir_task(task_name) {
             let hoisted_list = collect_lir_tick_hoistable_actors(&lir_task.body);
             let mut hoisted = HashMap::new();
             for (var_name, cpp_name, params) in &hoisted_list {
@@ -756,7 +967,7 @@ impl<'a> CodegenCtx<'a> {
     /// For pipeline tasks, this is the first actor's `out_rate × repetition_count`.
     /// Falls back to 1 for modal tasks or when rates are unavailable.
     fn iteration_stride(&self, task_name: &str) -> u32 {
-        let lir_task = match self.lir.tasks.iter().find(|t| t.name == task_name) {
+        let lir_task = match self.lir_task(task_name) {
             Some(t) => t,
             None => return 1,
         };
@@ -868,8 +1079,7 @@ impl<'a> CodegenCtx<'a> {
                 );
 
                 // Modal dispatch via LIR
-                let lir = self.lir;
-                if let Some(lir_task) = lir.tasks.iter().find(|t| t.name == task_name) {
+                if let Some(lir_task) = self.lir_task(task_name) {
                     if let LirTaskBody::Modal(modal) = &lir_task.body {
                         self.emit_lir_ctrl_source_read(task_name, &modal.ctrl_source, indent);
                         let _ = writeln!(
@@ -877,7 +1087,7 @@ impl<'a> CodegenCtx<'a> {
                             "{}if (_active_mode != -1 && _ctrl != _active_mode) {{",
                             indent
                         );
-                        self.emit_lir_mode_feedback_resets(modal, &format!("{}    ", indent));
+                        self.emit_lir_mode_feedback_resets(modal, &self.indent_plus4(indent));
                         let _ = writeln!(self.out, "{}}}", indent);
                         let _ = writeln!(self.out, "{}_active_mode = _ctrl;", indent);
 
@@ -887,7 +1097,7 @@ impl<'a> CodegenCtx<'a> {
                             self.emit_lir_subgraph(
                                 task_name,
                                 mode_sg,
-                                &format!("{}    ", indent),
+                                &self.indent_plus4(indent),
                                 tick_hoisted_actors,
                             );
                             let _ = writeln!(self.out, "{}    break;", indent);
@@ -913,8 +1123,7 @@ impl<'a> CodegenCtx<'a> {
         tick_hoisted_actors: &HashMap<NodeId, String>,
     ) {
         // LIR path: find the corresponding LIR subgraph and emit from it
-        let lir = self.lir;
-        if let Some(lir_task) = lir.tasks.iter().find(|t| t.name == task_name) {
+        if let Some(lir_task) = self.lir_task(task_name) {
             let lir_sg = match &lir_task.body {
                 LirTaskBody::Pipeline(sg) if label == "pipeline" => Some(sg),
                 LirTaskBody::Modal(modal) => {
@@ -985,8 +1194,7 @@ impl<'a> CodegenCtx<'a> {
         _task_graph: &TaskGraph,
         _task_schedule: &TaskSchedule,
     ) {
-        let lir = self.lir;
-        if let Some(lir_task) = lir.tasks.iter().find(|t| t.name == task_name) {
+        if let Some(lir_task) = self.lir_task(task_name) {
             for fb in &lir_task.feedback_buffers {
                 let _ = writeln!(
                     self.out,
@@ -1000,8 +1208,7 @@ impl<'a> CodegenCtx<'a> {
     // ── Runtime param reads ─────────────────────────────────────────────
 
     fn emit_param_reads(&mut self, task_name: &str, _task_graph: &TaskGraph, indent: &str) {
-        let lir = self.lir;
-        if let Some(lir_task) = lir.tasks.iter().find(|t| t.name == task_name) {
+        if let Some(lir_task) = self.lir_task(task_name) {
             for param in &lir_task.used_params {
                 let _ = writeln!(
                     self.out,
@@ -1253,7 +1460,7 @@ impl<'a> CodegenCtx<'a> {
                 "{}for (int _r = 0; _r < {}; ++_r) {{",
                 indent, firing.repetition
             );
-            (format!("{}    ", indent), true)
+            (self.indent_plus4(indent), true)
         } else {
             (indent.to_string(), false)
         };
@@ -1291,10 +1498,15 @@ impl<'a> CodegenCtx<'a> {
                     })
                     .is_some();
                 if use_recv {
+                    let prefix = if self.lowered_shm_binds.contains(&io.buffer_name) {
+                        "_shm_io_"
+                    } else {
+                        "_bind_io_"
+                    };
                     let _ = writeln!(
                         self.out,
-                        "{}_bind_io_{}.recv({}, {});",
-                        ind, io.buffer_name, io.edge_var, io.total_tokens
+                        "{}{}{}.recv({}, {});",
+                        ind, prefix, io.buffer_name, io.edge_var, io.total_tokens
                     );
                 } else {
                     self.emit_lir_buffer_read(task_name, io, ind);
@@ -1317,10 +1529,15 @@ impl<'a> CodegenCtx<'a> {
                     })
                     .is_some();
                 if use_send {
+                    let prefix = if self.lowered_shm_binds.contains(&io.buffer_name) {
+                        "_shm_io_"
+                    } else {
+                        "_bind_io_"
+                    };
                     let _ = writeln!(
                         self.out,
-                        "{}_bind_io_{}.send({}, {});",
-                        ind, io.buffer_name, io.edge_var, io.total_tokens
+                        "{}{}{}.send({}, {});",
+                        ind, prefix, io.buffer_name, io.edge_var, io.total_tokens
                     );
                 }
                 if !io.skip {
@@ -1367,7 +1584,7 @@ impl<'a> CodegenCtx<'a> {
             "{}for (int _r = 0; _r < {}; ++_r) {{",
             indent, chain.repetition
         );
-        let body_indent = format!("{}    ", indent);
+        let body_indent = self.indent_plus4(indent);
         let ind = body_indent.as_str();
 
         // Emit each firing in the chain
@@ -1382,7 +1599,12 @@ impl<'a> CodegenCtx<'a> {
                             chain
                                 .hoisted_actors
                                 .iter()
-                                .find(|h| h.var_name == format!("_actor_{}", actor.node_id.0))
+                                .find(|h| {
+                                    h.var_name
+                                        .strip_prefix("_actor_")
+                                        .and_then(|s| s.parse::<u32>().ok())
+                                        == Some(actor.node_id.0)
+                                })
                                 .map(|h| h.var_name.as_str())
                         })
                         .or_else(|| actor.hoisted.as_ref().map(|h| h.var_name.as_str()));
@@ -1477,26 +1699,23 @@ impl<'a> CodegenCtx<'a> {
             return input.buffer_var.clone();
         }
 
-        // Multi-input: concatenate slices into local buffer
-        let mut segments: Vec<(String, u32)> = Vec::with_capacity(actor.inputs.len());
-        for input in &actor.inputs {
-            let tokens_per_firing = if rep > 1 {
-                input.tokens / rep
-            } else {
-                input.tokens
-            };
-            let src_expr = if rep > 1 {
-                format!("&{}[_r * {}]", input.buffer_var, tokens_per_firing)
-            } else {
-                input.buffer_var.clone()
-            };
-            segments.push((src_expr, tokens_per_firing));
-        }
-        if segments.is_empty() {
+        // Multi-input: concatenate slices into local buffer.
+        // Compute total tokens first, then emit directly without intermediate Vec.
+        let total_tokens: u32 = actor
+            .inputs
+            .iter()
+            .map(|input| {
+                if rep > 1 {
+                    input.tokens / rep
+                } else {
+                    input.tokens
+                }
+            })
+            .sum();
+        if total_tokens == 0 {
             return "nullptr".to_string();
         }
 
-        let total_tokens: u32 = segments.iter().map(|(_, n)| *n).sum();
         let effective_in = actor.in_rate.unwrap_or(total_tokens);
         let local_in = format!("_in_{}", actor.node_id.0);
         if total_tokens == effective_in {
@@ -1514,16 +1733,27 @@ impl<'a> CodegenCtx<'a> {
         }
 
         let mut offset = 0u32;
-        for (src_expr, tokens) in segments {
+        for input in &actor.inputs {
             if offset >= effective_in {
                 break;
             }
-            let copy_tokens = tokens.min(effective_in - offset);
+            let tokens_per_firing = if rep > 1 {
+                input.tokens / rep
+            } else {
+                input.tokens
+            };
+            let copy_tokens = tokens_per_firing.min(effective_in - offset);
+            // Write src_expr directly to avoid per-input String allocation
+            let src_expr: std::borrow::Cow<'_, str> = if rep > 1 {
+                format!("&{}[_r * {}]", input.buffer_var, tokens_per_firing).into()
+            } else {
+                (&input.buffer_var).into()
+            };
             self.emit_compact_input_copy(
                 indent,
                 &local_in,
                 offset,
-                src_expr.as_str(),
+                &src_expr,
                 copy_tokens,
                 actor.in_type,
             );
@@ -3225,8 +3455,9 @@ clock 48kHz audio {
     #[test]
     fn bind_unsupported_transport_diagnostic() {
         let reg = test_registry();
+        // Use a truly unknown transport (not shm, which is now supported)
         let result = codegen_source(
-            r#"bind iq = shm("test_shm")
+            r#"bind iq = mqtt("test_endpoint")
 clock 48kHz audio {
     constant(0) -> iq
 }"#,
@@ -3241,7 +3472,7 @@ clock 48kHz audio {
             errors
                 .iter()
                 .any(|d| d.code.as_ref().map(|c| c.0) == Some("E0710")),
-            "shm transport should produce E0710 diagnostic, got: {:?}",
+            "unknown transport should produce E0710 diagnostic, got: {:?}",
             errors
         );
         assert!(
@@ -3250,6 +3481,44 @@ clock 48kHz audio {
                 .cpp_source
                 .contains("BindIoAdapter _bind_io_iq("),
             "unsupported transport should not emit adapter instance"
+        );
+    }
+
+    #[test]
+    fn bind_shm_transport_accepted() {
+        let reg = test_registry();
+        let result = codegen_source(
+            r#"bind iq = shm("test_ring", slots=1024, slot_bytes=4096)
+clock 48kHz audio {
+    constant(0) -> iq
+}"#,
+            &reg,
+        );
+        // No E0710 for shm transport
+        let has_e0710 = result
+            .diagnostics
+            .iter()
+            .any(|d| d.code.as_ref().map(|c| c.0) == Some("E0710"));
+        assert!(
+            !has_e0710,
+            "shm transport should NOT produce E0710 diagnostic"
+        );
+        // ShmIoAdapter should be emitted
+        assert!(
+            result
+                .generated
+                .cpp_source
+                .contains("ShmIoAdapter _shm_io_iq("),
+            "shm transport should emit ShmIoAdapter instance, got:\n{}",
+            result.generated.cpp_source
+        );
+        // pipit_shm.h should be included
+        assert!(
+            result
+                .generated
+                .cpp_source
+                .contains("#include <pipit_shm.h>"),
+            "shm bind should include pipit_shm.h"
         );
     }
 

@@ -1,0 +1,30 @@
+# writer.pdl — SHM shared-memory writer
+# ======================================
+# Produces a sine wave and publishes to shared memory.
+#
+# The reader process (reader.pdl) consumes samples from the same
+# shared-memory ring and verifies data integrity.
+#
+# Usage:
+#   # Build both writer and reader via CMake (see examples/build.sh)
+#   # Then run:
+#   ./examples/build/shm_writer --duration 2s &
+#   sleep 0.5   # let writer create the shm segment
+#   ./examples/build/shm_reader --duration 1s
+#
+#   # Or override the shm name at runtime:
+#   ./examples/build/shm_writer --bind sig=my_ring --duration 2s
+
+# OUT bind: samples written to 'sig' are published via shared memory.
+#   - slots=64:         64-slot ring buffer
+#   - slot_bytes=1024:  1024 bytes per slot (256 float samples)
+bind sig = shm("pipit_demo", slots=64, slot_bytes=1024)
+
+param freq = 1000
+param amp  = 1.0
+
+# Generate a 1 kHz sine wave at 48 kHz and publish 256-sample blocks
+# to the shared-memory ring.
+clock 48kHz generator {
+    sine<float>($freq, $amp)[256] -> sig
+}
